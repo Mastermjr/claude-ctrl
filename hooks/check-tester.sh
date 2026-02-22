@@ -73,6 +73,12 @@ CLAUDE_DIR=$(get_claude_dir)
 
 # ============================================================================
 # PHASE 1 — Critical path (must complete in <2s)
+#
+# @deprecated Auto-verify migrated to post-task.sh (PostToolUse:Task). This
+# code is preserved for SubagentStop compatibility if upstream fixes the event.
+# SubagentStop:tester does not reliably fire in Claude Code (confirmed dead in
+# practice). PostToolUse:Task fires after every Task tool call and is the
+# correct hook for detecting tester completions. Issue #150, DEC-PROOF-LIFE-001.
 # ============================================================================
 
 # Check 1: .proof-status exists (tester should have written pending)
@@ -182,6 +188,12 @@ EOF
 fi
 
 # --- Auto-verify: check if tester signals clean verification ---
+# @deprecated Auto-verify migrated to post-task.sh (PostToolUse:Task).
+# This code is preserved for SubagentStop compatibility if upstream fixes
+# the SubagentStop:tester event. See DEC-PROOF-LIFE-001 and issue #150.
+# The logic below is intentionally left functional — if SubagentStop ever
+# fires, this code will still handle auto-verify correctly.
+#
 # Runs in Phase 1 so it completes well within the 15s timeout.
 # Fix 1 (DEC-TESTER-003): accept "needs-verification" in addition to "pending".
 # task-track.sh writes "needs-verification" at implementer dispatch; the tester
