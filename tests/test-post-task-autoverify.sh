@@ -15,6 +15,7 @@
 #   8.  Tester + proof already verified → dedup (no double-write)
 #   9.  Tester + proof-status missing → creates needs-verification (safety net)
 #  10.  Regression: track.sh still invalidates proof-status when no guardian breadcrumb
+#  17.  Session-based trace fallback — marker cleaned by SubagentStop, trace found by session scan
 #
 # @decision DEC-PROOF-LIFE-001
 # @title post-task.sh test suite validates PostToolUse:Task auto-verify migration
@@ -751,6 +752,80 @@ else
     fail_test ".proof-status was deleted"
 fi
 rm -rf "$REPO" "$TRACE"
+
+# ===========================================================================
+# Test 17: Session-based trace fallback — marker gone (simulating SubagentStop race)
+#
+# Contract: when the .active-tester-* marker has been cleaned by SubagentStop's
+#   finalize_trace() before PostToolUse:Task fires, post-task.sh must fall back to
+#   scanning the 5 most recent tester manifests for a matching session_id + project.
+#   If found, it should auto-verify exactly as if the marker were present.
+#
+# DEC-AV-RACE-001: fallback scans tester-* dirs (sorted newest-first, limit 5)
+#   for manifest.json with .session_id == CLAUDE_SESSION_ID and .project == PROJECT_ROOT.
+# ===========================================================================
+
+run_test "T17: session-based fallback — marker gone, trace found by session scan → verified"
+REPO=$(make_temp_repo)
+TRACE=$(mktemp -d "$PROJECT_ROOT/tmp/test-pta-trace-XXXXXX")
+echo "pending|$(date +%s)" > "$REPO/.claude/.proof-status"
+
+_T17_SESSION="t17-session-$$"
+_T17_TRACE_ID="tester-$(date +%s)-t17test"
+_T17_TRACE_DIR="${TRACE}/${_T17_TRACE_ID}"
+
+mkdir -p "${_T17_TRACE_DIR}/artifacts"
+
+# Write summary.md with AUTOVERIFY: CLEAN + High confidence
+cat > "${_T17_TRACE_DIR}/summary.md" <<'SUMMARY_EOF'
+## Verification Assessment
+
+AUTOVERIFY: CLEAN
+
+**Confidence:** **High**
+
+All features verified. Session-based fallback test — no active marker present.
+SUMMARY_EOF
+
+# Write manifest.json with matching session_id and project — but NO .active-tester-* marker
+cat > "${_T17_TRACE_DIR}/manifest.json" <<MANIFEST_EOF
+{
+  "trace_id": "${_T17_TRACE_ID}",
+  "agent_type": "tester",
+  "session_id": "${_T17_SESSION}",
+  "project": "${REPO}",
+  "status": "completed",
+  "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+MANIFEST_EOF
+
+# Deliberately no .active-tester-* marker (simulating SubagentStop cleanup)
+# Verify no marker exists before running
+if ls "${TRACE}/.active-tester-"* 2>/dev/null | grep -q .; then
+    fail_test "Setup error: unexpected active tester markers found before test"
+    rm -rf "$REPO" "$TRACE"
+else
+    (
+        export CLAUDE_PROJECT_DIR="$REPO"
+        export TRACE_STORE="$TRACE"
+        export CLAUDE_SESSION_ID="${_T17_SESSION}"
+        cd "$REPO"
+        echo '{"tool_name":"Task","tool_input":{"subagent_type":"tester","prompt":"verify"}}' \
+            | bash "$POST_TASK_SH" 2>/dev/null
+    ) || true
+
+    if [[ -f "$REPO/.claude/.proof-status" ]]; then
+        STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
+        if [[ "$STATUS" == "verified" ]]; then
+            pass_test
+        else
+            fail_test "Expected 'verified' via session-based fallback, got '$STATUS'"
+        fi
+    else
+        fail_test ".proof-status was deleted (expected verified via session scan)"
+    fi
+    rm -rf "$REPO" "$TRACE"
+fi
 
 # ===========================================================================
 # Syntax check

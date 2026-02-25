@@ -110,6 +110,29 @@ fi
 SUMMARY_TEXT=""
 _AV_TRACE_ID=$(detect_active_trace "$PROJECT_ROOT" "tester" 2>/dev/null || echo "")
 
+# Fallback: marker may have been cleaned by SubagentStop's finalize_trace()
+# before PostToolUse:Task fires. Scan recent tester traces for matching session+project.
+# @decision DEC-AV-RACE-001
+# @title Session-based trace fallback when active marker is gone
+# @status accepted
+# @rationale SubagentStop fires before PostToolUse:Task and finalize_trace() removes
+#   the .active-tester-* marker. Post-task.sh needs the trace to read summary.md.
+#   Scanning the 5 most recent tester manifests for session_id+project match is safe
+#   (session scoping prevents cross-contamination) and fast (5 jq calls max).
+if [[ -z "$_AV_TRACE_ID" && -n "${CLAUDE_SESSION_ID:-}" ]]; then
+    for _dir in $(ls -1d "${TRACE_STORE}/tester-"* 2>/dev/null | sort -r | head -5); do
+        _mf="${_dir}/manifest.json"
+        [[ -f "$_mf" ]] || continue
+        _ms=$(jq -r '.session_id // empty' "$_mf" 2>/dev/null)
+        _mp=$(jq -r '.project // empty' "$_mf" 2>/dev/null)
+        if [[ "$_ms" == "$CLAUDE_SESSION_ID" && "$_mp" == "$PROJECT_ROOT" ]]; then
+            _AV_TRACE_ID=$(basename "$_dir")
+            log_info "POST-TASK" "marker gone — found tester trace by session scan: $_AV_TRACE_ID"
+            break
+        fi
+    done
+fi
+
 if [[ -n "$_AV_TRACE_ID" ]]; then
     _AV_SUMMARY="${TRACE_STORE}/${_AV_TRACE_ID}/summary.md"
     log_info "POST-TASK" "found active tester trace=${_AV_TRACE_ID}"
