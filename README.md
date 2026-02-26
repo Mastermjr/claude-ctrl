@@ -21,17 +21,21 @@ A batteries-included governance layer for Claude Code. Four specialized agents h
 
 ```
 ~/.claude/
-├── hooks/          # Hook scripts and shared libraries
-├── agents/         # 4 agent definitions (Planner, Implementer, Tester, Guardian)
-├── skills/         # 11 skills across 3 domains
-├── commands/       # Slash commands (/compact, /backlog)
-├── scripts/        # 7 utility scripts + lib/
-├── observatory/    # Self-improving trace analysis
-├── traces/         # Agent execution archive
-├── tests/          # Hook validation suite
-├── ARCHITECTURE.md # Definitive technical reference (18 sections)
-├── CLAUDE.md       # Session instructions (loaded every time)
-└── settings.json   # Hook registration + model config
+├── hooks/           # 42 hook scripts and shared libraries
+├── agents/          # 4 agent definitions (Planner, Implementer, Tester, Guardian)
+├── skills/          # 14 skills (8 public, 5 private, 1 submodule)
+├── commands/        # Slash commands (/compact, /backlog)
+├── scripts/         # 9 utility scripts + lib/
+├── observatory/     # Self-improving trace analysis
+├── traces/          # Agent execution archive
+├── tests/           # Hook validation suite (~60 tests)
+├── VISIBILITY.yaml  # Component visibility (public export governance)
+├── ARCHITECTURE.md  # Definitive technical reference (19 sections)
+├── CLAUDE.md        # Session instructions (loaded every time)
+├── CONTRIBUTING.md  # Contribution guidelines
+├── SECURITY.md      # Vulnerability reporting
+├── LICENSE          # MIT
+└── settings.json    # Hook registration + model config
 ```
 
 ---
@@ -342,10 +346,8 @@ REQ-IDs (`REQ-{CATEGORY}-{NNN}`) are assigned during planning. DEC-IDs link to R
 
 | Skill | Purpose |
 |-------|---------|
-| **observatory** | Self-improving flywheel: analyze agent traces, surface improvement signals, suggest configuration updates |
 | **diagnose** | System health check: hook integrity, state file consistency, configuration validation |
 | **rewind** | List and restore git-ref checkpoints created by `checkpoint.sh` |
-| **uplevel** | Six-dimensional repository health audit — security, testing, quality, docs, staleness, standards |
 
 **Research:**
 
@@ -354,7 +356,6 @@ REQ-IDs (`REQ-{CATEGORY}-{NNN}`) are assigned during planning. DEC-IDs link to R
 | **deep-research** | Multi-model research via OpenAI + Perplexity + Gemini with comparative synthesis |
 | **last30days** | Recent community discussions from Reddit, X, and web with engagement metrics |
 | **consume-content** | Structured content analysis and extraction from URLs or documents |
-| **generate-paper-snapshot** | Academic paper analysis and summarization |
 
 **Workflow:**
 
@@ -363,6 +364,8 @@ REQ-IDs (`REQ-{CATEGORY}-{NNN}`) are assigned during planning. DEC-IDs link to R
 | **context-preservation** | Structured summaries for session continuity across compaction |
 | **decide** | Interactive decision configurator — explore trade-offs, costs, effort estimates with filtering UI |
 | **prd** | Deep-dive PRD: problem statement, user journeys, requirements, success metrics |
+
+> Additional private skills exist for maintainer use. See [ARCHITECTURE.md](ARCHITECTURE.md) for the complete catalog.
 
 ### Commands
 
@@ -384,6 +387,8 @@ REQ-IDs (`REQ-{CATEGORY}-{NNN}`) are assigned during planning. DEC-IDs link to R
 | `community-check.sh` | Community engagement monitoring |
 | `batch-fetch.py` | Cascade-proof multi-URL fetching (use for 3+ URLs) |
 | `lib/keychain.py` | macOS keychain integration for API keys |
+| `release-public.sh` | Public export automation from VISIBILITY.yaml |
+| `swap.sh` | Settings config toggle (Metanoia hook consolidation) |
 
 ---
 
@@ -418,6 +423,30 @@ REQ-IDs (`REQ-{CATEGORY}-{NNN}`) are assigned during planning. DEC-IDs link to R
 
 ---
 
+## Visibility & Public Export
+
+This repository is the public subset of a larger private configuration. Components
+are **private by default** — only explicitly public components are included.
+
+**How visibility is declared:**
+- Skills and agents: `visibility: public` in YAML frontmatter
+- Hooks, tests, config, commands: listed in `VISIBILITY.yaml`
+
+**Producing a clean export:**
+```bash
+release-public.sh --dry-run            # preview what exports
+release-public.sh --staging /tmp/out   # build clean staging directory
+release-public.sh --tarball out.tar.gz # package as tarball
+```
+
+Private components (personal tools, API integrations, specialized workflows)
+are excluded automatically. Public hooks may reference private scripts via
+guard patterns — these are silent no-ops in the public export.
+
+For full visibility architecture, see ARCHITECTURE.md §16.
+
+---
+
 ## Troubleshooting
 
 | Issue | Fix |
@@ -441,7 +470,7 @@ To debug a hook: `echo '{"tool_name":"Bash","tool_input":{"command":"git status"
 
 ## References
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — System architecture, 18 sections, design decisions (the authoritative deep-dive)
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — System architecture, 19 sections, design decisions (the authoritative deep-dive)
 - [`hooks/HOOKS.md`](hooks/HOOKS.md) — Full hook reference: protocol, detailed tables, enforcement patterns, state files, shared libraries
 - [`agents/planner.md`](agents/planner.md) — Planning process, research gate, MASTER_PLAN.md format
 - [`agents/implementer.md`](agents/implementer.md) — Test-first workflow, worktree setup, verification checkpoints
@@ -449,3 +478,4 @@ To debug a hook: `echo '{"tool_name":"Bash","tool_input":{"command":"git status"
 - [`agents/guardian.md`](agents/guardian.md) — Approval protocol, merge analysis, phase-boundary plan updates
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — How to contribute
 - [`CHANGELOG.md`](CHANGELOG.md) — Release history
+- [`VISIBILITY.yaml`](VISIBILITY.yaml) — Component visibility registry (public export governance)

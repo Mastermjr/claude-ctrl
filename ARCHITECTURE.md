@@ -27,9 +27,10 @@ together and WHY they're structured this way.
 13. [State File Registry](#13-state-file-registry)
 14. [Data Flow: Feature Request End-to-End](#14-data-flow-feature-request-end-to-end)
 15. [Extension Points](#15-extension-points)
-16. [Anti-Patterns](#16-anti-patterns)
-17. [Decision Log](#17-decision-log)
-18. [Glossary](#18-glossary)
+16. [Visibility System — Public Export Governance](#16-visibility-system--public-export-governance)
+17. [Anti-Patterns](#17-anti-patterns)
+18. [Decision Log](#18-decision-log)
+19. [Glossary](#19-glossary)
 
 ---
 
@@ -56,9 +57,9 @@ State files bridge the gap — hooks communicate with each other through files, 
 
 ```
 ~/.claude/
-├── hooks/                    # Hook scripts and shared libraries
+├── hooks/                    # 42 scripts (36 active + 3 libs + 3 dormant)
 │   ├── guard.sh              # PreToolUse:Bash — 11-check safety gate
-│   ├── doc-freshness.sh      # PreToolUse:Bash — documentation freshness enforcement at merge
+│   ├── doc-freshness.sh      # PreToolUse:Bash — doc freshness enforcement at merge
 │   ├── auto-review.sh        # PreToolUse:Bash — three-tier command classification
 │   ├── branch-guard.sh       # PreToolUse:Write|Edit — main branch protection
 │   ├── doc-gate.sh           # PreToolUse:Write|Edit — documentation enforcement
@@ -67,6 +68,7 @@ State files bridge the gap — hooks communicate with each other through files, 
 │   ├── plan-check.sh         # PreToolUse:Write|Edit — MASTER_PLAN.md enforcement
 │   ├── checkpoint.sh         # PreToolUse:Write|Edit — git ref checkpoints
 │   ├── task-track.sh         # PreToolUse:Task — agent dispatch gates
+│   ├── post-task.sh          # PostToolUse:Task — post-dispatch tracking
 │   ├── track.sh              # PostToolUse:Write|Edit — session change tracking
 │   ├── lint.sh               # PostToolUse:Write|Edit — auto-linting with feedback loop
 │   ├── code-review.sh        # PostToolUse:Write|Edit — complexity advisory
@@ -83,60 +85,76 @@ State files bridge the gap — hooks communicate with each other through files, 
 │   ├── check-implementer.sh  # SubagentStop:implementer — implementation validation
 │   ├── check-tester.sh       # SubagentStop:tester — tester auto-verify
 │   ├── check-guardian.sh     # SubagentStop:guardian — guardian validation
-│   ├── check-explore.sh      # SubagentStop:Explore|explore — Explore agent output validation
-│   ├── check-general-purpose.sh # SubagentStop:general-purpose — general agent output validation
+│   ├── check-explore.sh      # SubagentStop:Explore — Explore agent output validation
+│   ├── check-general-purpose.sh # SubagentStop:general-purpose — general agent validation
 │   ├── surface.sh            # Stop — decision audit
 │   ├── session-summary.sh    # Stop — session summary
 │   ├── forward-motion.sh     # Stop — suggest next steps
 │   ├── session-end.sh        # SessionEnd — cleanup
 │   ├── notify.sh             # Notification — permission/idle alerts
+│   ├── state-registry.sh     # State file lifecycle management
+│   ├── pre-bash.sh           # (Metanoia) consolidated PreToolUse:Bash (dormant)
+│   ├── pre-write.sh          # (Metanoia) consolidated PreToolUse:Write|Edit (dormant)
+│   ├── post-write.sh         # (Metanoia) consolidated PostToolUse:Write|Edit (dormant)
 │   ├── context-lib.sh        # Shared library — context builders, state I/O
 │   ├── log.sh                # Shared library — JSON I/O, path utilities
-│   └── source-lib.sh         # Shared library — bootstrapper for log.sh + context-lib.sh
+│   ├── source-lib.sh         # Shared library — bootstrapper for log.sh + context-lib.sh
+│   └── HOOKS.md              # Hook reference documentation
 ├── agents/                   # 4 agent prompt definitions
-│   ├── planner.md            # Planner agent — MASTER_PLAN.md creation
-│   ├── implementer.md        # Implementer agent — test-first development
-│   ├── tester.md             # Tester agent — e2e verification
-│   └── guardian.md           # Guardian agent — git operations
-├── skills/                   # 11 skill directories
-│   ├── observatory/          # Self-improvement flywheel (analyze, suggest, implement)
-│   ├── deep-research/        # Multi-provider research synthesis
-│   ├── decide/               # Interactive decision configurator
-│   ├── consume-content/      # URL → structured digest
-│   ├── context-preservation/ # Pre-compaction context capture (/compact)
-│   ├── diagnose/             # System health diagnostics
-│   ├── rewind/               # Checkpoint recovery (/rewind)
-│   ├── last30days/           # Recent community activity research
-│   ├── prd/                  # PRD generation
-│   ├── generate-paper-snapshot/ # arXiv paper snapshots
-│   └── uplevel/              # System improvement workflow
+│   ├── planner.md            # Planner — MASTER_PLAN.md creation (visibility: public)
+│   ├── implementer.md        # Implementer — test-first development (visibility: public)
+│   ├── tester.md             # Tester — e2e verification (visibility: public)
+│   └── guardian.md           # Guardian — git operations (visibility: public)
+├── skills/                   # 14 skill directories (8 public, 5 private, 1 submodule)
+│   ├── architect/            # Structural analysis (private)
+│   ├── bazaar/               # Competitive analytical marketplace (private)
+│   ├── consume-content/      # URL → structured digest (public)
+│   ├── context-preservation/ # Pre-compaction context capture (public)
+│   ├── decide/               # Interactive decision configurator (public)
+│   ├── deep-research/        # Multi-provider research synthesis (public)
+│   ├── diagnose/             # System health diagnostics (public)
+│   ├── generate-paper-snapshot/ # arXiv paper snapshots (private)
+│   ├── last30days/           # Recent community activity research (public, submodule)
+│   ├── observatory/          # Self-improvement flywheel (private)
+│   ├── prd/                  # PRD generation (public)
+│   ├── rewind/               # Checkpoint recovery (public)
+│   └── uplevel/              # Repository health audit (private)
 ├── commands/                 # Slash commands (lightweight, no context fork)
 │   ├── backlog.md            # /backlog — GitHub Issues integration
 │   └── compact.md            # /compact — context preservation
-├── scripts/                  # Utility scripts
+├── scripts/                  # 9 utility scripts + lib/
+│   ├── release-public.sh     # Public export automation (VISIBILITY.yaml → staging/tarball)
 │   ├── statusline.sh         # Status bar renderer
 │   ├── worktree-roster.sh    # Worktree lifecycle tracking
-│   ├── todo.sh               # GitHub Issues todo integration (1500+ lines)
+│   ├── todo.sh               # GitHub Issues todo integration
 │   ├── update-check.sh       # Git-based auto-update
 │   ├── community-check.sh    # Community PR/issue monitor
-│   └── batch-fetch.py        # Cascade-proof multi-URL fetcher
-├── traces/                   # Agent trace store
-│   ├── index.jsonl           # Global trace index (one entry per trace)
-│   ├── .active-<type>-<id>   # Active agent markers
-│   └── <trace_id>/           # Per-agent trace directory
-│       ├── manifest.json     # Trace metadata (agent type, project, outcome)
-│       ├── summary.md        # Agent's own summary (≤1500 tokens)
-│       └── artifacts/        # Evidence files (test-output.txt, diff.patch, etc.)
+│   ├── batch-fetch.py        # Cascade-proof multi-URL fetcher
+│   ├── swap.sh               # Settings config toggle (Metanoia)
+│   └── lib/                  # Shared Python utilities (keychain.py)
 ├── observatory/              # Self-improvement state
 │   ├── state.json            # v3 — pending/implemented/rejected suggestions
 │   ├── history.jsonl         # Accepted/rejected suggestion log
-│   ├── analysis-cache.json   # Analysis cache (invalidated on new traces)
-│   └── suggestions/          # Batch assessment files
-├── tests/                    # Hook validation suite
+│   └── analysis-cache.json   # Analysis cache
+├── tests/                    # Hook validation suite (~60 test files)
 │   ├── run-hooks.sh          # Main test runner
 │   ├── fixtures/             # Input/expected-output fixture pairs
-│   └── test-*.sh             # 30+ specialized test scripts
-└── settings.json             # Hook registry — 10 event types
+│   └── test-*.sh             # Specialized test scripts
+├── traces/                   # Agent trace store
+│   ├── index.jsonl           # Global trace index
+│   └── <trace_id>/           # Per-agent trace directories
+├── VISIBILITY.yaml           # Component visibility registry (public export governance)
+├── settings.json             # Hook registry — 10 event types, 29 hook configs
+├── CLAUDE.md                 # Session instructions (v2.1)
+├── ARCHITECTURE.md           # System architecture (this file)
+├── README.md                 # User guide / public overview
+├── CHANGELOG.md              # Release history
+├── CONTRIBUTING.md           # Contribution guidelines
+├── SECURITY.md               # Vulnerability reporting
+├── LICENSE                   # MIT
+├── MASTER_PLAN.md            # Living implementation plan
+├── settings-legacy.json      # Pre-Metanoia settings backup
+└── settings-metanoia.json    # Metanoia consolidated settings (dormant)
 ```
 
 ### Component Diagram
@@ -172,17 +190,20 @@ State files bridge the gap — hooks communicate with each other through files, 
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     Hook System (enforcement layer)                  │
 ├─────────────────────────────────────────────┬───────────────────────┤
-│ PreToolUse (9 hooks)                        │ PostToolUse (7 hooks) │
+│ PreToolUse (10 hooks)                       │ PostToolUse (9 hooks) │
 │                                             │                       │
-│ Bash: guard.sh, auto-review.sh             │ Write|Edit:           │
-│ Write|Edit: test-gate.sh, mock-gate.sh,    │   lint.sh             │
-│   branch-guard.sh, doc-gate.sh,            │   track.sh            │
-│   plan-check.sh, checkpoint.sh             │   code-review.sh      │
-│ Task: task-track.sh                        │   plan-validate.sh    │
-│                                             │   test-runner.sh      │
+│ Bash: guard.sh, doc-freshness.sh,          │ Write|Edit:           │
+│       auto-review.sh                        │   lint.sh             │
+│ Write|Edit: test-gate.sh, mock-gate.sh,    │   track.sh            │
+│   branch-guard.sh, doc-gate.sh,            │   code-review.sh      │
+│   plan-check.sh, checkpoint.sh             │   plan-validate.sh    │
+│ Task: task-track.sh                        │   test-runner.sh      │
 │                                             │ WebFetch:             │
 │                                             │   webfetch-fallback.sh│
 │                                             │ Skill: skill-result.sh│
+│                                             │ Playwright:           │
+│                                             │   playwright-cleanup  │
+│                                             │ Task: post-task.sh    │
 ├─────────────────────────────────────────────┴───────────────────────┤
 │ SessionStart: session-init.sh (startup|resume|clear|compact)        │
 │ UserPromptSubmit: prompt-submit.sh                                  │
@@ -213,7 +234,7 @@ turn 150 identically.
 
 **What you can count on:**
 - Every Write/Edit tool call runs 6 PreToolUse hooks and 5 PostToolUse hooks, in registration order.
-- Every Bash tool call runs 2 PreToolUse hooks (guard.sh, auto-review.sh).
+- Every Bash tool call runs 3 PreToolUse hooks (guard.sh, doc-freshness.sh, auto-review.sh).
 - Every Task tool call runs 1 PreToolUse hook (task-track.sh).
 - A hook that crashes (unhandled error under `set -euo pipefail`) causes deny-on-crash behavior for safety-critical hooks.
 - `exit 0` with no stdout = hook passes silently with no effect.
@@ -356,6 +377,7 @@ with the `additionalContext` injected. `lint.sh` uses this for auto-fix loops.
 | **PostToolUse** | `WebFetch` | After WebFetch | webfetch-fallback.sh |
 | **PostToolUse** | `mcp__playwright__browser_snapshot` | After Playwright snapshot | playwright-cleanup.sh |
 | **PostToolUse** | `Skill` | After skill execution | skill-result.sh |
+| **PostToolUse** | `Task` | After agent dispatch completes | post-task.sh |
 | **PreCompact** | (all) | Before /compact context summarization | compact-preserve.sh |
 | **SubagentStart** | (all) | When any agent begins | subagent-start.sh |
 | **SubagentStop** | `planner\|Plan` | When planner agent completes | check-planner.sh |
@@ -1698,7 +1720,81 @@ Done. Feature merged to main.
 
 ---
 
-## 16. Anti-Patterns
+## 16. Visibility System — Public Export Governance
+
+**What it does:** Governs which components are included in the public export
+(claude-ctrl). Components are private by default — only explicitly marked
+public components ship to the public repository.
+
+**Why it exists:** The ~/.claude repo contains both open-source infrastructure
+and personal tools (todo integration, API keys, specialized research skills).
+Manual backporting between private and public repos was error-prone. The
+visibility system automates clean separation.
+
+**What you can count on:**
+- Components without visibility declaration are PRIVATE (safe default).
+- Skills and agents declare visibility in YAML frontmatter (`visibility: public`).
+- Everything else is governed by VISIBILITY.yaml at the project root.
+- `release-public.sh` merges both sources and produces clean exports.
+- No private file paths appear in the export staging directory.
+
+### Dual Declaration Mechanism
+
+**Frontmatter** — for skills (SKILL.md) and agents (*.md):
+```yaml
+---
+visibility: public
+---
+```
+
+**VISIBILITY.yaml** — for hooks, tests, config, commands:
+```yaml
+public:
+  hooks:
+    - guard.sh
+    - session-init.sh
+  tests:
+    - run-hooks.sh
+    - fixtures/
+```
+
+### release-public.sh
+
+Produces clean public exports from the private repository:
+- `--dry-run` — preview which files would be exported
+- `--staging DIR` — build clean staging directory
+- `--tarball FILE` — package as distributable tarball
+
+The script parses VISIBILITY.yaml + scans frontmatter across skills/agents,
+rsyncs matching files to staging, and runs a leak check to ensure no private
+paths appear in the output.
+
+### Guard Pattern for Interleaved Code
+
+Public hooks (session-init.sh, prompt-submit.sh, etc.) contain private feature
+integration guarded by existence checks:
+```bash
+if [[ -x "$HOME/.claude/scripts/todo.sh" ]]; then
+    TODO_OUTPUT=$("$HOME/.claude/scripts/todo.sh" hud 2>/dev/null)
+fi
+```
+These ship to the public repo but are silent no-ops because the guarded scripts
+don't exist in the export.
+
+### Visibility Distribution
+
+| Category | Public | Private | Total |
+|----------|--------|---------|-------|
+| Skills   | 8      | 5       | 13+1  |
+| Agents   | 4      | 0       | 4     |
+| Hooks    | 19     | 23      | 42    |
+| Tests    | 9      | ~51     | ~60   |
+| Commands | 2      | 0       | 2     |
+| Config   | 6      | ~10     | ~16   |
+
+---
+
+## 17. Anti-Patterns
 
 ### Don't: Rely on instructions alone
 **Problem:** Context window pressure at 100+ turns degrades instruction adherence.
@@ -1734,7 +1830,7 @@ Done. Feature merged to main.
 
 ---
 
-## 17. Decision Log
+## 18. Decision Log
 
 | Decision | File | Status | Summary |
 |----------|------|--------|---------|
@@ -1777,10 +1873,11 @@ Done. Feature merged to main.
 | DEC-OBS-OUTCOME-001 | context-lib.sh | accepted | Expand outcome classification with timeout and skipped states |
 | DEC-OBS-SUG002 | context-lib.sh | accepted | Add .test-status fallback to finalize_trace |
 | DEC-OBS-SUG003 | context-lib.sh | accepted | Add git diff fallback to finalize_trace files_changed count |
+| DEC-VIS-001 | release-public.sh | accepted | VISIBILITY.yaml as single source of truth for non-skill/agent public components |
 
 ---
 
-## 18. Glossary
+## 19. Glossary
 
 **Sacred Practices:** Ten core principles enforced mechanically by hooks. Main is
 Sacred, Nothing Done Until Tested, No /tmp/, etc.
@@ -1838,7 +1935,18 @@ directly so Guardian can commit without waiting for user.
 **Flywheel:** The observatory's self-improvement loop: analyze traces → propose
 improvement → implement → richer traces → better analysis → repeat.
 
+**Visibility:** Component-level declaration (public/private) governing inclusion
+in the public export. Private by default; explicitly marked public components
+ship to claude-ctrl.
+
+**VISIBILITY.yaml:** Registry file at project root listing all public non-frontmatter
+components (hooks, tests, config, commands). Merged with skill/agent frontmatter
+by release-public.sh.
+
+**release-public.sh:** Script that merges VISIBILITY.yaml + frontmatter declarations
+to produce clean public exports with leak checking.
+
 ---
 
-**Last updated:** 2026-02-18
+**Last updated:** 2026-02-26
 **Maintainers:** See CLAUDE.md Cornerstone Belief — Future Implementers rely on this doc
