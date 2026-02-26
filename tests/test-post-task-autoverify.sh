@@ -933,6 +933,113 @@ fi
 rm -rf "$REPO" "$TRACE"
 
 # ===========================================================================
+# Test 19: Keywords in test DESCRIPTIONS should not block auto-verify
+#
+# Contract: When tester summary has "Medium confidence" and "Partially verified"
+#   in test result descriptions (earlier sections, not Verification Assessment),
+#   but the actual Verification Assessment says High confidence + no caveats,
+#   secondary validation must NOT reject. The section-scoped extraction ensures
+#   only the Verification Assessment section is evaluated.
+#
+# Fixture: summary has test descriptions mentioning Medium/Partially in the
+#   Test Results section, but Verification Assessment is clean with High confidence.
+# Expected: proof-status = verified
+#
+# @decision DEC-AV-SECTION-001 (verified by this test)
+# ===========================================================================
+
+run_test "T19: keywords in test descriptions, High confidence in VA section → verified"
+REPO=$(make_temp_repo)
+TRACE=$(mktemp -d "$PROJECT_ROOT/tmp/test-pta-trace-XXXXXX")
+echo "pending|$(date +%s)" > "$REPO/.claude/.proof-status"
+
+SUMMARY=$(cat <<'SUMMARY_EOF'
+## Test Results
+
+- Happy path: AUTOVERIFY: CLEAN + High → verified (T1)
+- Rejection: Medium confidence → pending (T2)
+- Rejection: Partially verified → pending (T3)
+
+## Verification Assessment
+
+### Coverage
+| Area | Status |
+|------|--------|
+| All tests | Fully verified |
+
+### **Confidence:** **High**
+
+All tests pass.
+
+AUTOVERIFY: CLEAN
+SUMMARY_EOF
+)
+
+make_tester_trace "$TRACE" "$REPO" "$SUMMARY" > /dev/null
+run_post_task "tester" "$REPO" "$TRACE"
+
+if [[ -f "$REPO/.claude/.proof-status" ]]; then
+    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
+    if [[ "$STATUS" == "verified" ]]; then
+        pass_test
+    else
+        fail_test "Expected 'verified' (keywords in test descriptions should not block), got '$STATUS'"
+    fi
+else
+    fail_test ".proof-status was deleted"
+fi
+rm -rf "$REPO" "$TRACE"
+
+# ===========================================================================
+# Test 20: Real Medium confidence IN Verification Assessment section → reject
+#
+# Contract: When "Partially verified" and "Medium" confidence appear in the
+#   ACTUAL Verification Assessment section, secondary validation must still
+#   reject. This confirms section-scoping didn't break real rejection paths.
+#
+# Fixture: Verification Assessment has "Partially verified" in coverage table
+#   and "Medium" confidence. No keywords anywhere else.
+# Expected: proof-status = pending (Medium + Partially verified in actual assessment)
+# ===========================================================================
+
+run_test "T20: actual Medium confidence in VA section → stays pending (real rejection path intact)"
+REPO=$(make_temp_repo)
+TRACE=$(mktemp -d "$PROJECT_ROOT/tmp/test-pta-trace-XXXXXX")
+echo "pending|$(date +%s)" > "$REPO/.claude/.proof-status"
+
+SUMMARY=$(cat <<'SUMMARY_EOF'
+## Verification Assessment
+
+### Coverage
+| Area | Status |
+|------|--------|
+| Core | Fully verified |
+| Edge cases | Partially verified |
+
+### **Confidence:** **Medium**
+
+Some tests incomplete.
+
+AUTOVERIFY: CLEAN
+SUMMARY_EOF
+)
+
+make_tester_trace "$TRACE" "$REPO" "$SUMMARY" > /dev/null
+run_post_task "tester" "$REPO" "$TRACE"
+
+if [[ -f "$REPO/.claude/.proof-status" ]]; then
+    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
+    if [[ "$STATUS" == "pending" ]]; then
+        pass_test
+    else
+        fail_test "Expected 'pending' (Medium + Partially verified in VA must still reject), got '$STATUS'"
+    fi
+else
+    fail_test ".proof-status was deleted"
+fi
+rm -rf "$REPO" "$TRACE"
+
+# ===========================================================================
 # Syntax check
 # ===========================================================================
 

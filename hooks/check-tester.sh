@@ -209,16 +209,34 @@ NOT_TESTED_LINES=""
 WHITELISTED_COUNT=0
 
 if [[ "$PROOF_STATUS" == "pending" || "$PROOF_STATUS" == "needs-verification" ]] && echo "$RESPONSE_TEXT" | grep -q 'AUTOVERIFY: CLEAN'; then
+    # --- Extract Verification Assessment section for secondary validation ---
+    # Tester summaries include test descriptions mentioning keywords like
+    # "Medium confidence" or "Partially verified" as test case names. Scoping
+    # validation to the Verification Assessment section eliminates false positives.
+    # See DEC-AV-SECTION-001 in post-task.sh for full rationale.
+    # grep returns exit 1 when no match — || true prevents set -e from killing the script.
+    _CT_VA_START=$(echo "$RESPONSE_TEXT" | grep -n -E '^#{1,3} Verification Assessment' | head -1 | cut -d: -f1 || true)
+    if [[ -n "$_CT_VA_START" ]]; then
+        # Extract from VA heading to EOF. Sub-headings within VA (e.g., "## Confidence: High",
+        # "### Coverage") belong to the assessment and must be included. Stopping at the first
+        # subsequent "##" heading would incorrectly truncate VA sub-headings.
+        _CT_VALIDATION_TEXT=$(echo "$RESPONSE_TEXT" | tail -n +"${_CT_VA_START}")
+        echo "check-tester: extracted Verification Assessment section (${#_CT_VALIDATION_TEXT} chars) for secondary validation" >&2
+    else
+        _CT_VALIDATION_TEXT="$RESPONSE_TEXT"
+        echo "check-tester: no Verification Assessment section found — using full response for validation" >&2
+    fi
+
     # Secondary validation — reject false claims
     # Must have High confidence (markdown bold or plain-text formats)
-    echo "$RESPONSE_TEXT" | grep -qiE '(\*\*High\*\*|[Cc]onfidence:?\s*High|High confidence)' || AV_FAIL=true
+    echo "$_CT_VALIDATION_TEXT" | grep -qiE '(\*\*High\*\*|[Cc]onfidence:?\s*High|High confidence)' || AV_FAIL=true
     # Must NOT have "Partially verified" in coverage
-    echo "$RESPONSE_TEXT" | grep -qi 'Partially verified' && AV_FAIL=true
+    echo "$_CT_VALIDATION_TEXT" | grep -qi 'Partially verified' && AV_FAIL=true
     # Must NOT have non-environmental "Not tested" entries.
     # Environmental gaps (browser viewport, screen reader, physical device, etc.)
     # are whitelisted — they cannot be tested in a headless CLI context and do not
     # indicate incomplete verification of the feature under test.
-    NOT_TESTED_LINES=$(echo "$RESPONSE_TEXT" | grep -iE '(:\s*Not tested|\|\s*Not tested)' || true)
+    NOT_TESTED_LINES=$(echo "$_CT_VALIDATION_TEXT" | grep -iE '(:\s*Not tested|\|\s*Not tested)' || true)
     if [[ -n "$NOT_TESTED_LINES" ]]; then
         ENV_PATTERN='requires browser\|requires viewport\|requires screen reader\|requires mobile\|requires physical device\|requires hardware\|requires manual interaction\|requires human interaction\|requires GUI\|requires native app\|requires network'
         NON_ENV_LINES=$(echo "$NOT_TESTED_LINES" | grep -iv "$ENV_PATTERN" || true)
@@ -227,7 +245,7 @@ if [[ "$PROOF_STATUS" == "pending" || "$PROOF_STATUS" == "needs-verification" ]]
         fi
     fi
     # Must NOT have Medium or Low confidence (markdown bold or plain-text formats)
-    echo "$RESPONSE_TEXT" | grep -qiE '(\*\*(Medium|Low)\*\*|[Cc]onfidence:?\s*(Medium|Low)|(Medium|Low) confidence)' && AV_FAIL=true
+    echo "$_CT_VALIDATION_TEXT" | grep -qiE '(\*\*(Medium|Low)\*\*|[Cc]onfidence:?\s*(Medium|Low)|(Medium|Low) confidence)' && AV_FAIL=true
 
     if [[ "$AV_FAIL" == "false" ]]; then
         ENV_PATTERN='requires browser\|requires viewport\|requires screen reader\|requires mobile\|requires physical device\|requires hardware\|requires manual interaction\|requires human interaction\|requires GUI\|requires native app\|requires network'
