@@ -81,6 +81,12 @@ project's institutional memory.
 | 2026-02-22 | DEC-PROOF-LIFE-001 | proof-lifecycle | New post-task.sh handler for PostToolUse:Task auto-verify | SubagentStop never fires; PostToolUse:Task is the reliable hook event for tester completion |
 | 2026-02-22 | DEC-PROOF-LIFE-002 | proof-lifecycle | Read summary.md via tester breadcrumb instead of last_assistant_message | PostToolUse:Task lacks last_assistant_message; Trace Protocol guarantees summary.md is written before return |
 | 2026-02-22 | DEC-PROOF-LIFE-003 | proof-lifecycle | Preserve SubagentStop hooks as dead code with deprecation annotation | SubagentStop may be fixed upstream; dedup guard (DEC-TESTER-006) prevents double auto-verify if both paths fire |
+| 2026-02-23 | DEC-PROOF-WRITE-001 | proof-lifecycle | Centralized write_proof_status() in log.sh | Eliminates triple-write duplication across 3 callers |
+| 2026-02-23 | DEC-AV-DIAG-001 | proof-lifecycle | Diagnostic breadcrumb on every post-task.sh fire | Confirms hook fires in production; aids debugging |
+| 2026-02-25 | DEC-AV-RACE-001 | proof-lifecycle | Session-based trace fallback when marker cleaned by SubagentStop | SubagentStop fires first, removes marker; scan manifests by session_id+project |
+| 2026-02-25 | DEC-AV-DUAL-001 | proof-lifecycle | Project-scoped summary scan for dual-trace scenarios | Two traces per dispatch; marker on wrong one; scan for summary.md + project match |
+| 2026-02-25 | DEC-AV-DUAL-002 | proof-lifecycle | Remove duplicate tester trace init from task-track.sh | SubagentStart fires reliably; competing trace was root cause of dual-trace |
+| 2026-02-26 | DEC-AV-SECTION-001 | proof-lifecycle | Scope secondary validation to Verification Assessment section | Test descriptions in other sections caused false-positive keyword rejections |
 | 2026-02-22 | DEC-ARCH-001 | architect | Content type detection via detect_content.sh | Testable bash script, consistent with uplevel pattern |
 | 2026-02-22 | DEC-ARCH-002 | architect | Node extraction via multi-pass glob/grep | Deterministic extraction; LLM synthesizes, doesn't extract |
 | 2026-02-22 | DEC-ARCH-003 | architect | Mermaid templates with dynamic population | Templates ensure valid syntax; dynamic generation risks errors |
@@ -1094,8 +1100,9 @@ from registry definitions).
 ---
 
 ### Initiative: Proof-Status Lifecycle Hardening
-**Status:** active
+**Status:** completed
 **Started:** 2026-02-22
+**Completed:** 2026-02-26
 **Goal:** Migrate auto-verify from dead SubagentStop hook to PostToolUse:Task so it fires in production
 
 > Auto-verify is the fast path that bypasses manual user approval when the tester produces a
@@ -1192,16 +1199,49 @@ fixed). Issue #147 resolved.
   check-tester.sh line 170) prevents double auto-verify if upstream fixes SubagentStop and both
   paths fire simultaneously.
 
+- DEC-PROOF-WRITE-001: Centralized write_proof_status() in log.sh.
+  Addresses: REQ-P1-001.
+  Rationale: Triple-write blocks (proof_file, scoped, legacy) were duplicated in 3 callers.
+  Centralized function eliminates divergence risk.
+
+- DEC-AV-RACE-001: Session-based trace fallback when active marker is gone.
+  Addresses: REQ-P0-001.
+  Rationale: SubagentStop fires before PostToolUse:Task and finalize_trace() removes the
+  .active-tester-* marker. Scanning 5 most recent tester manifests for session_id+project
+  match recovers the trace.
+
+- DEC-AV-DUAL-001: Project-scoped summary.md scan for dual-trace scenarios.
+  Addresses: REQ-P0-001.
+  Rationale: Each tester dispatch creates two traces (task-track.sh + subagent-start.sh) with
+  different session_ids. The marker points to the wrong trace (no summary). Scanning recent
+  traces for summary.md + project match finds the correct one.
+
+- DEC-AV-DUAL-002: Remove duplicate tester trace init from task-track.sh.
+  Addresses: REQ-P0-001.
+  Rationale: SubagentStart fires reliably for testers, creating the authoritative trace.
+  task-track.sh's competing trace caused the dual-trace problem.
+
+- DEC-AV-SECTION-001: Scope secondary validation to Verification Assessment section.
+  Addresses: REQ-P0-002.
+  Rationale: Tester summaries include test descriptions mentioning "Medium confidence",
+  "Partially verified", etc. as test case names. Extracting only the VA section for
+  keyword checks eliminates all description-as-status false positives.
+
 #### Phase 1: Auto-Verify Migration
-**Status:** planned
-**Decision IDs:** DEC-PROOF-LIFE-001, DEC-PROOF-LIFE-002, DEC-PROOF-LIFE-003
-**Requirements:** REQ-P0-001, REQ-P0-002, REQ-P0-003, REQ-P0-004, REQ-P0-005, REQ-P0-006
-**Issues:** #150
+**Status:** completed
+**Decision IDs:** DEC-PROOF-LIFE-001, DEC-PROOF-LIFE-002, DEC-PROOF-LIFE-003, DEC-PROOF-WRITE-001, DEC-AV-DIAG-001, DEC-AV-RACE-001, DEC-AV-DUAL-001, DEC-AV-DUAL-002, DEC-AV-SECTION-001
+**Requirements:** REQ-P0-001, REQ-P0-002, REQ-P0-003, REQ-P0-004, REQ-P0-005, REQ-P0-006, REQ-P1-001, REQ-P1-002
+**Issues:** #150, #20
 **Definition of Done:**
-- REQ-P0-001 satisfied: post-task.sh detects tester and reads summary.md
+- REQ-P0-001 satisfied: post-task.sh detects tester and reads summary.md (with 3-tier fallback)
 - REQ-P0-002 satisfied: .proof-status=verified on AUTOVERIFY: CLEAN + High confidence
 - REQ-P0-003 satisfied: AUTO-VERIFIED in additionalContext output
-- REQ-P0-004 satisfied: @deprecated annotation on check-tester.sh Phase 1
+- REQ-P0-004 satisfied: check-tester.sh Phase 1 gated behind CLAUDE_ENABLE_SUBAGENT_AUTOVERIFY
+- REQ-P0-005 satisfied: PostToolUse:Task registered in settings.json (timeout 15s)
+- REQ-P0-006 satisfied: test-post-task-autoverify.sh passes 22 tests
+- REQ-P1-001 satisfied: write_proof_status() centralized in log.sh
+- REQ-P1-002 satisfied: diagnostic breadcrumbs (post_task_fire, auto_verify_rejected with reasons)
+- E2E VERIFIED: auto_verify audit entry observed in production (2026-02-26T18:32:26)
 - REQ-P0-005 satisfied: PostToolUse:Task registered in settings.json
 - REQ-P0-006 satisfied: test-post-task-autoverify.sh passes all cases
 
@@ -1320,286 +1360,19 @@ Main is sacred. Each phase works in its own worktree:
 ---
 
 ### Initiative: /architect Skill -- Content-Agnostic Structural Analysis
-**Status:** active
-**Started:** 2026-02-22
+**Status:** completed
+**Period:** 2026-02-22
 **Goal:** Build a skill that maps the structure of any content path and optionally dispatches analysis to pluggable backends
-
-> Understanding the structure of an unfamiliar codebase or document set requires 30-120 minutes
-> of manual exploration that is repeated every time context is lost. No existing skill provides
-> structural mapping with reusable artifacts. The /architect skill answers "what is the structure
-> of this thing, how do its parts relate, and where can it be improved?" -- producing Mermaid
-> diagrams, per-node documentation, and a manifest.json that any downstream analysis skill can
-> consume. Phase 1 maps structure; Phase 2 dispatches to /deep-research per node for improvement
-> analysis.
-
-**Dominant Constraint:** simplicity (content-agnostic design; over-specialization defeats the purpose)
-
-#### Goals
-- REQ-GOAL-001: Produce a structural map (nodes + edges) of any content path in under 5 minutes
-- REQ-GOAL-002: Generate valid, renderable Mermaid diagrams appropriate to content type
-- REQ-GOAL-003: Create a reusable manifest.json consumable by any downstream analysis skill
-- REQ-GOAL-004: Enable per-node deep-dive documentation grounded in structural context
-
-#### Non-Goals
-- REQ-NOGO-001: Runtime code analysis (profiling, tracing) -- static analysis only
-- REQ-NOGO-002: Building a new research engine -- dispatches to existing /deep-research
-- REQ-NOGO-003: Replacing ARCHITECTURE.md or MASTER_PLAN.md -- complementary, not substitute
-- REQ-NOGO-004: Supporting binary analysis or compiled artifacts -- source/text/docs only
-
-#### Requirements
-
-**Must-Have (P0)**
-
-- REQ-P0-001: Content type detection script identifies codebase, document set, mixed, or single file.
-  Acceptance: Given a path, When detect_content.sh runs, Then it outputs JSON with content_type,
-  root_path, language_stats, file_counts, entry_points.
-
-- REQ-P0-002: SKILL.md defines complete Phase 1 (Map) workflow with step-by-step instructions.
-  Acceptance: Given `/architect /path/to/project`, When skill executes, Then it produces
-  essentials.md, per-node deep dives, and manifest.json.
-
-- REQ-P0-003: Manifest.json follows the defined schema with nodes, edges, and diagram references.
-  Acceptance: Given Phase 1 completes, When manifest.json is read, Then it validates against the
-  schema with content_type, root, generated, nodes (with id, name, type, path, description,
-  files, edges, metrics), and diagrams.
-
-- REQ-P0-004: Mermaid diagrams render correctly for all content types.
-  Acceptance: Given a codebase input, When diagrams are generated, Then they use module dependency
-  + data flow patterns. Given a document set, When diagrams are generated, Then they use concept
-  map patterns.
-
-- REQ-P0-005: essentials.md contains high-level overview with system Mermaid diagram.
-  Acceptance: Given Phase 1 completes, When essentials.md is read, Then it has project overview,
-  system diagram, component summary table, and cross-cutting concerns.
-
-- REQ-P0-006: Per-node deep-dive files contain module-specific analysis and diagram.
-  Acceptance: Given a node in the manifest, When its deep-dive file is read, Then it has purpose,
-  API surface, dependencies, diagram, and improvement opportunities.
-
-- REQ-P0-007: .skill-result.md context summary written at skill completion.
-  Acceptance: Given skill completes, When .skill-result.md is read, Then it contains status,
-  output path, node count, and key structural findings.
-
-- REQ-P0-008: Tests validate detect_content.sh against known content types.
-  Acceptance: Given synthetic directories with known content types, When test-detect-content.sh
-  runs, Then all cases produce correct content_type classification.
-
-**Nice-to-Have (P1)**
-
-- REQ-P1-001: `--depth essentials` flag produces overview only (no per-node deep dives).
-- REQ-P1-002: `--output path` flag overrides default output directory.
-- REQ-P1-003: Single-file analysis mode produces internal structure breakdown.
-
-**Future Consideration (P2)**
-
-- REQ-P2-001: /structured-analytics backend interface contract for future analytics skill.
-- REQ-P2-002: Incremental re-mapping (detect changes since last manifest, update only affected nodes).
-- REQ-P2-003: Interactive Mermaid diagram viewer via Playwright.
-
-#### Definition of Done
-
-`/architect /path/to/project` produces valid essentials.md, per-node deep dives in modules/,
-manifest.json, and system Mermaid diagram for a real codebase. detect_content.sh tests pass
-for all content types. Phase 2 dispatches /deep-research per node batch and folds results
-into improvements.md.
-
-#### Architectural Decisions
-
-- DEC-ARCH-001: Content type detection via detect_content.sh bash script.
-  Addresses: REQ-P0-001.
-  Rationale: Testable, reusable, consistent with uplevel's detect_project.sh pattern. Runs
-  before main analysis, providing ground truth to the skill prompt. Detection signals:
-  package.json/.git/source files (codebase), .md/.txt/.pdf only (docs), both (mixed),
-  single file (single).
-
-- DEC-ARCH-002: Node extraction via multi-pass glob/grep analysis.
-  Addresses: REQ-P0-003, REQ-P0-006, REQ-GOAL-001.
-  Rationale: Deterministic extraction using existing tools (Glob, Grep, Read). For codebases:
-  directory structure + package boundaries + imports. For docs: heading structure +
-  cross-references. LLM synthesizes findings into documentation, but structure extraction
-  is mechanical.
-
-- DEC-ARCH-003: Mermaid diagram templates with dynamic population.
-  Addresses: REQ-P0-004, REQ-GOAL-002.
-  Rationale: Templates ensure valid Mermaid syntax; dynamic generation risks syntax errors.
-  Template patterns per content type (module dependency, concept map, sequence diagram).
-  The skill populates templates with extracted nodes/edges.
-
-- DEC-ARCH-004: Manifest.json as Phase 1/Phase 2 integration contract.
-  Addresses: REQ-P0-003, REQ-GOAL-003.
-  Rationale: Clean separation of concerns. Phase 1 never needs to know what Phase 2 does.
-  New backends just read manifest.json. Schema defined in the spec with nodes, edges,
-  metrics, diagrams.
-
-- DEC-ARCH-005: Phase 2 dispatch via Task subagent per node batch (3-5 nodes).
-  Addresses: REQ-GOAL-004.
-  Rationale: Per-node dispatch would create too many subagents. Batching by 3-5 keeps it
-  manageable while maintaining focus. Each batch gets a research brief generated from
-  manifest node data.
-
-#### Phase 1: Core Skill (Map Only)
-**Status:** completed
-**Decision IDs:** DEC-ARCH-001, DEC-ARCH-002, DEC-ARCH-003, DEC-ARCH-004
-**Requirements:** REQ-P0-001, REQ-P0-002, REQ-P0-003, REQ-P0-004, REQ-P0-005, REQ-P0-006, REQ-P0-007, REQ-P0-008
-**Issues:** #23
-**Definition of Done:**
-- REQ-P0-001 satisfied: detect_content.sh classifies codebase, docs, mixed, single file
-- REQ-P0-002 satisfied: SKILL.md has complete Phase 1 workflow
-- REQ-P0-003 satisfied: manifest.json validates against schema
-- REQ-P0-004 satisfied: Mermaid diagrams render for all content types
-- REQ-P0-005 satisfied: essentials.md has overview + system diagram
-- REQ-P0-006 satisfied: Per-node deep-dive files exist with module-specific analysis
-- REQ-P0-007 satisfied: .skill-result.md written at completion
-- REQ-P0-008 satisfied: detect_content.sh tests pass
-
-##### Planned Decisions
-- DEC-ARCH-001: Content type detection via detect_content.sh — Addresses: REQ-P0-001
-- DEC-ARCH-002: Node extraction via multi-pass glob/grep — Addresses: REQ-P0-003, REQ-P0-006
-- DEC-ARCH-003: Mermaid templates with dynamic population — Addresses: REQ-P0-004
-- DEC-ARCH-004: Manifest.json as Phase 1/Phase 2 contract — Addresses: REQ-P0-003
-
-##### Work Items
-
-**W1-1: Create skills/architect/SKILL.md**
-- YAML frontmatter: name, description, argument-hint, context: fork, agent: general-purpose
-- Allowed tools: Bash, Read, Write, Glob, Grep, WebSearch, Task, AskUserQuestion
-- Argument parsing for: path, --depth, --research, --analytics, --output
-- Phase 1 (Map) workflow: detect content type -> extract nodes/edges -> generate manifest ->
-  generate Mermaid diagrams -> write essentials.md -> write per-node deep dives
-- Phase 2 (Analyze) workflow: read manifest -> batch nodes -> dispatch to backend -> fold results
-- Error handling, edge cases, mandatory .skill-result.md
-- Follow patterns from deep-research/SKILL.md and uplevel/SKILL.md
-
-**W1-2: Create skills/architect/scripts/detect_content.sh**
-- Input: path argument
-- Detection logic:
-  - Codebase: presence of package.json, Cargo.toml, go.mod, pyproject.toml, .git with source files
-  - Document set: only .md/.txt/.pdf/.rst/.docx, no source code
-  - Mixed: both source code and documentation present
-  - Single file: input is a file, not a directory
-- Output JSON: content_type, root_path, languages (array), file_counts (by extension),
-  entry_points (main files, index files)
-- chmod 755
-
-**W1-3: Create skills/architect/templates/**
-- mermaid-module-dependency.md: template for codebase module dependency graphs
-- mermaid-concept-map.md: template for document set concept maps
-- mermaid-data-flow.md: template for data flow diagrams
-- mermaid-sequence.md: template for interaction sequences
-- Each template has placeholder markers that the skill populates
-
-**W1-4: Define manifest.json schema**
-- Create skills/architect/schema/manifest-schema.json (JSON Schema)
-- Validates the manifest.json output from Phase 1
-- Fields: content_type, root, generated, nodes[], diagrams{}
-
-**W1-5: Create tests/test-detect-content.sh**
-- Test 1: Codebase detection (directory with package.json + .js files)
-- Test 2: Document set detection (directory with only .md files)
-- Test 3: Mixed detection (directory with both source and docs)
-- Test 4: Single file detection (path to a single .py file)
-- Test 5: Empty directory (graceful handling)
-- Test 6: Nested codebase (monorepo structure)
-- Test 7: Syntax check -- detect_content.sh is valid bash
-- TAP-compatible output. Isolated temp directories per test.
-
-**W1-6: Integration test with ~/.claude as sample codebase**
-- Run detect_content.sh against ~/.claude, verify content_type = "mixed"
-- Verify output JSON has expected fields
-- Quick smoke test, not exhaustive
-
-##### Critical Files
-- `skills/architect/SKILL.md` -- Core skill definition
-- `skills/architect/scripts/detect_content.sh` -- Content type detection
-- `skills/architect/templates/` -- Mermaid diagram templates
-- `skills/architect/schema/manifest-schema.json` -- Manifest schema
-- `tests/test-detect-content.sh` -- Detection tests
-
-##### Decision Log
-<!-- Guardian appends here after phase completion -->
-
-#### Phase 2: Backend Integration
-**Status:** completed
-**Decision IDs:** DEC-ARCH-005
-**Requirements:** REQ-GOAL-004, REQ-P2-001
-**Issues:** #24
-**Definition of Done:**
-- /deep-research dispatch works per node batch from manifest.json
-- Research results fold back into improvements.md
-- /structured-analytics interface contract defined (future backend)
-
-##### Planned Decisions
-- DEC-ARCH-005: Phase 2 dispatch via batched Task subagents (3-5 nodes) — Addresses: REQ-GOAL-004
-
-##### Work Items
-
-**W2-1: Add /deep-research dispatch to SKILL.md Phase 2**
-- When --research flag is present, read manifest.json
-- Batch nodes into groups of 3-5 by relatedness (same parent directory or edge connections)
-- Generate focused research brief per batch: node names, descriptions, relationships,
-  specific questions
-- Dispatch via Task subagent with /deep-research skill
-- Collect results from .skill-result.md or research output directory
-
-**W2-2: Create research brief template**
-- Create skills/architect/templates/research-brief.md
-- Template for converting manifest nodes into research queries
-- Fields: node names, descriptions, edge context, specific improvement questions
-- One brief per batch (3-5 nodes)
-
-**W2-3: Implement results folding into improvements.md**
-- After all research dispatches complete, read research reports
-- Group findings by node ID
-- Write improvements.md with per-node improvement sections
-- Include confidence levels from research (consensus, majority, unique)
-- Link back to relevant node deep-dive files
-
-**W2-4: Define /structured-analytics interface contract**
-- Create skills/architect/schema/analytics-input-schema.json
-- Defines what a future /structured-analytics backend would receive
-- Same manifest.json input but with analytics-specific query fields
-- Contract definition only -- no implementation
-
-**W2-5: Tests for dispatch integration**
-- Test 1: Research brief generation from manifest with 5 nodes
-- Test 2: Results folding produces improvements.md with per-node sections
-- Test 3: --research flag with no manifest.json gives clear error
-- Test 4: Manifest with 1 node (no batching needed)
-- TAP-compatible output.
-
-##### Critical Files
-- `skills/architect/SKILL.md` -- Phase 2 additions
-- `skills/architect/templates/research-brief.md` -- Research brief template
-- `skills/architect/schema/analytics-input-schema.json` -- Future backend contract
-- `tests/test-architect-dispatch.sh` -- Dispatch integration tests
-
-##### Decision Log
-- DEC-ARCH-005: Phase 2 dispatch via batched Task subagents (3-5 nodes per batch). 3-tier heuristic: <=5 nodes single batch, 6-15 nodes 2-3 batches, >15 nodes 4+ batches. Sequential dispatch prevents resource exhaustion. Addresses: REQ-GOAL-004.
-
-#### /architect Worktree Strategy
-
-Main is sacred. Each phase works in its own worktree:
-- **Phase 1:** `~/.claude/.worktrees/architect-core` on branch `feature/architect-skill`
-- **Phase 2:** `~/.claude/.worktrees/architect-backends` on branch `feature/architect-backends`
-
-Implementation order: Phase 1 first (core skill with map functionality), then Phase 2
-(backend integration depends on manifest schema from Phase 1).
-
-#### /architect References
-
-##### Existing Skill Patterns
-| Skill | Pattern Used |
-|-------|-------------|
-| deep-research | Multi-phase execution, background processing, .skill-result.md |
-| uplevel | Project detection script, parallel subagent dispatch, area-based analysis |
-| consume-content | Content type detection, read-write-verify pipeline |
-| decide | Config JSON schema, integration with planner |
+**Phases:** 2 phases, all completed. Phase 1: Core Skill (Map Only) #23. Phase 2: Backend Integration #24.
+**Key Decisions:** DEC-ARCH-001 (detect_content.sh), DEC-ARCH-002 (multi-pass node extraction), DEC-ARCH-003 (Mermaid templates), DEC-ARCH-004 (manifest.json contract), DEC-ARCH-005 (batched subagent dispatch)
+**Critical Files:** `skills/architect/SKILL.md`, `skills/architect/scripts/detect_content.sh`, `skills/architect/schema/`, `skills/architect/templates/`, `tests/test-detect-content.sh`, `tests/test-architect-dispatch.sh`
 
 ---
 
 ### Initiative: Bazaar Competitive Analytical Marketplace -- Completion
-**Status:** active
+**Status:** completed
 **Started:** 2026-02-22
+**Completed:** 2026-02-23
 **Goal:** Harden and validate the /bazaar skill so it can merge to main and operate in production
 
 > The /bazaar skill implements a competitive analytical marketplace: diverse ideation via multiple
@@ -1830,7 +1603,7 @@ Issue created and closed.
 <!-- Guardian appends here after phase completion -->
 
 #### Phase 3: Output Codification & Autonomous Execution
-**Status:** planned
+**Status:** completed
 **Decision IDs:** DEC-BAZAAR-012, DEC-BAZAAR-013, DEC-BAZAAR-014, DEC-BAZAAR-015, DEC-BAZAAR-016
 **Requirements:** REQ-P0-005, REQ-P0-006, REQ-P0-007, REQ-P0-008, REQ-P0-009, REQ-P0-010
 **Issues:** #35
@@ -1970,33 +1743,37 @@ Issue created and closed.
 - `skills/bazaar/tests/test_prepare.py` -- New: dispatch preparation tests
 
 ##### Decision Log
-<!-- Guardian appends here after phase completion -->
+- DEC-BAZAAR-012: Local output directory (bazaar-YYYYMMDD-HHMMSS/) replaces /tmp -- implemented in SKILL.md, persistent and inspectable artifacts
+- DEC-BAZAAR-013: Disk-based state passing via bazaar_prepare.py -- agent reads only BLUFs, Python scripts handle data plumbing via disk paths
+- DEC-BAZAAR-014: bazaar_summarize.py generates phase BLUFs from disk artifacts + updates bazaar-manifest.json
+- DEC-BAZAAR-015: SKILL.md restructured with explicit Context Discipline section -- prohibitions against reading full JSON, agent presents only BLUFs
+- DEC-BAZAAR-016: bazaar-manifest.json as run index -- implemented within bazaar_summarize.py manifest functions (load/save/update)
 
 #### Bazaar Completion Worktree Strategy
 
 Main is sacred. Each phase works in its own worktree:
 - **Phase 1:** `~/.claude/.worktrees/feat-bazaar` on branch `feature/bazaar-skill` (completed)
 - **Phase 2:** On main (post-merge E2E validation) (completed)
-- **Phase 3:** `~/.claude/.worktrees/bazaar-codify` on branch `feature/bazaar-output-codification`
+- **Phase 3:** `~/.claude/.worktrees/bazaar-codify` on branch `feature/bazaar-output-codification` (completed)
 
-Implementation order: Phase 1 (fix + merge) -> Phase 2 (validate on main) -> Phase 3 (restructure for autonomous execution).
+Implementation order: Phase 1 (fix + merge) -> Phase 2 (validate on main) -> Phase 3 (restructure for autonomous execution). All phases completed 2026-02-23.
 
 #### Bazaar Completion References
 
 ##### Existing Code Inventory
 | Component | Path | Status |
 |-----------|------|--------|
-| SKILL.md | skills/bazaar/SKILL.md | Needs restructure (20k, 6-phase workflow -- Phase 3 target) |
+| SKILL.md | skills/bazaar/SKILL.md | Complete (restructured with Context Discipline, ~516 lines) |
 | Dispatch engine | skills/bazaar/scripts/bazaar_dispatch.py | Complete (parallel ThreadPoolExecutor) |
 | Aggregation | skills/bazaar/scripts/aggregate.py | Complete (market-proportional weighting) |
 | Report generator | skills/bazaar/scripts/report.py | Complete (template-based) |
 | Provider wrappers | skills/bazaar/scripts/lib/ | Complete (anthropic, openai, gemini, perplexity) |
 | Archetypes | skills/bazaar/archetypes/ | Complete (4 families: ideators, judges, obsessives, analysts) |
 | Provider config | skills/bazaar/providers.json | Complete (4 providers with models) |
-| Tests | skills/bazaar/tests/ | 75 passing (dispatch, aggregate, report) |
+| Tests | skills/bazaar/tests/ | 174 passing (dispatch, aggregate, report, summarize, prepare) |
 | Report template | skills/bazaar/templates/report-template.md | Complete |
-| **bazaar_summarize.py** | skills/bazaar/scripts/bazaar_summarize.py | **Phase 3: new** |
-| **bazaar_prepare.py** | skills/bazaar/scripts/bazaar_prepare.py | **Phase 3: new** |
+| bazaar_summarize.py | skills/bazaar/scripts/bazaar_summarize.py | Complete (BLUF generator + manifest updater) |
+| bazaar_prepare.py | skills/bazaar/scripts/bazaar_prepare.py | Complete (dispatch construction + dedup + collection) |
 
 ##### Existing Decisions (in code @decision annotations)
 | DEC-ID | Title |
@@ -2509,6 +2286,7 @@ Phase 6 is the merge:
 |-----------|--------|--------|---------------|----------|
 | v2 Governance + Observability | 2026-02-18 to 2026-02-19 | 6 phases (0-5), all completed | DEC-GUARDIAN-001, DEC-PLANNER-STOP-001, DEC-OBS-P2-110, DEC-V2-005 | `archived-plans/2026-02-19_v2-governance-observability.md` |
 | v3 Hardening & Reliability | 2026-02-19 to 2026-02-20 | 3 phases (6-8), all completed | DEC-V3-001..005, DEC-TRACK-001, DEC-PROOF-PATH-003 | Inline (completed initiative above) |
+| /architect Skill | 2026-02-22 | 2 phases, all completed | DEC-ARCH-001..005 | Inline (active initiatives section) |
 
 **v2 Summary:** Fused observability into governance layer. Session event logs, named checkpoints,
 cross-session learning, structured commit context, observatory pipeline, trace lifecycle
