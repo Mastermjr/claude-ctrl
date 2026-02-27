@@ -1,6 +1,6 @@
 # Hook System Reference
 
-Technical reference for the Claude Code hook system. For philosophy and workflow, see `../CLAUDE.md`. For the summary table, see `../README.md`.
+Technical reference for the Claude Code hook system. For philosophy and workflow, see `../CLAUDE.md`. For the summary table, see `../README.md`. For system architecture and visibility, see `../ARCHITECTURE.md`.
 
 ---
 
@@ -124,6 +124,8 @@ Source with: `source "$(dirname "$0")/log.sh"`
 | `detect_project_root` | Returns `$CLAUDE_PROJECT_DIR` → git root → `$HOME` (fallback chain) |
 | `is_same_project(dir)` | Compares `git rev-parse --git-common-dir` for current project vs target dir. Returns 0 if same repo (handles worktrees). Defined in `guard.sh` |
 | `extract_git_target_dir(cmd)` | Parses `cd /path && git ...` or `git -C /path ...` to find git target directory. Falls back to CWD. Defined in `guard.sh` |
+| `resolve_proof_file <root>` | Finds `.proof-status` via breadcrumb-based worktree resolution (DEC-PROOF-PATH-002) |
+| `write_proof_status <status> [root]` | Atomic write to all 3 proof-status paths (worktree, project-scoped, legacy) |
 | `log_info <stage> <msg>` | Human-readable stderr log |
 | `log_json <stage> <msg>` | Structured JSON stderr log |
 
@@ -140,6 +142,15 @@ Source with: `source "$(dirname "$0")/context-lib.sh"`
 | `get_research_status <root>` | `$RESEARCH_EXISTS`, `$RESEARCH_ENTRY_COUNT` |
 | `is_source_file <path>` | Tests against `$SOURCE_EXTENSIONS` regex |
 | `is_skippable_path <path>` | Tests for config/test/vendor/generated paths |
+| `validate_state_file <file> <format>` | Guards against corrupt state file reads (pipe-delimited format validation) |
+| `atomic_write <file> <content>` | Write via temp-file-then-mv for state file safety (DEC-INTEGRITY-004) |
+| `safe_cleanup <target> [fallback]` | `rm -rf` with CWD safety — `cd` out first if CWD is inside target |
+| `init_trace <agent_type> <project>` | Create trace directory, manifest.json, active marker; sets `$TRACE_DIR` |
+| `finalize_trace <trace_dir> <outcome>` | Close manifest (duration, outcome, files_changed), remove active marker, append to index |
+| `write_statusline_cache <root>` | Atomic cache write for status bar enrichment (DEC-CACHE-001) |
+| `get_session_summary_context <root>` | Trajectory summary for compaction preservation |
+| `build_resume_directive <root>` | Priority-ordered actionable instruction derived from session state |
+| `compress_initiative <plan_file> <name>` | Archive completed initiative from Active to Completed Initiatives table |
 | `append_audit <root> <event> <detail>` | Appends to `.claude/.audit-log` |
 
 `$SOURCE_EXTENSIONS` is the single source of truth for source file detection: `ts|tsx|js|jsx|py|rs|go|java|kt|swift|c|cpp|h|hpp|cs|rb|php|sh|bash|zsh`
@@ -149,6 +160,23 @@ Source with: `source "$(dirname "$0")/context-lib.sh"`
 Source with: `source "$(dirname "$0")/source-lib.sh"`
 
 Single-file bootstrapper that sources both `log.sh` and `context-lib.sh` with correct path resolution. Used by hooks that need the full library stack in one line.
+
+### state-registry.sh — State file registry
+
+Not a hook — a declarative registry of every state file the hook system writes.
+Format: `PATTERN|SCOPE|WRITER(S)|DESCRIPTION`. Used by `tests/test-state-registry.sh`
+to lint hook source files and detect unregistered writes. Scopes: global, per-project
+(keyed by 8-char SHA-256 hash), per-session, trace-global, trace-scoped.
+
+### Metanoia Hooks (dormant)
+
+Three consolidated hooks exist but are not registered in `settings.json`:
+- `pre-bash.sh` — consolidates guard.sh + doc-freshness.sh + auto-review.sh
+- `pre-write.sh` — consolidates test-gate.sh + mock-gate.sh + branch-guard.sh + doc-gate.sh + plan-check.sh + checkpoint.sh
+- `post-write.sh` — consolidates lint.sh + track.sh + code-review.sh + plan-validate.sh + test-runner.sh
+
+Toggle between legacy (individual) and Metanoia (consolidated) configs with
+`scripts/swap.sh`. See `settings-legacy.json` and `settings-metanoia.json`.
 
 ---
 
