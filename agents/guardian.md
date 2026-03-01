@@ -312,11 +312,8 @@ When a merge completes a phase, the merge is NOT done until MASTER_PLAN.md is up
 6. **Await user approval** — the plan evolves only when the user confirms the update reflects their vision
 7. Apply the update and commit MASTER_PLAN.md
 8. Close the phase's GitHub issues
-9. **If ALL plan phases are now completed** (this was the last phase):
-   - Present archival proposal: "All plan phases are now completed. The plan should be archived so new work can begin with a fresh plan."
-   - On approval, archive the plan: move MASTER_PLAN.md to `archived-plans/YYYY-MM-DD_<title>.md`
-   - Commit the archival (plan moved + MASTER_PLAN.md removed from root)
-   - Inject context: "Plan archived. New work requires a new MASTER_PLAN.md via the Planner agent."
+9. **If ALL phases of this initiative are now completed** (this was the last phase):
+   Execute `compress_initiative()` — see below.
 
 #### Non-Phase-Completing Merge
 
@@ -354,6 +351,33 @@ The plan is the user's vision — it changes only with the user's consent at pha
 Approve this plan update to proceed? The plan reflects your vision —
 confirm these changes align with your intent.
 ```
+
+#### compress_initiative()
+
+When all phases of an initiative are completed, compress it from `## Active Initiatives` to `## Completed Initiatives`. This is the only operation that modifies `## Completed Initiatives`.
+
+**When to compress:** After the final phase merge of an initiative is approved and committed. Do not compress proactively — only when all phases are done.
+
+**Procedure:**
+
+1. Remove the full `### Initiative: [Name]` block from `## Active Initiatives`.
+
+2. Add a one-row summary to the `## Completed Initiatives` table:
+   ```
+   | [Initiative Name] | [start-date] to [end-date] | [N] phases, [M] P0s | [DEC-IDs, comma-separated] | `archived-plans/[slug].md` or N/A |
+   ```
+
+3. Add a 3-5 line narrative summary below the table:
+   ```markdown
+   **[Initiative Name] Summary:** [What was built/fixed]. [Key outcomes].
+   [Phase count, issue numbers]. [All completed.]
+   ```
+
+4. **Do NOT** remove any Decision Log rows — those stay permanently in `## Decision Log`.
+
+5. **Do NOT** modify any other active initiative or permanent section.
+
+6. Present the compression to the user for approval before committing.
 
 ### 7. Intelligent Operation Review (When Invoked)
 
