@@ -57,21 +57,10 @@ State files bridge the gap — hooks communicate with each other through files, 
 ```
 ~/.claude/
 ├── hooks/                    # Hook scripts and shared libraries
-│   ├── guard.sh              # PreToolUse:Bash — 11-check safety gate
-│   ├── doc-freshness.sh      # PreToolUse:Bash — documentation freshness enforcement at merge
-│   ├── auto-review.sh        # PreToolUse:Bash — three-tier command classification
-│   ├── branch-guard.sh       # PreToolUse:Write|Edit — main branch protection
-│   ├── doc-gate.sh           # PreToolUse:Write|Edit — documentation enforcement
-│   ├── test-gate.sh          # PreToolUse:Write|Edit — escalating test failure gate
-│   ├── mock-gate.sh          # PreToolUse:Write|Edit — mock detection gate
-│   ├── plan-check.sh         # PreToolUse:Write|Edit — MASTER_PLAN.md enforcement
-│   ├── checkpoint.sh         # PreToolUse:Write|Edit — git ref checkpoints
+│   ├── pre-bash.sh           # PreToolUse:Bash — safety gate + command classification (consolidates guard.sh, auto-review.sh, doc-freshness.sh)
+│   ├── pre-write.sh          # PreToolUse:Write|Edit — all write gates (consolidates test-gate.sh, mock-gate.sh, branch-guard.sh, doc-gate.sh, plan-check.sh, checkpoint.sh)
 │   ├── task-track.sh         # PreToolUse:Task — agent dispatch gates
-│   ├── track.sh              # PostToolUse:Write|Edit — session change tracking
-│   ├── lint.sh               # PostToolUse:Write|Edit — auto-linting with feedback loop
-│   ├── code-review.sh        # PostToolUse:Write|Edit — complexity advisory
-│   ├── plan-validate.sh      # PostToolUse:Write|Edit — plan alignment check
-│   ├── test-runner.sh        # PostToolUse:Write|Edit — async test execution
+│   ├── post-write.sh         # PostToolUse:Write|Edit — quality feedback (consolidates lint.sh, track.sh, code-review.sh, plan-validate.sh, test-runner.sh)
 │   ├── webfetch-fallback.sh  # PostToolUse:WebFetch — suggest alternatives on failure
 │   ├── playwright-cleanup.sh # PostToolUse:mcp__playwright__browser_snapshot
 │   ├── skill-result.sh       # PostToolUse:Skill — skill completion tracking
@@ -85,9 +74,7 @@ State files bridge the gap — hooks communicate with each other through files, 
 │   ├── check-guardian.sh     # SubagentStop:guardian — guardian validation
 │   ├── check-explore.sh      # SubagentStop:Explore|explore — Explore agent output validation
 │   ├── check-general-purpose.sh # SubagentStop:general-purpose — general agent output validation
-│   ├── surface.sh            # Stop — decision audit
-│   ├── session-summary.sh    # Stop — session summary
-│   ├── forward-motion.sh     # Stop — suggest next steps
+│   ├── stop.sh               # Stop — decision audit + session summary + next steps (consolidates surface.sh, session-summary.sh, forward-motion.sh)
 │   ├── session-end.sh        # SessionEnd — cleanup
 │   ├── notify.sh             # Notification — permission/idle alerts
 │   ├── context-lib.sh        # Shared library — context builders, state I/O
@@ -161,15 +148,15 @@ State files bridge the gap — hooks communicate with each other through files, 
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     Hook System (enforcement layer)                  │
 ├─────────────────────────────────────────────┬───────────────────────┤
-│ PreToolUse (9 hooks)                        │ PostToolUse (7 hooks) │
+│ PreToolUse (3 hooks)                        │ PostToolUse (4 hooks) │
 │                                             │                       │
-│ Bash: guard.sh, auto-review.sh             │ Write|Edit:           │
-│ Write|Edit: test-gate.sh, mock-gate.sh,    │   lint.sh             │
-│   branch-guard.sh, doc-gate.sh,            │   track.sh            │
-│   plan-check.sh, checkpoint.sh             │   code-review.sh      │
-│ Task: task-track.sh                        │   plan-validate.sh    │
-│                                             │   test-runner.sh      │
-│                                             │ WebFetch:             │
+│ Bash: pre-bash.sh                          │ Write|Edit:           │
+│   (safety gate, cmd classification,        │   post-write.sh       │
+│    doc-freshness at merge)                 │   (lint, track,       │
+│ Write|Edit: pre-write.sh                   │    code-review,       │
+│   (test-gate, mock-gate, branch-guard,     │    plan-validate,     │
+│    doc-gate, plan-check, checkpoint)       │    test-runner async) │
+│ Task: task-track.sh                        │ WebFetch:             │
 │                                             │   webfetch-fallback.sh│
 │                                             │ Skill: skill-result.sh│
 ├─────────────────────────────────────────────┴───────────────────────┤
@@ -180,7 +167,7 @@ State files bridge the gap — hooks communicate with each other through files, 
 │ SubagentStop: check-planner.sh, check-implementer.sh,              │
 │              check-tester.sh, check-guardian.sh,                    │
 │              check-explore.sh, check-general-purpose.sh             │
-│ Stop: surface.sh, session-summary.sh, forward-motion.sh            │
+│ Stop: stop.sh (decision audit + session summary + next steps)       │
 │ SessionEnd: session-end.sh                                          │
 │ Notification: notify.sh                                             │
 └─────────────────────────────────────────────────────────────────────┘
@@ -201,8 +188,8 @@ context state. A hook that denies unsafe git operations does so on turn 1 and
 turn 150 identically.
 
 **What you can count on:**
-- Every Write/Edit tool call runs 6 PreToolUse hooks and 5 PostToolUse hooks, in registration order.
-- Every Bash tool call runs 2 PreToolUse hooks (guard.sh, auto-review.sh).
+- Every Write/Edit tool call runs 1 PreToolUse hook (pre-write.sh) and 1 PostToolUse hook (post-write.sh), each containing consolidated logic.
+- Every Bash tool call runs 1 PreToolUse hook (pre-bash.sh).
 - Every Task tool call runs 1 PreToolUse hook (task-track.sh).
 - A hook that crashes (unhandled error under `set -euo pipefail`) causes deny-on-crash behavior for safety-critical hooks.
 - `exit 0` with no stdout = hook passes silently with no effect.
@@ -338,10 +325,10 @@ with the `additionalContext` injected. `lint.sh` uses this for auto-fix loops.
 |-------|---------|------|------------------|
 | **SessionStart** | `startup\|resume\|clear\|compact` | Fresh session, /clear, /compact | session-init.sh |
 | **UserPromptSubmit** | (all) | Every user prompt | prompt-submit.sh |
-| **PreToolUse** | `Write\|Edit` | Before Write or Edit tool | test-gate.sh, mock-gate.sh, branch-guard.sh, doc-gate.sh, plan-check.sh, checkpoint.sh |
-| **PreToolUse** | `Bash` | Before every Bash call | guard.sh, auto-review.sh |
+| **PreToolUse** | `Write\|Edit` | Before Write or Edit tool | pre-write.sh (consolidates test-gate, mock-gate, branch-guard, doc-gate, plan-check, checkpoint) |
+| **PreToolUse** | `Bash` | Before every Bash call | pre-bash.sh (consolidates guard, auto-review, doc-freshness) |
 | **PreToolUse** | `Task` | Before every agent dispatch | task-track.sh |
-| **PostToolUse** | `Write\|Edit` | After Write or Edit completes | lint.sh, track.sh, code-review.sh, plan-validate.sh, test-runner.sh |
+| **PostToolUse** | `Write\|Edit` | After Write or Edit completes | post-write.sh (consolidates lint, track, code-review, plan-validate, test-runner) |
 | **PostToolUse** | `WebFetch` | After WebFetch | webfetch-fallback.sh |
 | **PostToolUse** | `mcp__playwright__browser_snapshot` | After Playwright snapshot | playwright-cleanup.sh |
 | **PostToolUse** | `Skill` | After skill execution | skill-result.sh |
@@ -353,22 +340,22 @@ with the `additionalContext` injected. `lint.sh` uses this for auto-fix loops.
 | **SubagentStop** | `guardian` | When guardian completes | check-guardian.sh |
 | **SubagentStop** | `Explore\|explore` | When Explore agent completes | check-explore.sh |
 | **SubagentStop** | `general-purpose` | When general-purpose agent completes | check-general-purpose.sh |
-| **Stop** | (all) | After Claude finishes responding | surface.sh, session-summary.sh, forward-motion.sh |
+| **Stop** | (all) | After Claude finishes responding | stop.sh (consolidates surface, session-summary, forward-motion) |
 | **SessionEnd** | (all) | Session termination | session-end.sh |
 | **Notification** | `permission_prompt\|idle_prompt` | Permission prompts, idle state | notify.sh |
 
 ### Execution Order
 
 Within each event, hooks execute in registration order (top-to-bottom in `settings.json`).
-For PreToolUse:Write|Edit, the order is:
-1. `test-gate.sh` — check test status first (fastest)
-2. `mock-gate.sh` — detect mocking patterns
-3. `branch-guard.sh` — block main branch writes
-4. `doc-gate.sh` — enforce documentation headers
-5. `plan-check.sh` — require MASTER_PLAN.md
-6. `checkpoint.sh` — create git ref checkpoint
+For PreToolUse:Write|Edit, `pre-write.sh` runs all checks internally in this order:
+1. test-gate logic — check test status first (fastest)
+2. mock-gate logic — detect mocking patterns
+3. branch-guard logic — block main branch writes
+4. doc-gate logic — enforce documentation headers
+5. plan-check logic — require MASTER_PLAN.md
+6. checkpoint logic — create git ref checkpoint
 
-If any hook denies, subsequent hooks in the same event do not run.
+If any check denies within `pre-write.sh`, subsequent checks in the same script do not run.
 
 ---
 
@@ -380,22 +367,22 @@ enforcement layer that instructions cannot replace.
 
 ---
 
-### guard.sh
+### pre-bash.sh
 
-**What it does:** Multi-tier safety gate for all Bash commands. 11 numbered
-checks run in sequence. Any check can deny or rewrite the command. Covers
-nuclear destruction, CWD safety, main branch protection, force push handling,
-destructive git commands, and test/proof gates.
+**What it does:** Consolidated PreToolUse:Bash hook. Runs all Bash safety checks
+in sequence: multi-tier nuclear/CWD/git safety gate (formerly guard.sh), three-tier
+command classification (formerly auto-review.sh), and documentation freshness
+enforcement at merge time (formerly doc-freshness.sh).
 
 **Why it exists:** Bash is the most dangerous tool Claude has. A single mistyped
 command can destroy files, corrupt git history, or fork-bomb the machine.
 Instruction-level safety ("be careful with git") cannot prevent accidents.
-guard.sh catches them at the system level.
+pre-bash.sh catches them at the system level.
 
 **What you can count on:**
 - `rm -rf /`, `rm -rf ~`, fork bombs, `dd to /dev/*`, `mkfs`, `curl | bash`,
   SQL `DROP DATABASE`, `shutdown`, and `chmod 777 /` are ALWAYS denied (Check 0).
-- If guard.sh crashes under `set -euo pipefail`, the EXIT trap fires deny-on-crash
+- If pre-bash.sh crashes under `set -euo pipefail`, the EXIT trap fires deny-on-crash
   so safety is never sacrificed for convenience.
 - Commands on main/master branch without a MASTER_PLAN.md-only exception are ALWAYS
   denied for commits (Check 2).
@@ -435,169 +422,76 @@ reason message. See upstream issue anthropics/claude-code#26506.
 - `.claude/.proof-status` — `verified|needs-verification|pending|epoch` format
 - `.claude/.cwd-recovery-needed` — canary file for CWD recovery (one-shot)
 
-**Configuration:** guard.sh has no configuration options. All thresholds are
+**Configuration:** pre-bash.sh has no configuration options. All thresholds are
 constants in `context-lib.sh` (`TEST_STALENESS_THRESHOLD=600` seconds).
 
----
+**Incorporated functionality:**
 
-### auto-review.sh
+- **Safety gate (formerly guard.sh):** 11-check multi-tier Bash safety gate covering nuclear
+  destruction, CWD protection, main branch commits, force push handling, destructive git
+  commands, and test/proof gates.
 
-**What it does:** Three-tier command classification engine for Bash commands.
-Decomposes compound commands (&&, ||, ;, |) and recursively analyzes each
-segment. Emits approve/advise decisions.
+- **Command classification (formerly auto-review.sh):** Three-tier classification engine.
+  Decomposes compound commands (&&, ||, ;, |) and recursively analyzes each segment.
+  Tier 1 (ls, cat, git log) auto-approves; Tier 3 (rm, sudo, kill) injects advisory;
+  Tier 2 (git, npm, docker) inspects subcommands. `settings.json` static matching cannot
+  distinguish `git log` from `git reset --hard` — this hook understands composition.
 
-**Why it exists:** `settings.json` permission rules use static prefix matching —
-`Bash(git *)` cannot distinguish `git log` (safe) from `git reset --hard` (dangerous).
-auto-review.sh understands subcommands, flags, and composition.
-
-**What you can count on:**
-- Tier 1 commands (ls, cat, grep, echo, pwd, git log, git status, etc.) always auto-approve.
-- Tier 3 commands (rm, sudo, kill, pkill) always inject advisory context.
-- Compound commands containing any risky segment defer to user.
-- Command substitutions `$()` are recursively analyzed up to depth 2.
-
-**How it works:** classify() function categorizes the primary command token.
-Tier 2 commands (git, npm, docker) are further analyzed by their subcommand.
-The approve() function emits a PreToolUse allow. The advise() function emits
-additionalContext explaining the risk without blocking.
+- **Documentation freshness (formerly doc-freshness.sh):** Enforces documentation
+  freshness at merge time, ensuring docs are updated when source files change significantly.
 
 ---
 
-### branch-guard.sh
+### pre-write.sh
 
-**What it does:** Blocks source file writes on main/master branches.
-Fires on Write|Edit for source files in git repos where main/master is checked out.
+**What it does:** Consolidated PreToolUse:Write|Edit hook. Runs all write-time
+gate checks in sequence: test-gate, mock-gate, branch-guard, doc-gate, plan-check,
+and checkpoint. Replaces the 6 previously separate PreToolUse:Write|Edit hooks.
 
-**Why it exists:** guard.sh blocked git commits on main but allowed agents to
-accumulate substantial work in the wrong branch before hitting the commit gate.
-branch-guard.sh catches edits at write-time, before any work is done.
+**Why it exists:** Write|Edit is how agents modify code. Without write-time gates,
+agents accumulate errors, skip documentation, or write to the wrong branch before
+the commit gate catches it. pre-write.sh enforces all quality standards at the point
+of write — before errors can compound.
 
-**What you can count on:**
-- Source file writes on main/master are ALWAYS denied.
-- The `~/.claude` directory itself is exempt (meta-infrastructure).
-- `MASTER_PLAN.md` is exempt (planning documents are written on main by design).
-- Non-source files (config, docs, markdown, JSON, YAML) are NOT checked.
-- Files outside git repos are NOT checked.
+**Incorporated functionality:**
 
-**State files read:** None. Reads git branch via `git symbolic-ref`.
+- **test-gate:** Escalating gate that blocks source writes when tests are failing.
+  Reads `.test-status` (written by async test-runner logic in post-write.sh).
+  No test data → allow. Tests passing → allow, reset strikes. Tests stale >10min → allow.
+  Strike 1 → advisory. Strike 2+ → DENY with trajectory-aware guidance.
+  Test files are always allowed so fixes can proceed.
 
----
+- **mock-gate:** Detects internal mock usage in test files with escalating strikes.
+  Strike 1 → advisory. Strike 2+ → deny. External boundaries (HTTP, Redis, SQL) allowed.
+  arXiv 2602.00409: agents mock 95% of test doubles vs humans at 91% — this enforces real tests.
 
-### doc-gate.sh
+  The `@mock-exempt` annotation provides an escape hatch for genuinely necessary external mocks.
+  Detection patterns: Python `MagicMock`/`@patch`, JS/TS `jest.mock`/`.mockImplementation`,
+  Go `gomock.`/`mockgen`. External allowlist: requests, httpx, redis, boto3, axios, etc.
 
-**What it does:** Documentation enforcement for Write|Edit operations.
-Checks that new source files have a documentation header. For 50+ line files,
-also checks for a `@decision` annotation.
+- **branch-guard:** Blocks source file writes on main/master branches. Catches edits at
+  write-time before agents accumulate work in the wrong branch. `~/.claude` and
+  `MASTER_PLAN.md` are exempt.
 
-**Why it exists:** Sacred Practice #7: Code is Truth. Documentation must live
-with the code, not in separate wiki pages. doc-gate.sh enforces headers at
-write-time before the code can accumulate without them.
+- **doc-gate:** Enforces documentation headers on new source files. 50+ line files also
+  require a `@decision` annotation. Language-aware header detection for Python, TypeScript,
+  Go, Rust, Shell, C/C++, Java, Ruby, PHP. Test files, config files, and vendor dirs exempt.
+  Configuration: `DECISION_LINE_THRESHOLD=50` in `context-lib.sh`.
 
-**What you can count on:**
-- Write to a new source file without a doc header → DENIED with template suggestion.
-- Write to a source file ≥50 lines without `@decision` → DENIED.
-- Edit to a file that already has a header → allowed (edits don't add new files).
-- Edit to a file ≥50 lines missing `@decision` → advisory warning, not deny.
-- The `~/.claude/hooks/` directory itself is exempt.
-- Test files, config files, vendor directories are exempt.
-- New markdown files in project root get an advisory against violating Sacred Practice #9.
+- **plan-check:** Blocks source writes without `MASTER_PLAN.md`. Detects stale plans
+  via composite signal: source churn % + decision drift count.
+  Churn ≥35% → DENY. Drift ≥5 out-of-sync decisions → DENY.
+  Churn 15-34% or drift 2-4 → advisory. `PLAN_LIFECYCLE=dormant` → DENY (all initiatives done).
+  Configuration: `PLAN_CHURN_WARN=15`, `PLAN_CHURN_DENY=35`.
 
-**Language support:** Python (`"""`), TypeScript/JavaScript (`/** */` or `//`),
-Go (`// Package...`), Rust (`//!`), Shell (`# comment`), C/C++ (`/** */` or `//`),
-Java/Kotlin/Swift (`/** */`), Ruby (`#`), PHP (`/** */` or `#`).
+- **checkpoint:** Creates git refs at `refs/checkpoints/<branch>/<N>` before writes.
+  Triggers every 5th write or first write to any file in the session. Uses git plumbing
+  (write-tree + commit-tree + update-ref) — no impact on working copy, git status, or stash.
+  Only fires on feature branches in git repos. Exempt for meta-repo.
 
-**State files read:** None.
-
-**Configuration:** `DECISION_LINE_THRESHOLD=50` in `context-lib.sh`.
-
----
-
-### test-gate.sh
-
-**What it does:** Escalating gate that blocks source writes when tests are failing.
-Reads `.test-status` (written by `test-runner.sh`) and applies a strike system.
-
-**Why it exists:** test-runner.sh runs async — results arrive after the write.
-Without test-gate.sh, agents can compound errors by writing more source code
-while tests are failing, creating a failing-test feedback loop.
-
-**What you can count on:**
-- No `.test-status` → allow (no test data yet; cold-start advisory if framework detected).
-- Tests passing → allow, reset strikes.
-- Tests stale (>10 minutes) → allow (may have been fixed externally).
-- Tests failing, strike 1 → advisory warning, allow.
-- Tests failing, strike 2+ → DENY with trajectory-aware guidance.
-- Test files are ALWAYS allowed (so fixes can proceed).
-- Non-source files are ALWAYS allowed.
-
-**Trajectory awareness:** On deny, reads `.session-events.jsonl` to identify
-which file has been most-edited without resolving failures. Reports the most-edited
-file and the failing assertion if available (via `detect_approach_pivots()`).
-
-**State files read:** `.claude/.test-status`, `.claude/.test-gate-strikes`, `.claude/.session-events.jsonl`
-**State files written:** `.claude/.test-gate-strikes`
-
-**Configuration:** `TEST_STALENESS_THRESHOLD=600` in `context-lib.sh`.
-
----
-
-### mock-gate.sh
-
-**What it does:** Detects internal mock usage in test files and applies an
-escalating strike system. Strike 1 → advisory. Strike 2+ → deny.
-
-**Why it exists:** Sacred Practice #5: Real unit tests, not mocks. arXiv 2602.00409
-found agents mock 95% of test doubles vs humans at 91%. The `@mock-exempt`
-annotation provides an escape hatch for genuinely necessary external mocks.
-
-**What you can count on:**
-- Non-test files are ALWAYS allowed.
-- Test files with `@mock-exempt` annotation are ALWAYS allowed.
-- Mocks targeting external boundaries (HTTP, Redis, SQL, AWS, etc.) are allowed.
-- Internal mocks (mocking your own modules/classes): strike 1 = advisory, strike 2+ = deny.
-
-**Detection patterns (internal mocks):**
-- Python: `MagicMock`, `@patch` on non-external targets, `mocker.patch` on internals
-- JavaScript/TypeScript: `jest.mock(non-external)`, `.mockImplementation`, `sinon.stub`
-- Go: `gomock.`, `mockgen`, `EXPECT().()`
-
-**External boundary allowlist:** requests, httpx, redis, psycopg, sqlalchemy, urllib,
-http.client, smtplib, socket, subprocess, boto3, aiohttp, pymongo, mysql, sqlite3,
-axios, node-fetch, undici, http, https, fs, child_process, ioredis, pg, mongodb, aws-sdk.
-
-**State files read/written:** `.claude/.mock-gate-strikes`
-
----
-
-### plan-check.sh
-
-**What it does:** Blocks source writes without `MASTER_PLAN.md`. Also detects
-stale plans using composite signal: source file churn percentage + decision drift count.
-
-**Why it exists:** Sacred Practice #6: No Implementation Without Plan. Advisory
-warnings were ignored by agents — this hook enforces with hard denies.
-
-**What you can count on:**
-- Write to source file in a git repo with no `MASTER_PLAN.md` → DENIED.
-- `MASTER_PLAN.md` exists but all initiatives completed (`PLAN_LIFECYCLE=dormant`) → DENIED with message "All initiatives are completed. Add a new initiative before implementing."
-- Living-document format: `PLAN_LIFECYCLE` is `none`/`active`/`dormant` (never `completed`). Dormant means all `### Initiative:` blocks have status completed — add a new initiative to resume work.
-- Legacy format (no `### Initiative:` headers): `PLAN_LIFECYCLE` is `none`/`active`/`dormant` (was `completed` pre-Phase 2). All-phases-done → dormant.
-- Source churn ≥35% since plan update → DENIED.
-- Decision drift ≥5 out-of-sync decisions → DENIED.
-- Source churn 15-34% or drift 2-4 → advisory warning.
-- Edit tool (substring replacement) → skipped (inherently scoped).
-- Files <20 lines → fast-mode bypass with advisory.
-- The `~/.claude` directory → exempt.
-- Non-git directories → exempt.
-
-**Staleness calculation:**
-- **Source churn %** = `changed_source_files / total_source_files * 100` since plan last modified.
-- **Decision drift** = unplanned DEC-IDs + unimplemented DEC-IDs from last surface.sh audit.
-- Churn is cached in `.claude/.plan-churn-cache` keyed on `HEAD_SHORT|plan_mod_epoch`.
-
-**State files read:** `MASTER_PLAN.md`, `.claude/.plan-drift`, `.claude/.plan-churn-cache`
-
-**Configuration:** `PLAN_CHURN_WARN=15`, `PLAN_CHURN_DENY=35` (overridable via env).
+**State files read/written:** `.claude/.test-gate-strikes`, `.claude/.mock-gate-strikes`,
+`.claude/.test-status`, `.claude/.session-events.jsonl`, `.claude/.plan-drift`,
+`.claude/.plan-churn-cache`, `.claude/.checkpoint-counter`, `.claude/.session-changes-<session_id>`
 
 ---
 
@@ -631,31 +525,6 @@ premature tester dispatch before implementer returns.
 
 ---
 
-### checkpoint.sh
-
-**What it does:** Creates git refs at `refs/checkpoints/<branch>/<N>` before
-file writes. Does not touch the working copy or index — uses git plumbing commands.
-
-**Why it exists:** Provides mid-session recovery without stash pollution. Snapshots
-the working directory state before each write so any write can be rewound with `/rewind`.
-
-**What you can count on:**
-- Checkpoint created on every 5th write (threshold).
-- Checkpoint created on first modification of any file in the session.
-- Checkpoints do NOT affect `git status`, `git diff`, or `git stash list`.
-- Checkpoints survive garbage collection because they are named refs.
-- Only fires on feature branches (not main/master).
-- Only fires in git repos.
-- Exempt for meta-repo (`~/.claude`).
-
-**How it works:** Copies the real index to a temp file, runs `git add -A` against
-it, calls `git write-tree` to get a tree SHA, then `git commit-tree` to create a
-commit object. Finally `git update-ref refs/checkpoints/<branch>/<N> <SHA>`.
-
-**State files read/written:** `.claude/.checkpoint-counter`, `.claude/.session-changes-<session_id>`
-
----
-
 ## 4. Feedback Hooks — Post-Execution Quality
 
 These hooks run PostToolUse — after the tool has executed. They cannot undo the
@@ -663,84 +532,48 @@ write but they can inject feedback, update state, and trigger retry loops.
 
 ---
 
-### lint.sh
+### post-write.sh
 
-**What it does:** Auto-detects the project linter and runs it on the modified file.
-Injects linter output as `additionalContext`. Exit code 2 triggers model retry.
+**What it does:** Consolidated PostToolUse:Write|Edit hook. Runs all post-write
+quality checks: linting, session tracking, code complexity advisory, plan alignment,
+and async test execution. Replaces the 5 previously separate PostToolUse:Write|Edit hooks
+(lint.sh, track.sh, code-review.sh, plan-validate.sh, test-runner.sh).
 
-**Why it exists:** Linting errors compound quickly. lint.sh catches them
-immediately after write, before the next file is touched.
+**Why it exists:** Post-write quality feedback must happen immediately after every
+write — before the agent's next action compounds errors. Consolidation reduces
+overhead and keeps the feedback pipeline in a single, coherent place.
 
 **What you can count on:**
 - Linter detection is cached in `.claude/.lint-cache` (project-scoped).
-- If no linter detected, exits silently.
-- Exit code 2 on linter failure triggers the model to fix the issue.
-- Circuit breaker: `.lint-breaker` file prevents infinite retry loops.
-
-**Detected linters:** ruff (Python), black (Python), flake8 (Python), eslint (JS/TS),
-prettier (JS/TS), tsc (TypeScript), clippy (Rust), golangci-lint (Go), rubocop (Ruby).
-
-**State files read/written:** `.claude/.lint-cache`, `.claude/.lint-breaker`
-
----
-
-### track.sh
-
-**What it does:** Records every Write/Edit operation to a session-scoped tracking
-file. Also invalidates `.proof-status = verified` when source files change after
-verification.
-
-**Why it exists:** check-implementer.sh, surface.sh, and check-guardian.sh all
-need to know which files changed in the current session. A single-pass tracking
-file is faster than re-scanning git status on every Stop hook.
-
-**What you can count on:**
+- Exit code 2 on linter failure triggers model retry (feedback loop).
+- Circuit breaker: `.lint-breaker` prevents infinite retry loops.
 - Every file path written this session appears in `.session-changes-<SESSION_ID>`.
-- Append-only, deduplicated by sort -u callers.
 - Source file changes after `verified` status reset proof to `pending`.
-
-**State files written:** `.claude/.session-changes-<SESSION_ID>`, `.claude/.proof-status`
-**State files read:** `.claude/.proof-status`
-
----
-
-### test-runner.sh
-
-**What it does:** Auto-detects the project test framework and runs the full suite
-asynchronously after every Write/Edit. Writes results to `.test-status`.
-
-**Why it exists:** Sacred Practice #4: Nothing Done Until Tested. Running tests
-automatically catches regressions immediately rather than at commit time.
-
-**What you can count on:**
-- Runs async (`async: true` in settings.json) — does not block Claude.
-- Detects pytest, vitest, jest, cargo test, go test, npm test.
+- Test suite runs async after every write — does not block Claude.
 - Writes `pass|0|<epoch>` or `fail|N|<epoch>` to `.test-status`.
-- Results available on next conversation turn via `additionalContext`.
 
-**State files written:** `.claude/.test-status`
+**Incorporated functionality:**
 
----
+- **lint (formerly lint.sh):** Auto-detects and runs the project linter on the modified
+  file. Detected linters: ruff, black, flake8 (Python), eslint, prettier, tsc (JS/TS),
+  clippy (Rust), golangci-lint (Go), rubocop (Ruby). Exit code 2 triggers retry.
 
-### code-review.sh
+- **track (formerly track.sh):** Records every Write/Edit to a session-scoped tracking
+  file. Also invalidates `.proof-status = verified` when source files change post-verification.
+  check-implementer.sh, stop.sh, and check-guardian.sh all read this file.
 
-**What it does:** Lightweight complexity advisory for source files. Detects
-high cyclomatic complexity patterns and injects advisory context.
+- **test-runner (formerly test-runner.sh, async):** Auto-detects test framework and runs
+  the full suite asynchronously. Detects pytest, vitest, jest, cargo test, go test, npm test.
+  Results available on the next conversation turn via `additionalContext`.
 
-**Why it exists:** Provides real-time quality feedback without blocking writes.
+- **code-review (formerly code-review.sh):** Lightweight complexity advisory for source
+  files. Detects high cyclomatic complexity patterns; injects advisory without blocking.
 
-**State files:** None.
+- **plan-validate (formerly plan-validate.sh):** Checks source writes against
+  MASTER_PLAN.md for alignment. Catches plan drift at write-time rather than session end.
 
----
-
-### plan-validate.sh
-
-**What it does:** Checks source writes against MASTER_PLAN.md for alignment.
-Detects when implementation diverges from planned requirements.
-
-**Why it exists:** Catches plan drift at write-time rather than at session end.
-
-**State files:** None.
+**State files read/written:** `.claude/.lint-cache`, `.claude/.lint-breaker`,
+`.claude/.session-changes-<SESSION_ID>`, `.claude/.proof-status`, `.claude/.test-status`
 
 ---
 
@@ -820,7 +653,7 @@ self-approving their own work.
 
 **What you can count on:**
 - The ONLY path to write `verified` to `.proof-status` is via this hook.
-- No agent can write `verified` directly (guard.sh Check 9 blocks it).
+- No agent can write `verified` directly (pre-bash.sh proof-write gate (Check 9) blocks it).
 - Approval keywords detected: `verified`, `approved`, `lgtm`, `looks good`, `ship it`, `approve for commit`.
 - Dual-writes to both the worktree's `.proof-status` and orchestrator's `.proof-status`.
 - On first prompt of session (`.prompt-count` file absent): injects full session context as session-init fallback.
@@ -1057,8 +890,8 @@ Guardian allowed to commit.
 
 **What you can count on:**
 - No Guardian dispatch without `.proof-status = verified` (task-track.sh Gate A).
-- No git commit/merge without `.proof-status = verified` (guard.sh Check 8).
-- No agent can write `verified` to `.proof-status` (guard.sh Check 9 blocks Bash writes).
+- No git commit/merge without `.proof-status = verified` (pre-bash.sh proof gate (Check 8)).
+- No agent can write `verified` to `.proof-status` (pre-bash.sh proof-write gate (Check 9) blocks Bash writes).
 - `prompt-submit.sh` is the only path for human-verified status.
 - `check-tester.sh` is the only path for auto-verified status.
 - Source file changes after `verified` reset status to `pending` (track.sh).
@@ -1100,7 +933,7 @@ Step 8: Orchestrator dispatches Guardian
         → task-track.sh Gate A: reads ".proof-status = verified" → allow
 
 Step 9: Guardian commits
-        → guard.sh Check 8: reads ".proof-status = verified" → allow
+        → pre-bash.sh proof gate (Check 8): reads ".proof-status = verified" → allow
         → Commit proceeds, worktree cleaned up
         → track.sh: any subsequent source writes reset to "pending"
 ```
@@ -1293,20 +1126,20 @@ staging area only).
 
 ### CWD Protection
 
-guard.sh Check 0.5 and 0.75 are part of a defense-in-depth CWD protection system:
+pre-bash.sh CWD canary (Check 0.5) and pre-bash.sh worktree-cd guard (Check 0.75) are part of a defense-in-depth CWD protection system:
 
 **The problem:** When a worktree is deleted, any process whose CWD is inside
 the deleted directory fails with `ENOENT` on macOS (posix_spawn). This breaks
 ALL subsequent hooks (not just Bash) because the shell cannot spawn child processes.
 
-**Prevention (Check 0.75):** Deny `cd .worktrees/foo && <commands>`. Force resubmission
+**Prevention (pre-bash.sh worktree-cd guard (Check 0.75)):** Deny `cd .worktrees/foo && <commands>`. Force resubmission
 with subshell wrapping: `( cd .worktrees/foo && <commands> )`. Subshell CWD is isolated.
 
-**Recovery (Check 0.5):**
+**Recovery (pre-bash.sh CWD canary (Check 0.5)):**
 - Path A: `.cwd` field in hook input is an invalid directory → walk up to nearest git root → emit rewrite with `cd <recovery_dir> && <original_command>`.
 - Path B: `.cwd-recovery-needed` canary file → prepend inline `{ cd . 2>/dev/null || cd "$HOME"; }` guard and continue. Canary is one-shot (deleted on read).
 
-**Canary writes:** guard.sh Check 5 (git worktree remove) and Check 5b (rm -rf .worktrees/)
+**Canary writes:** pre-bash.sh worktree-remove CWD gate (Check 5) (git worktree remove) and pre-bash.sh worktree-rm-rf CWD gate (Check 5b) (rm -rf .worktrees/)
 write the deleted worktree path to `.cwd-recovery-needed` before the removal executes.
 check-guardian.sh also writes the canary after detecting worktree removal.
 
@@ -1543,7 +1376,7 @@ Orchestrator dispatches to Implementer
    │   Gate C.3: Writes ".active-worktree-path" breadcrumb
    │
    ▼
-IMPLEMENTER AGENT (agents/implementer.md, claude-sonnet-4-6, max_turns=75)
+IMPLEMENTER AGENT (agents/implementer.md, claude-sonnet-4-6, max_turns=85)
    │
    ├─ [SubagentStart: subagent-start.sh]
    │   Injects: worktree state, TRACE_DIR env var
@@ -1581,7 +1414,7 @@ Orchestrator dispatches to Tester
    │   Gate B: implementer trace no longer active → allow
    │
    ▼
-TESTER AGENT (agents/tester.md, claude-sonnet-4-6, max_turns=25)
+TESTER AGENT (agents/tester.md, claude-sonnet-4-6, max_turns=40)
    │
    ├─ Reads implementer trace (TRACE_DIR/summary.md)
    ├─ Runs live verification: npm run dev, open browser, test validation
@@ -1617,11 +1450,11 @@ GUARDIAN AGENT (agents/guardian.md, claude-opus-4-6, max_turns=30)
    │
    ├─ git add src/validation.ts tests/validation.test.ts
    ├─ git commit -m "feat: add email validation to signup form"
-   │   [PreToolUse:Bash → guard.sh Check 7: .test-status = pass → allow]
-   │   [PreToolUse:Bash → guard.sh Check 8: .proof-status = verified → allow]
+   │   [PreToolUse:Bash → pre-bash.sh Check 7: .test-status = pass → allow]
+   │   [PreToolUse:Bash → pre-bash.sh proof gate (Check 8): .proof-status = verified → allow]
    │
    ├─ git checkout main && git merge feature/signup-validation
-   │   [PreToolUse:Bash → guard.sh Check 6: .test-status = pass → allow]
+   │   [PreToolUse:Bash → pre-bash.sh Check 6: .test-status = pass → allow]
    │
    ├─ git push origin main
    ├─ gh issue close 42
@@ -1688,7 +1521,7 @@ Done. Feature merged to main.
 
 ### Don't: Use /tmp/ for artifacts
 **Problem:** Littering the system, hard to debug, survives crashes unexpectedly.
-**Solution:** `project/tmp/` directory. guard.sh Check 1 rewrites automatically.
+**Solution:** `project/tmp/` directory. pre-bash.sh Check 1 rewrites automatically.
 
 ### Don't: Mock internal modules
 **Problem:** Tests become brittle, verify the mock not the code.
@@ -1700,15 +1533,15 @@ Done. Feature merged to main.
 
 ### Don't: Commit without tests
 **Problem:** Regressions ship. Debugging time wasted.
-**Solution:** test-gate.sh blocks source writes while failing. guard.sh Check 7 blocks commits.
+**Solution:** pre-write.sh blocks source writes while failing. pre-bash.sh Check 7 blocks commits.
 
 ### Don't: Self-approve verification
 **Problem:** Agent cannot be both builder and judge. Conflicts of interest.
-**Solution:** guard.sh Check 9 blocks agent writes to .proof-status. Only prompt-submit.sh (user) or check-tester.sh (auto-verify) can write `verified`.
+**Solution:** pre-bash.sh proof-write gate (Check 9) blocks agent writes to .proof-status. Only prompt-submit.sh (user) or check-tester.sh (auto-verify) can write `verified`.
 
 ### Don't: cd into a worktree from the orchestrator
 **Problem:** If the worktree is deleted, posix_spawn ENOENT kills ALL subsequent hooks.
-**Solution:** Use `git -C <path>` for git operations. guard.sh Check 0.75 denies chained cd-into-worktree commands.
+**Solution:** Use `git -C <path>` for git operations. pre-bash.sh worktree-cd guard (Check 0.75) denies chained cd-into-worktree commands.
 
 ### Don't: Track tasks in files
 **Problem:** No timestamps, no mobile access, easy to lose, violates Sacred Practice #9.

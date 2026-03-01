@@ -1,0 +1,398 @@
+#!/usr/bin/env bash
+# core-lib.sh — Universal utilities loaded by EVERY hook via source-lib.sh.
+#
+# This is the always-loaded base library. All functions here are safe to call
+# anywhere. Domain libraries (git-lib, plan-lib, trace-lib, session-lib, doc-lib)
+# may depend on functions defined here.
+#
+# @decision DEC-SPLIT-001
+# @title context-lib.sh decomposed into focused domain libraries with lazy loading
+# @status accepted
+# @rationale context-lib.sh was 2,221 lines sourced by every hook. Every hook paid
+#   the full parse cost even for hooks that only need 1-2 functions. The split
+#   creates a small always-loaded core (~200 lines) and larger domain libraries
+#   loaded on demand via require_*() functions in source-lib.sh. Backward
+#   compatibility maintained via context-lib.sh compatibility shim that sources
+#   all modules. No functional changes — pure file reorganization.
+#
+# @decision DEC-REMED-004
+# @title emit_deny()/emit_advisory()/emit_flush() in core-lib.sh
+# @status accepted
+# @rationale Each hook previously defined its own deny() function with subtle
+#   differences: some called _log_deny(), some used jq -Rs escaping, some used
+#   jq --arg escaping. The unified emit_*() family provides a single correct
+#   implementation that: (1) always calls _log_deny for audit trail, (2) always
+#   uses jq -Rs for proper escaping, (3) sets _HOOK_COMPLETED=true to coordinate
+#   with the fail-closed crash trap, (4) supports optional additionalContext param.
+#   Hooks call enable_fail_closed() once to register their name; emit_deny() uses
+#   _HOOK_NAME to tag log entries without requiring per-call repetition.
+#
+# @decision DEC-REMED-003
+# @title declare_gate() replaces comment-based gate scanning
+# @status accepted
+# @rationale gate-inventory.sh previously used static grep patterns to discover
+#   gates (# --- Check N:, # --- Gate N:). This was fragile: any formatting
+#   change broke detection. declare_gate() embeds gate metadata directly in
+#   executable code. When HOOK_GATE_SCAN=1, hooks run in scan-only mode and
+#   emit GATE tab-separated lines before returning 0. gate-inventory.sh calls
+#   each hook with HOOK_GATE_SCAN=1 < /dev/null to harvest the manifest.
+#   No behavioral change in normal mode — declare_gate() is a no-op unless
+#   HOOK_GATE_SCAN=1 is set.
+#
+# @decision DEC-REMED-005
+# @title cache_project_context() for one-time detect_project_root/get_claude_dir
+# @status accepted
+# @rationale detect_project_root() and get_claude_dir() each spawn git subprocesses.
+#   pre-write.sh called detect_project_root() 5 times and get_claude_dir() 3 times
+#   in different gates. cache_project_context() calls each once and stores results
+#   in _CACHED_PROJECT_ROOT and _CACHED_CLAUDE_DIR. Callers replace repeated calls
+#   with $variable references. Measured savings: ~40-80ms per pre-write.sh invocation
+#   (2-4 avoided git subprocesses at ~20ms each on the meta-repo).
+#
+# @decision DEC-REMED-006
+# @title enable_fail_closed() opt-in crash trap with merge-deadlock prevention
+# @status accepted
+# @rationale The crash trap pattern was copy-pasted across pre-bash.sh, pre-write.sh,
+#   and task-track.sh. Each copy had slightly different behavior — some had the
+#   merge-deadlock prevention, some didn't. enable_fail_closed() provides a single
+#   correct implementation: deny on crash unless ~/.claude is in a merge state,
+#   in which case degrade to allow (prevents deadlock when hook source has conflicts).
+#   Pre-bash.sh keeps an INLINE trap before source-lib.sh (to catch library-load
+#   failures), then calls enable_fail_closed() after source-lib.sh succeeds to
+#   replace it with the canonical implementation.
+#
+# Provides:
+#   project_hash         - 8-char SHA-256 hash of path
+#   is_source_file       - Check if file is a source file by extension
+#   is_skippable_path    - Check if file should be skipped (test/config/vendor)
+#   is_test_file         - Check if file is a test file by path/naming
+#   is_claude_meta_repo  - Check if directory is the ~/.claude meta-repo
+#   atomic_write         - Write via temp-file-then-mv (POSIX atomic)
+#   validate_state_file  - Guard corrupt-file reads
+#   read_test_status     - Read .test-status into globals
+#   safe_cleanup         - Delete directory without CWD-deletion bug
+#   append_audit         - Append to .audit-log
+#   declare_gate         - Register a gate (scan-mode aware)
+#   emit_deny            - Emit PreToolUse deny JSON and exit
+#   emit_advisory        - Buffer an advisory message
+#   emit_flush           - Emit all buffered advisories as a single JSON
+#   enable_fail_closed   - Install deny-on-crash EXIT trap
+#   cache_project_context - Cache project root and claude dir
+#   Constants: SOURCE_EXTENSIONS, DECISION_LINE_THRESHOLD, etc.
+
+# project_hash — compute deterministic 8-char hash of a project root path.
+# Duplicated from log.sh so core-lib.sh can be sourced independently.
+# Both definitions are identical; double-sourcing is safe (last definition wins).
+# @decision DEC-ISOLATION-001 (see log.sh for full rationale)
+project_hash() {
+    echo "${1:?project_hash requires a path argument}" | shasum -a 256 | cut -c1-8
+}
+
+# --- Constants ---
+# Single source of truth for thresholds and patterns across all hooks.
+# DECISION: Consolidated constants. Rationale: Magic numbers duplicated across
+# hooks create drift risk when requirements change. Status: accepted.
+DECISION_LINE_THRESHOLD=50
+TEST_STALENESS_THRESHOLD=600    # 10 minutes in seconds
+SESSION_STALENESS_THRESHOLD=1800 # 30 minutes in seconds
+
+# --- Source file detection ---
+# Single source of truth for source file extensions across all hooks.
+# DECISION: Consolidated extension list. Rationale: Source file regex was
+# copy-pasted in 8+ hooks creating drift risk. Status: accepted.
+SOURCE_EXTENSIONS='ts|tsx|js|jsx|py|rs|go|java|kt|swift|c|cpp|h|hpp|cs|rb|php|sh|bash|zsh'
+
+# Check if a file is a source file by extension
+is_source_file() {
+    local file="$1"
+    [[ "$file" =~ \.($SOURCE_EXTENSIONS)$ ]]
+}
+
+# Check if a file should be skipped (test, config, generated, vendor)
+is_skippable_path() {
+    local file="$1"
+    # Skip config files, test files, generated files
+    [[ "$file" =~ (\.config\.|\.test\.|\.spec\.|__tests__|\.generated\.|\.min\.) ]] && return 0
+    # Skip vendor/build directories
+    [[ "$file" =~ (node_modules|vendor|dist|build|\.next|__pycache__|\.git) ]] && return 0
+    return 1
+}
+
+# Check if a file is a test file by path and naming convention
+is_test_file() {
+    local file="$1"
+    [[ "$file" =~ \.test\. ]] && return 0
+    [[ "$file" =~ \.spec\. ]] && return 0
+    [[ "$file" =~ __tests__/ ]] && return 0
+    [[ "$file" =~ _test\.go$ ]] && return 0
+    [[ "$file" =~ _test\.py$ ]] && return 0
+    [[ "$file" =~ test_[^/]*\.py$ ]] && return 0
+    [[ "$file" =~ /tests/ ]] && return 0
+    [[ "$file" =~ /test/ ]] && return 0
+    return 1
+}
+
+# --- Meta-repo detection ---
+# Check if a directory is the ~/.claude meta-infrastructure repo.
+# Uses --git-common-dir so worktrees of ~/.claude are correctly recognized.
+# Usage: is_claude_meta_repo "/path/to/dir"
+# Returns: 0 if meta-repo, 1 otherwise
+is_claude_meta_repo() {
+    local dir="$1"
+    local common_dir
+    common_dir=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null || echo "")
+    # Resolve to absolute if relative
+    if [[ -n "$common_dir" && "$common_dir" != /* ]]; then
+        common_dir=$(cd "$dir" && cd "$common_dir" && pwd)
+    fi
+    # common_dir for ~/.claude is ~/.claude/.git (strip trailing /.git)
+    [[ "${common_dir%/.git}" == */.claude ]]
+}
+
+# Read .test-status and populate TEST_RESULT, TEST_FAILS, TEST_TIME, TEST_AGE globals.
+# Returns 0 on success, 1 if status file doesn't exist.
+# Usage: read_test_status "$PROJECT_ROOT"
+read_test_status() {
+    local root="${1:-.}"
+    local status_file="$root/.claude/.test-status"
+    TEST_RESULT="" TEST_FAILS="" TEST_TIME="" TEST_AGE=""
+    [[ -f "$status_file" ]] || return 1
+    TEST_RESULT=$(cut -d'|' -f1 < "$status_file")
+    TEST_FAILS=$(cut -d'|' -f2 < "$status_file")
+    TEST_TIME=$(cut -d'|' -f3 < "$status_file")
+    local now; now=$(date +%s)
+    TEST_AGE=$(( now - TEST_TIME ))
+    return 0
+}
+
+# --- State file validation ---
+# @decision DEC-INTEGRITY-001
+# @title validate_state_file guards corrupt-file reads in guard.sh
+# @status accepted
+# @rationale guard.sh reads .proof-status and .test-status via cut. A corrupt
+#   or empty file causes cut to return an empty string, which then falls through
+#   to unexpected code paths. Worse, a missing file guarded only by -f can still
+#   fail if the inode is deleted between the check and the read. validate_state_file
+#   validates existence, non-emptiness, and minimum field count before any caller
+#   reads the file — preventing spurious ERR-trap fires that would otherwise cause
+#   deny-on-crash to block legitimate commands.
+# Validate a pipe-delimited state file has expected format.
+# Usage: validate_state_file "/path/to/file" field_count
+# Returns 0 if valid, 1 if invalid/missing/corrupt.
+validate_state_file() {
+    local file="$1"
+    local expected_fields="${2:-1}"
+    [[ ! -f "$file" ]] && return 1
+    [[ ! -s "$file" ]] && return 1
+    local content
+    content=$(head -1 "$file" 2>/dev/null) || return 1
+    [[ -z "$content" ]] && return 1
+    # Count pipe-delimited fields
+    local actual_fields
+    actual_fields=$(echo "$content" | awk -F'|' '{print NF}')
+    [[ "$actual_fields" -ge "$expected_fields" ]] || return 1
+    return 0
+}
+
+# --- Atomic file writer ---
+# @decision DEC-INTEGRITY-004
+# @title Atomic write via temp-file-then-mv for state file safety
+# @status accepted
+# @rationale Writing state files directly (echo > file) can produce truncated or
+# empty files if the process is killed mid-write (e.g., SIGKILL, power loss).
+# temp-file-then-mv is atomic on POSIX filesystems: the destination either has
+# the old content or the new content, never a partial write. The .tmp.$$ suffix
+# makes temp files unique per-process so concurrent writers don't collide.
+#
+# Usage: atomic_write "/path/to/file" "content"
+# Or:    echo "content" | atomic_write "/path/to/file"
+atomic_write() {
+    local target="$1"
+    local content="${2:-}"
+    local tmp="${target}.tmp.$$"
+    mkdir -p "$(dirname "$target")"
+    if [[ -n "$content" ]]; then
+        printf '%s\n' "$content" > "$tmp"
+    else
+        cat > "$tmp"
+    fi
+    mv "$tmp" "$target"
+}
+
+# --- Safe directory cleanup ---
+# Prevents CWD-deletion bug: if the shell's CWD is inside the target,
+# posix_spawn fails with ENOENT for all subsequent commands (including
+# Stop hooks). Always cd out before deleting.
+# Usage: safe_cleanup "/path/to/delete" "$PROJECT_ROOT"
+safe_cleanup() {
+    local target="$1"
+    local fallback="${2:-$HOME}"
+    if [[ "$PWD" == "$target"* ]]; then
+        cd "$fallback" || cd "$HOME" || cd /
+    fi
+    rm -rf "$target"
+}
+
+# --- Audit trail ---
+append_audit() {
+    local root="$1" event="$2" detail="$3"
+    local audit_file="$root/.claude/.audit-log"
+    mkdir -p "$root/.claude"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%S)|${event}|${detail}" >> "$audit_file"
+}
+
+# --- Deny logging ---
+# @decision DEC-PERF-002
+# @title _log_deny() appends deny events to .hook-deny.log for signal analysis
+# @status accepted
+# @rationale Deny events are high-signal: they indicate a hook blocked an
+#   operation. Logging them to .hook-deny.log (separate from timing) enables
+#   analysis of deny rates over time — a key metric for assessing whether
+#   hooks are too aggressive or well-calibrated. The log format is tab-separated:
+#   timestamp, hook_name, reason. Writing errors are suppressed (|| true) so
+#   a full disk or permission problem never turns a deny into an allow.
+#   Called by the deny() function in pre-bash.sh and pre-write.sh before
+#   emitting the deny JSON, so the log entry always precedes the denial.
+#
+# Usage: _log_deny "hook_name" "reason"
+_log_deny() {
+    local hook="$1" reason="$2"
+    local claude_dir="${CLAUDE_DIR:-$HOME/.claude}"
+    printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$hook" "$reason" >> "$claude_dir/.hook-deny.log" 2>/dev/null || true
+}
+
+# =============================================================================
+# Hook Convention Framework — Phase 3
+# =============================================================================
+
+# --- Gate Declaration Framework ---
+# @decision DEC-REMED-003 (see file header for full rationale)
+#
+# State — module-level, initialized once per hook invocation.
+# Hooks call enable_fail_closed() which sets _HOOK_NAME.
+# declare_gate() uses _HOOK_NAME to tag each gate.
+_HOOK_GATES=()
+
+# declare_gate ID NAME [TYPE]
+#   Register a gate with this hook. In normal mode: records gate metadata.
+#   In scan mode (HOOK_GATE_SCAN=1): emits GATE line to stdout and returns 0
+#   (hook exits cleanly after all declare_gate calls complete naturally).
+#   TYPE: deny (default), advisory, or side-effect
+#
+# Usage (place before each gate's logic block):
+#   declare_gate "nuclear-deny" "Nuclear command hard deny" "deny"
+declare_gate() {
+    local id="$1" name="$2" type="${3:-deny}"
+    _HOOK_GATES+=("${id}|${name}|${type}")
+    if [[ "${HOOK_GATE_SCAN:-}" == "1" ]]; then
+        printf 'GATE\t%s\t%s\t%s\t%s\n' "${_HOOK_NAME:-unknown}" "$id" "$name" "$type"
+    fi
+}
+
+# --- Unified Emit Functions ---
+# @decision DEC-REMED-004 (see file header for full rationale)
+#
+# State — set by enable_fail_closed(), read by emit_deny().
+_HOOK_COMPLETED=false
+_HOOK_NAME=""
+_HOOK_ADVISORIES=()
+
+# emit_deny REASON [CONTEXT]
+#   Log the deny, emit PreToolUse deny JSON to stdout, and exit 0.
+#   Sets _HOOK_COMPLETED=true so the crash trap knows to skip its fallback.
+#   REASON: human-readable deny message (will be jq-escaped)
+#   CONTEXT: optional additionalContext string (will be jq-escaped)
+emit_deny() {
+    local reason="$1"
+    local context="${2:-}"
+    _log_deny "${_HOOK_NAME:-unknown}" "$reason"
+    local escaped_reason
+    escaped_reason=$(printf '%s' "$reason" | jq -Rs .)
+    if [[ -n "$context" ]]; then
+        local escaped_context
+        escaped_context=$(printf '%s' "$context" | jq -Rs .)
+        printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s,"additionalContext":%s}}\n' \
+            "$escaped_reason" "$escaped_context"
+    else
+        printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' \
+            "$escaped_reason"
+    fi
+    _HOOK_COMPLETED=true
+    exit 0
+}
+
+# emit_advisory MESSAGE
+#   Buffer an advisory message for later emission via emit_flush().
+#   Advisories are non-blocking (allow) and accumulated across all gates.
+#   Call emit_flush() at the end of the hook to emit a single combined JSON.
+emit_advisory() {
+    local message="$1"
+    _HOOK_ADVISORIES+=("$message")
+}
+
+# emit_flush
+#   Emit all buffered advisory messages as a single PreToolUse JSON object.
+#   If no advisories have been buffered, emits nothing (silent allow).
+#   Sets _HOOK_COMPLETED=true so the crash trap knows checks completed.
+emit_flush() {
+    _HOOK_COMPLETED=true
+    if [[ ${#_HOOK_ADVISORIES[@]} -gt 0 ]]; then
+        local combined
+        combined=$(printf '%s\n' "${_HOOK_ADVISORIES[@]}" | jq -Rs .)
+        printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":%s}}\n' "$combined"
+    fi
+}
+
+# --- Fail-Closed Crash Trap ---
+# @decision DEC-REMED-006 (see file header for full rationale)
+
+# _hook_crash_deny — EXIT trap handler. Emits deny if hook exited without
+# completing. Safe to call multiple times (guarded by _HOOK_COMPLETED).
+# During a merge on ~/.claude, degrades to allow to prevent deadlock.
+_hook_crash_deny() {
+    [[ "$_HOOK_COMPLETED" == "true" ]] && return
+    # During merge on ~/.claude, degrade to allow — prevents deadlock when
+    # hook source has conflicts or runtime errors during merge resolution.
+    local _mgd
+    _mgd="$(git -C "$HOME/.claude" rev-parse --absolute-git-dir 2>/dev/null || echo "")"
+    if [[ -n "$_mgd" && -f "$_mgd/MERGE_HEAD" ]]; then return; fi
+    cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"SAFETY: Hook crashed before completing checks. Command denied. Run: bash -n ~/.claude/hooks/<hook>.sh to diagnose."}}
+EOF
+}
+
+# enable_fail_closed HOOK_NAME
+#   Register the hook name for logging and install the deny-on-crash EXIT trap.
+#   Call this AFTER source-lib.sh succeeds (for hooks that have a pre-source-lib
+#   inline trap, enable_fail_closed replaces it with the canonical implementation).
+#   HOOK_NAME: used in _log_deny() entries and crash messages (e.g. "pre-bash")
+enable_fail_closed() {
+    _HOOK_NAME="${1:?enable_fail_closed requires hook name}"
+    trap '_hook_crash_deny' EXIT
+}
+
+# --- Cached Project Context ---
+# @decision DEC-REMED-005 (see file header for full rationale)
+_CACHED_PROJECT_ROOT=""
+_CACHED_CLAUDE_DIR=""
+
+# cache_project_context
+#   Populate _CACHED_PROJECT_ROOT and _CACHED_CLAUDE_DIR once.
+#   Call early in the hook (after input parse). Replace repeated calls to
+#   detect_project_root() / get_claude_dir() with $variable references.
+#   Safe to call multiple times — only computes on first call.
+cache_project_context() {
+    if [[ -z "$_CACHED_PROJECT_ROOT" ]]; then
+        _CACHED_PROJECT_ROOT=$(detect_project_root)
+    fi
+    if [[ -z "$_CACHED_CLAUDE_DIR" ]]; then
+        _CACHED_CLAUDE_DIR=$(get_claude_dir)
+    fi
+}
+
+# Export core utilities for subshells
+export SOURCE_EXTENSIONS DECISION_LINE_THRESHOLD TEST_STALENESS_THRESHOLD SESSION_STALENESS_THRESHOLD
+export -f project_hash is_source_file is_skippable_path is_test_file is_claude_meta_repo
+export -f read_test_status validate_state_file atomic_write safe_cleanup append_audit _log_deny
+export -f declare_gate emit_deny emit_advisory emit_flush enable_fail_closed _hook_crash_deny
+export -f cache_project_context

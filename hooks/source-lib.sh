@@ -58,6 +58,7 @@ if [[ -z "${_HOOK_NAME:-}" ]]; then
 fi
 
 _hook_log_timing() {
+    local _exit_code=$?  # MUST be first line — capture before anything clobbers it
     local end_ns
     end_ns=$(date +%s%N 2>/dev/null || echo "$(date +%s)000000000")
     local elapsed_ms=$(( (end_ns - _HOOK_START_NS) / 1000000 ))
@@ -66,7 +67,7 @@ _hook_log_timing() {
     # Append: timestamp hook_name event_type elapsed_ms exit_code
     # _HOOK_EVENT_TYPE is set by consolidated hooks (pre-bash, pre-write, post-write, stop).
     # Old 4-field entries (without event_type) are still valid; hook-timing-report.sh handles both formats.
-    printf '%s\t%s\t%s\t%d\t%d\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_HOOK_NAME" "${_HOOK_EVENT_TYPE:-}" "$elapsed_ms" "$?" >> "$timing_log" 2>/dev/null || true
+    printf '%s\t%s\t%s\t%d\t%d\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_HOOK_NAME" "${_HOOK_EVENT_TYPE:-}" "$elapsed_ms" "$_exit_code" >> "$timing_log" 2>/dev/null || true
     # Corpus capture: when HOOK_CORPUS_CAPTURE=1, dump raw input to timestamped file
     # Used by scripts/extract-corpus.sh --capture mode to build a real-world input corpus.
     if [[ "${HOOK_CORPUS_CAPTURE:-}" == "1" && -n "${HOOK_INPUT:-}" ]]; then
@@ -75,7 +76,15 @@ _hook_log_timing() {
         printf '%s\n' "$HOOK_INPUT" > "$corpus_dir/$(date +%Y%m%d-%H%M%S)-${_HOOK_NAME}.json" 2>/dev/null || true
     fi
 }
-trap '_hook_log_timing' EXIT
+# Preserve existing EXIT trap (e.g., crash trap from pre-bash.sh) so both fire on exit.
+# Without this, trap '_hook_log_timing' EXIT would REPLACE the crash trap set by pre-bash.sh
+# before sourcing source-lib.sh, meaning library-load failures would no longer deny.
+_PREV_EXIT_TRAP=$(trap -p EXIT | sed "s/trap -- '\\(.*\\)' EXIT/\\1/" || echo "")
+if [[ -n "$_PREV_EXIT_TRAP" ]]; then
+    trap '_hook_log_timing; eval "$_PREV_EXIT_TRAP"' EXIT
+else
+    trap '_hook_log_timing' EXIT
+fi
 
 # CWD recovery: if the shell's CWD was deleted (e.g., worktree removal between
 # hook invocations), recover before any hook logic runs. Without this, $PWD
