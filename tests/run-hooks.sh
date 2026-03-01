@@ -229,6 +229,11 @@ else
 fi
 rm -f "$DOC_FIXTURE_WITH_HEADER"
 
+# Tests 3 and 4 use a non-git temp dir to prevent plan-check (Gate 2) from
+# firing because CLAUDE_PROJECT_DIR resolves to ~/.claude (which has .git and
+# no MASTER_PLAN.md) when unset. A non-git dir skips plan-check entirely.
+DOC_TEST_DIR=$(mktemp -d)
+
 # Test 3: Deny 50+ line file without @decision
 DOC_FIXTURE_NO_DECISION="$FIXTURES_DIR/doc-gate-no-decision.json"
 LARGE_CONTENT="/**\n * @file test.ts\n * @description Test\n */\n"
@@ -239,7 +244,7 @@ cat > "$DOC_FIXTURE_NO_DECISION" <<EOF
 {"tool_name":"Write","tool_input":{"file_path":"/tmp/test.ts","content":"$LARGE_CONTENT"}}
 EOF
 
-output=$(run_hook "$HOOKS_DIR/pre-write.sh" "$DOC_FIXTURE_NO_DECISION")
+output=$(CLAUDE_PROJECT_DIR="$DOC_TEST_DIR" run_hook "$HOOKS_DIR/pre-write.sh" "$DOC_FIXTURE_NO_DECISION")
 decision=$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
 if [[ "$decision" == "deny" ]]; then
     pass "doc-gate.sh — deny 50+ lines without @decision"
@@ -258,7 +263,7 @@ cat > "$DOC_FIXTURE_WITH_DECISION" <<EOF
 {"tool_name":"Write","tool_input":{"file_path":"/tmp/test.ts","content":"$LARGE_CONTENT_WITH_DEC"}}
 EOF
 
-output=$(run_hook "$HOOKS_DIR/pre-write.sh" "$DOC_FIXTURE_WITH_DECISION")
+output=$(CLAUDE_PROJECT_DIR="$DOC_TEST_DIR" run_hook "$HOOKS_DIR/pre-write.sh" "$DOC_FIXTURE_WITH_DECISION")
 decision=$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
 if [[ "$decision" != "deny" ]]; then
     pass "doc-gate.sh — allow 50+ lines with @decision"
@@ -266,6 +271,7 @@ else
     fail "doc-gate.sh — allow 50+ lines with @decision" "should allow but got deny"
 fi
 rm -f "$DOC_FIXTURE_WITH_DECISION"
+rm -rf "$DOC_TEST_DIR"
 echo ""
 
 # --- Test: test-gate.sh behavioral tests ---

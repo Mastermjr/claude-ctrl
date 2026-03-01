@@ -519,7 +519,7 @@ fi
 
 # Early-exit: only process git commit/merge commands (already confirmed git above)
 declare_gate "doc-freshness" "Documentation freshness enforcement on commit/merge" "advisory"
-if ! echo "$_stripped_cmd" | grep -qE '(^|&&|\|\|?|;)\s*git\s+[^|;&]*\b(commit|merge)\b'; then
+if ! echo "$_stripped_cmd" | grep -qE '(^|&&|\|\|?|;)\s*git\s+[^|;&]*\b(commit|merge)\b' || echo "$_stripped_cmd" | grep -qE '\bmerge-'; then
     emit_flush
     exit 0
 fi
