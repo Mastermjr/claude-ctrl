@@ -262,7 +262,7 @@ EOF
     local output
     output=$(
         export CLAUDE_PROJECT_DIR="$proj"
-        echo "$hook_input" | bash "${HOOKS_DIR}/../archive/legacy-hooks/test-gate.sh" 2>/dev/null
+        echo "$hook_input" | bash "${HOOKS_DIR}/test-gate.sh" 2>/dev/null
     )
 
     # Should deny with trajectory-aware message
@@ -310,7 +310,7 @@ test_gate_no_event_log_fallback() {
     local output
     output=$(
         export CLAUDE_PROJECT_DIR="$proj"
-        echo "$hook_input" | bash "${HOOKS_DIR}/../archive/legacy-hooks/test-gate.sh" 2>/dev/null
+        echo "$hook_input" | bash "${HOOKS_DIR}/test-gate.sh" 2>/dev/null
     )
 
     # Should still deny (falls back to strike behavior)
@@ -340,7 +340,7 @@ test_gate_strike1_advisory_unchanged() {
     local output
     output=$(
         export CLAUDE_PROJECT_DIR="$proj"
-        echo "$hook_input" | bash "${HOOKS_DIR}/../archive/legacy-hooks/test-gate.sh" 2>/dev/null
+        echo "$hook_input" | bash "${HOOKS_DIR}/test-gate.sh" 2>/dev/null
     )
 
     # Strike 1 should ALLOW (with advisory, no deny)
@@ -389,7 +389,7 @@ EOF
     local output
     output=$(
         export CLAUDE_PROJECT_DIR="$proj"
-        echo "$hook_input" | bash "${HOOKS_DIR}/../archive/legacy-hooks/session-summary.sh" 2>/dev/null
+        echo "$hook_input" | bash "${HOOKS_DIR}/session-summary.sh" 2>/dev/null
     )
 
     # Should have a systemMessage
@@ -431,7 +431,7 @@ test_session_summary_no_events_still_works() {
     local output
     output=$(
         export CLAUDE_PROJECT_DIR="$proj"
-        echo "$hook_input" | bash "${HOOKS_DIR}/../archive/legacy-hooks/session-summary.sh" 2>/dev/null
+        echo "$hook_input" | bash "${HOOKS_DIR}/session-summary.sh" 2>/dev/null
     )
 
     # Should still produce a systemMessage (graceful degradation)
@@ -560,7 +560,7 @@ test_gate_scale_50_events_pivot_identified() {
     local output
     output=$(
         export CLAUDE_PROJECT_DIR="$proj"
-        echo "$hook_input" | bash "${HOOKS_DIR}/../archive/legacy-hooks/test-gate.sh" 2>/dev/null
+        echo "$hook_input" | bash "${HOOKS_DIR}/test-gate.sh" 2>/dev/null
     )
 
     # Assert 1: denied

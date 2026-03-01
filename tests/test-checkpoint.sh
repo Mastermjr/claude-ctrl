@@ -16,7 +16,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="${SCRIPT_DIR}/../hooks"
-CHECKPOINT_SH="${HOOKS_DIR}/../archive/legacy-hooks/checkpoint.sh"
+CHECKPOINT_SH="${HOOKS_DIR}/checkpoint.sh"
 LOG_SH="${HOOKS_DIR}/log.sh"
 
 # Colors for output
@@ -38,7 +38,7 @@ pass_test() {
 fail_test() {
     TESTS_FAILED=$((TESTS_FAILED + 1))
     echo -e "${RED}FAIL${NC} $1"
-    [[ -n "${2:-}" ]] && echo -e "  ${YELLOW}Details:${NC} $2"
+    echo -e "  ${YELLOW}Details:${NC} $2"
 }
 
 run_test() {

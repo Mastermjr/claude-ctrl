@@ -471,7 +471,7 @@ test_plan_check_allows_active() {
     result=$(printf '%s\n' $(seq 1 25) | \
         jq -Rs --arg path "$dir/src/main.sh" \
             '{"tool_name":"Write","tool_input":{"file_path":$path,"content":.}}' | \
-        CLAUDE_DIR="$dir/.claude" CLAUDE_PROJECT_DIR="$dir" bash "$HOOKS_DIR/../archive/legacy-hooks/plan-check.sh" 2>/dev/null || echo "")
+        CLAUDE_DIR="$dir/.claude" CLAUDE_PROJECT_DIR="$dir" bash "$HOOKS_DIR/plan-check.sh" 2>/dev/null || echo "")
 
     rm -rf "$dir"
     if echo "$result" | grep -q '"permissionDecision": *"deny"'; then
@@ -492,7 +492,7 @@ test_plan_check_blocks_dormant() {
     result=$(printf '%s\n' $(seq 1 25) | \
         jq -Rs --arg path "$dir/src/main.sh" \
             '{"tool_name":"Write","tool_input":{"file_path":$path,"content":.}}' | \
-        CLAUDE_DIR="$dir/.claude" CLAUDE_PROJECT_DIR="$dir" bash "$HOOKS_DIR/../archive/legacy-hooks/plan-check.sh" 2>/dev/null || echo "")
+        CLAUDE_DIR="$dir/.claude" CLAUDE_PROJECT_DIR="$dir" bash "$HOOKS_DIR/plan-check.sh" 2>/dev/null || echo "")
 
     rm -rf "$dir"
     if echo "$result" | grep -qiE '"permissionDecision": *"deny"'; then
@@ -511,7 +511,7 @@ test_plan_validate_identity_required() {
 
     result=$(jq -n --arg path "$dir/MASTER_PLAN.md" \
         '{"tool_name":"Write","tool_input":{"file_path":$path}}' | \
-        bash "$HOOKS_DIR/../archive/legacy-hooks/plan-validate.sh" 2>/dev/null || echo "")
+        bash "$HOOKS_DIR/plan-validate.sh" 2>/dev/null || echo "")
 
     rm -rf "$dir"
     if echo "$result" | grep -q '"decision": *"block"'; then
@@ -546,7 +546,7 @@ EOF
 
     result=$(jq -n --arg path "$dir/MASTER_PLAN.md" \
         '{"tool_name":"Write","tool_input":{"file_path":$path}}' | \
-        bash "$HOOKS_DIR/../archive/legacy-hooks/plan-validate.sh" 2>/dev/null || echo "")
+        bash "$HOOKS_DIR/plan-validate.sh" 2>/dev/null || echo "")
     rm -rf "$dir"
     pass "T10: plan-validate runs on new format without crash"
 }
@@ -560,7 +560,7 @@ test_plan_validate_no_toplevel_phase_required() {
 
     result=$(jq -n --arg path "$dir/MASTER_PLAN.md" \
         '{"tool_name":"Write","tool_input":{"file_path":$path}}' | \
-        bash "$HOOKS_DIR/../archive/legacy-hooks/plan-validate.sh" 2>/dev/null || echo "")
+        bash "$HOOKS_DIR/plan-validate.sh" 2>/dev/null || echo "")
 
     rm -rf "$dir"
     if echo "$result" | grep -q '"decision": *"block"'; then
@@ -608,7 +608,7 @@ EOF
 
     result=$(jq -n --arg path "$dir/MASTER_PLAN.md" \
         '{"tool_name":"Write","tool_input":{"file_path":$path}}' | \
-        bash "$HOOKS_DIR/../archive/legacy-hooks/plan-validate.sh" 2>/dev/null || echo "")
+        bash "$HOOKS_DIR/plan-validate.sh" 2>/dev/null || echo "")
 
     rm -rf "$dir"
     if echo "$result" | grep -q '"decision": *"block"'; then

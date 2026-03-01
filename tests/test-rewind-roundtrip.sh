@@ -28,7 +28,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="${SCRIPT_DIR}/../hooks"
-CHECKPOINT_SH="${HOOKS_DIR}/../archive/legacy-hooks/checkpoint.sh"
+CHECKPOINT_SH="${HOOKS_DIR}/checkpoint.sh"
 
 # Colors for output
 RED='\033[0;31m'

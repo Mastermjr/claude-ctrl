@@ -129,7 +129,7 @@ run_hook() {
     local repo="$2"
     make_hook_input "$cmd" | \
         CLAUDE_PROJECT_DIR="$repo" \
-        bash "${HOOKS_DIR}/../archive/legacy-hooks/doc-freshness.sh" 2>/dev/null || true
+        bash "${HOOKS_DIR}/doc-freshness.sh" 2>/dev/null || true
 }
 
 echo ""
@@ -660,7 +660,7 @@ fi
 # ============================================================
 echo ""
 echo "--- Test 14: Hook syntax validation (bash -n) ---"
-if bash -n "${HOOKS_DIR}/../archive/legacy-hooks/doc-freshness.sh" 2>/dev/null; then
+if bash -n "${HOOKS_DIR}/doc-freshness.sh" 2>/dev/null; then
     pass "doc-freshness.sh: bash -n passes"
 else
     fail "doc-freshness.sh: bash -n FAILED — syntax error"

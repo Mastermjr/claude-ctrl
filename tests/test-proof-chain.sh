@@ -29,11 +29,11 @@ set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
 HOOKS_DIR="${PROJECT_ROOT}/hooks"
-GUARD_SH="${HOOKS_DIR}/pre-bash.sh"
+GUARD_SH="${HOOKS_DIR}/guard.sh"
 TRACK_SH="${HOOKS_DIR}/track.sh"
 TASK_TRACK_SH="${HOOKS_DIR}/task-track.sh"
 SESSION_INIT_SH="${HOOKS_DIR}/session-init.sh"
-SESSION_SUMMARY_SH="${HOOKS_DIR}/../archive/legacy-hooks/session-summary.sh"
+SESSION_SUMMARY_SH="${HOOKS_DIR}/session-summary.sh"
 
 # Ensure tmp directory exists
 mkdir -p "$PROJECT_ROOT/tmp"
