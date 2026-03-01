@@ -112,7 +112,7 @@ if [[ -e "$(dirname "$FILE_PATH")" ]]; then
                 # @rationale Using absolute FILE_PATH caused all source files in the
                 #   meta-repo (~/.claude) to be excluded because their paths contain
                 #   ".claude". Relative path restricts exclusion to within the project.
-                RELATIVE_PATH="${FILE_PATH#${PROJECT_ROOT}/}"
+                RELATIVE_PATH="${FILE_PATH#"${PROJECT_ROOT}"/}"
                 # @decision DEC-PROOF-SCOPE-001
                 # @title Use write_proof_status() for invalidation to keep all three paths in sync
                 # @status accepted
