@@ -67,12 +67,20 @@ if [[ -n "$TRACE_ID" ]]; then
     _sum_size=$(wc -c < "$TRACE_DIR/summary.md" 2>/dev/null || echo 0)
     if [[ ! -f "$TRACE_DIR/summary.md" ]] || [[ "$_sum_size" -lt 10 ]]; then
         if [[ -z "${RESPONSE_TEXT// /}" ]]; then
+            # Gather diagnostic context for silent-return analysis
+            _diag_plan_size=$(wc -c < "$PROJECT_ROOT/MASTER_PLAN.md" 2>/dev/null || echo "N/A")
+            _diag_agent_size=$(wc -c < "$PROJECT_ROOT/agents/planner.md" 2>/dev/null || echo "N/A")
+            _diag_payload_size=${PAYLOAD_SIZE:-0}
             {
                 echo "# Agent returned empty response ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
                 echo "Agent type: planner"
                 echo "Duration: ${SECONDS:-unknown}s"
                 echo "Likely cause: max_turns exhausted or force-stopped"
+                echo "Diagnostic: MASTER_PLAN.md size=${_diag_plan_size}B agents/planner.md size=${_diag_agent_size}B payload_size=${_diag_payload_size}B"
+                echo "Context hint: Large plan+agent files can exhaust context before planning begins."
             } > "$TRACE_DIR/summary.md" 2>/dev/null || true
+            append_audit "$PROJECT_ROOT" "planner_silent_return" \
+                "empty response: plan=${_diag_plan_size}B agent=${_diag_agent_size}B payload=${_diag_payload_size}B duration=${SECONDS:-?}s"
         else
             echo "$RESPONSE_TEXT" | head -c 4000 > "$TRACE_DIR/summary.md" 2>/dev/null || true
         fi
