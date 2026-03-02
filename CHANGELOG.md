@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `feature/statusline-initiative`: Initiative/phase context in statusline — shows active initiative name and in-progress phase (e.g. "Backlog:P3") between workspace and git clusters; truncates long names, +N suffix for multiple initiatives; 6 new tests (#91)
 - `feature/subagent-token-tracking`: Universal SubagentStop hook parses agent transcript JSONL to accumulate token usage; statusline shows combined tokens as `tokens: 145k (Σ240k)` with sigma grand total; 10 new tests (cc-todos#37)
 - `feature/backlog-foundation`: todo.sh backlog backing layer (hud/count/claim/create) + fire-and-forget auto-capture of deferred-work language in prompt-submit.sh; 15 new tests (#81)
 - `feature/cache-audit`: @decision annotations for statusline dependency chain (DEC-STATUSLINE-DEPS-001) and prompt cache semantics (DEC-CACHE-RESEARCH-001); .gitignore entries for `.session-cost-history` and `.test-status` (#66, #70)

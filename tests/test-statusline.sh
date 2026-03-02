@@ -877,6 +877,136 @@ test_lifetime_cost_not_shown_when_cache_absent() {
 }
 
 # ============================================================================
+# Test group 12: Initiative context segment (issue #91)
+# ============================================================================
+
+# Helper: build .statusline-cache with initiative/phase fields
+make_initiative_cache() {
+    local dir="$1" initiative="$2" phase="$3" active_inits="${4:-1}"
+    mkdir -p "$dir/.claude"
+    printf '{"dirty":0,"worktrees":0,"agents_active":0,"agents_types":"","todo_project":0,"todo_global":0,"lifetime_cost":0,"initiative":"%s","phase":"%s","active_initiatives":%d}' \
+        "$initiative" "$phase" "$active_inits" > "$dir/.claude/.statusline-cache"
+}
+
+test_initiative_absent_when_no_plan() {
+    run_test
+    # No cache file → initiative defaults to "" → segment absent
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"/tmp/p"},"cost":{},"context_window":{}}'
+    local line1
+    line1=$(run_statusline "$json" | head -1 | strip_ansi)
+
+    # Expect no initiative-looking content (no colon-P pattern or bare initiative name)
+    # The key check: segment is absent when no plan
+    if [[ "$line1" != *":P"* ]] && ! printf '%s' "$line1" | grep -qE 'P[0-9]+'; then
+        pass_test "Initiative segment absent when no cache/plan"
+    else
+        fail_test "Initiative segment shown when no plan" "line1=$line1"
+    fi
+}
+
+test_initiative_present_with_phase() {
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    make_initiative_cache "$tmpdir" "Backlog" "#### Phase 3: Implementation" 1
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
+    local line1
+    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    if [[ "$line1" == *"Backlog:P3"* ]]; then
+        pass_test "Initiative segment shows 'Backlog:P3' format"
+    else
+        fail_test "Initiative+phase format wrong" "line1=$line1"
+    fi
+}
+
+test_initiative_present_without_phase() {
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    make_initiative_cache "$tmpdir" "Backlog" "" 1
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
+    local line1
+    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    if [[ "$line1" == *"Backlog"* ]] && [[ "$line1" != *"Backlog:P"* ]]; then
+        pass_test "Initiative segment shows name only when no phase"
+    else
+        fail_test "Initiative without phase format wrong" "line1=$line1"
+    fi
+}
+
+test_initiative_truncation() {
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    # "Backlog Auto-Capture" is >20 chars (20 chars exactly: B-a-c-k-l-o-g- -A-u-t-o---C-a-p-t-u-r-e = 20)
+    # Use a longer name to ensure truncation: "Statusline Initiative Context"
+    make_initiative_cache "$tmpdir" "Statusline Initiative Context" "#### Phase 2: Tests" 1
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
+    local line1
+    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    # Long name should be truncated to first word: "Statusline"
+    if [[ "$line1" == *"Statusline"* ]] && [[ "$line1" != *"Statusline Initiative"* ]]; then
+        pass_test "Initiative name >20 chars truncated to first word"
+    else
+        fail_test "Initiative truncation wrong" "line1=$line1"
+    fi
+}
+
+test_initiative_multiple_shows_plus() {
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    # 3 active initiatives → first name + "+2" suffix
+    make_initiative_cache "$tmpdir" "Backlog" "#### Phase 3: Implementation" 3
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
+    local line1
+    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    if [[ "$line1" == *"Backlog+2:P3"* ]]; then
+        pass_test "Multiple initiatives shows '+N' suffix: 'Backlog+2:P3'"
+    else
+        fail_test "Multiple initiatives +N suffix wrong" "line1=$line1"
+    fi
+}
+
+test_initiative_position_before_dirty() {
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # Cache with both initiative and dirty state
+    printf '{"dirty":5,"worktrees":1,"agents_active":0,"agents_types":"","todo_project":0,"todo_global":0,"lifetime_cost":0,"initiative":"Backlog","phase":"#### Phase 2: Implementation","active_initiatives":1}' \
+        > "$tmpdir/.claude/.statusline-cache"
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
+    local line1
+    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    local pos_initiative pos_dirty
+    pos_initiative=$(printf '%s' "$line1" | grep -bo 'Backlog' | head -1 | cut -d: -f1)
+    pos_dirty=$(printf '%s' "$line1" | grep -bo 'dirty:' | head -1 | cut -d: -f1)
+
+    if [[ -n "$pos_initiative" && -n "$pos_dirty" ]] && (( pos_initiative < pos_dirty )); then
+        pass_test "Initiative segment appears before dirty: segment"
+    else
+        fail_test "Initiative not before dirty" \
+            "line1=$line1 | pos_initiative=$pos_initiative pos_dirty=$pos_dirty"
+    fi
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 
@@ -962,6 +1092,15 @@ echo "--- Lifetime cost display (REQ-P1-001) ---"
 test_lifetime_cost_absent_when_zero
 test_lifetime_cost_shown_when_nonzero
 test_lifetime_cost_not_shown_when_cache_absent
+
+echo ""
+echo "--- Initiative context segment (issue #91) ---"
+test_initiative_absent_when_no_plan
+test_initiative_present_with_phase
+test_initiative_present_without_phase
+test_initiative_truncation
+test_initiative_multiple_shows_plus
+test_initiative_position_before_dirty
 
 echo ""
 echo "========================================="

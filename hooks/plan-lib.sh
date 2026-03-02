@@ -44,6 +44,8 @@ get_plan_status() {
     PLAN_P0_COUNT=0
     PLAN_NOGO_COUNT=0
     PLAN_LIFECYCLE="none"
+    PLAN_ACTIVE_INITIATIVE_NAME=""
+    PLAN_IN_PROGRESS_PHASE=""
 
     [[ ! -f "$root/MASTER_PLAN.md" ]] && return
 
@@ -88,10 +90,11 @@ get_plan_status() {
 
         # Count active initiatives: ### Initiative: blocks with **Status:** active
         # Parse sequentially: enter initiative block on ### Initiative:, capture first Status line
+        # Also capture the first active initiative's name for statusline display.
         PLAN_ACTIVE_INITIATIVES=0
         local _completed_count=0
         if [[ -n "$_active_section" ]]; then
-            local _in_init=false _init_status=""
+            local _in_init=false _init_status="" _init_name=""
             while IFS= read -r _line; do
                 # Pattern B: [[ =~ ]] replaces echo "$_line" | grep -qE (DEC-SIGPIPE-001).
                 # Each grep in a tight read loop spawns a subshell+pipe; when the section
@@ -101,12 +104,18 @@ get_plan_status() {
                     if [[ "$_in_init" == "true" ]]; then
                         if [[ "$_init_status" == "active" ]]; then
                             PLAN_ACTIVE_INITIATIVES=$((PLAN_ACTIVE_INITIATIVES + 1))
+                            # Capture first active initiative name
+                            if [[ -z "$PLAN_ACTIVE_INITIATIVE_NAME" ]]; then
+                                PLAN_ACTIVE_INITIATIVE_NAME="$_init_name"
+                            fi
                         elif [[ "$_init_status" == "completed" ]]; then
                             _completed_count=$((_completed_count + 1))
                         fi
                     fi
                     _in_init=true
                     _init_status=""
+                    # Extract name: everything after "### Initiative: "
+                    _init_name="${_line#*Initiative: }"
                 elif [[ "$_in_init" == "true" && -z "$_init_status" && "$_line" =~ ^\*\*Status:\*\* ]]; then
                     # First Status line after the Initiative header is the initiative status
                     # Case-insensitive match via [[ =~ ]] — bash 3.2 compatible (no ${var,,}).
@@ -122,10 +131,44 @@ get_plan_status() {
             if [[ "$_in_init" == "true" ]]; then
                 if [[ "$_init_status" == "active" ]]; then
                     PLAN_ACTIVE_INITIATIVES=$((PLAN_ACTIVE_INITIATIVES + 1))
+                    # Capture first active initiative name
+                    if [[ -z "$PLAN_ACTIVE_INITIATIVE_NAME" ]]; then
+                        PLAN_ACTIVE_INITIATIVE_NAME="$_init_name"
+                    fi
                 elif [[ "$_init_status" == "completed" ]]; then
                     _completed_count=$((_completed_count + 1))
                 fi
             fi
+        fi
+
+        # Second pass: find the first in-progress phase within the captured active initiative.
+        # Uses _active_section already in memory — no new file I/O.
+        if [[ -n "$PLAN_ACTIVE_INITIATIVE_NAME" && -n "$_active_section" ]]; then
+            local _p2_in_target=false _p2_current_phase="" _p2_done=false
+            while IFS= read -r _line; do
+                # Already found — skip remaining lines
+                [[ "$_p2_done" == "true" ]] && break
+                # Enter target initiative block
+                if [[ "$_line" == "### Initiative: ${PLAN_ACTIVE_INITIATIVE_NAME}" ]]; then
+                    _p2_in_target=true
+                    continue
+                fi
+                # Leave target initiative block on next ### Initiative: or ## header
+                if [[ "$_p2_in_target" == "true" ]]; then
+                    if [[ "$_line" =~ ^'### Initiative:'|^'## ' ]]; then
+                        break
+                    fi
+                    # Track phase headers: "#### Phase N:" — capture the full header
+                    if [[ "$_line" =~ ^'####'[[:space:]]+'Phase'[[:space:]][0-9] ]]; then
+                        _p2_current_phase="$_line"
+                    fi
+                    # When Status: in-progress follows a phase header, capture it
+                    if [[ -n "$_p2_current_phase" && "$_line" =~ ^\*\*Status:\*\*.*[Ii]n-[Pp]rogress ]]; then
+                        PLAN_IN_PROGRESS_PHASE="$_p2_current_phase"
+                        _p2_done=true
+                    fi
+                fi
+            done <<< "$_active_section"
         fi
 
         # Phase counts within Active Initiatives section (for status display)

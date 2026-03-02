@@ -100,6 +100,9 @@ cache_todo_project=-1
 cache_todo_global=-1
 cache_lifetime_cost=0
 cache_subagent_tokens=0
+cache_initiative=""
+cache_phase=""
+cache_active_inits=0
 
 if [[ -f "$CACHE_FILE" ]]; then
   cache_dirty=$(jq -r '.dirty // 0' "$CACHE_FILE" 2>/dev/null || echo 0)
@@ -116,6 +119,9 @@ if [[ -f "$CACHE_FILE" ]]; then
   cache_todo_global=$(jq -r 'if has("todo_global") then .todo_global else -1 end' "$CACHE_FILE" 2>/dev/null || echo -1)
   cache_lifetime_cost=$(jq -r '.lifetime_cost // 0' "$CACHE_FILE" 2>/dev/null || echo 0)
   cache_subagent_tokens=$(jq -r '.subagent_tokens // 0' "$CACHE_FILE" 2>/dev/null || echo 0)
+  cache_initiative=$(jq -r '.initiative // ""' "$CACHE_FILE" 2>/dev/null || echo "")
+  cache_phase=$(jq -r '.phase // ""' "$CACHE_FILE" 2>/dev/null || echo "")
+  cache_active_inits=$(jq -r '.active_initiatives // 0' "$CACHE_FILE" 2>/dev/null || echo 0)
 fi
 
 # ---------------------------------------------------------------------------
@@ -231,6 +237,49 @@ fi
 
 # Cluster A: Model + workspace
 line1=$(printf '\033[2m%s\033[0m \033[1;36m%s\033[0m' "$model" "$workspace")
+
+# Cluster A.5: Initiative context — shows active initiative name and current phase
+# @decision DEC-STATUSLINE-003
+# @title Initiative segment placement between workspace and git state
+# @status accepted
+# @rationale Placing the initiative segment immediately after workspace (Cluster A) groups
+# "where am I / what am I working on" context together before git state. Initiative names
+# are truncated to their first word when longer than 20 characters (e.g. "Backlog Auto-Capture"
+# → "Backlog") to minimize statusline width impact. Phase is extracted as PN notation from
+# "#### Phase N:" headers. When multiple initiatives are active, "+N" suffix shows the
+# overflow count. The segment is omitted entirely when no active initiative exists, matching
+# the conditional pattern used by other optional segments (agents, todos, dirty).
+# Color: cyan (same as workspace segment) to visually link "context" clusters.
+if [[ -n "$cache_initiative" ]]; then
+  # Truncate initiative name: use first word if longer than 20 chars
+  _init_display="$cache_initiative"
+  if [[ ${#_init_display} -gt 20 ]]; then
+    _init_display="${_init_display%% *}"
+  fi
+
+  # Extract phase number from "#### Phase N:" header → "PN"
+  _phase_display=""
+  if [[ -n "$cache_phase" ]]; then
+    # Match digits after "Phase " in the header
+    if [[ "$cache_phase" =~ Phase[[:space:]]([0-9]+) ]]; then
+      _phase_display="P${BASH_REMATCH[1]}"
+    fi
+  fi
+
+  # Build initiative display string
+  _init_str="$_init_display"
+  # Append +N suffix when multiple active initiatives (active_inits - 1 overflow)
+  _extra_inits=$(( cache_active_inits - 1 ))
+  if (( _extra_inits > 0 )); then
+    _init_str="${_init_str}+${_extra_inits}"
+  fi
+  # Append phase if available
+  if [[ -n "$_phase_display" ]]; then
+    _init_str="${_init_str}:${_phase_display}"
+  fi
+
+  line1=$(printf '%s %b \033[36m%s\033[0m' "$line1" "$sep" "$_init_str")
+fi
 
 # Cluster B: Git state — dirty: N  wt: N (combined segment, only if either > 0)
 if (( cache_dirty > 0 || cache_wt > 0 )); then
