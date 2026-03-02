@@ -116,11 +116,21 @@ if [[ -z "$COMMAND" ]]; then
     exit 0
 fi
 
-# Strip quoted strings from COMMAND for pattern-matching detection.
-# Prevents commit message content from triggering git-specific checks.
+# Strip quoted strings AND bash comments from COMMAND for pattern-matching.
+# Quoted strings removed first (Issue #126), then comments stripped (Issue #133).
+# Prevents comment text from triggering git-specific checks (e.g., a comment
+# mentioning "git commit" must not cause Check 2 to deny a read-only command).
 # All downstream checks use $_stripped_cmd for grep/pattern detection.
 # Raw $COMMAND used only for command construction and extract_git_target_dir().
-_stripped_cmd=$(echo "$COMMAND" | sed -E "s/\"[^\"]*\"//g; s/'[^']*'//g")
+#
+# @decision DEC-GUARD-002
+# @title Strip bash comments from _stripped_cmd to prevent false-positive pattern matches
+# @status accepted
+# @rationale Agents prefix commands with descriptive # comments. Without stripping,
+#   comment text like "# mentions git commit" would match Check 2 and deny the command.
+#   Two-pass strip: (1) remove full comment lines, (2) remove inline comments.
+#   Applied after quote-stripping so quoted # chars are already gone.
+_stripped_cmd=$(echo "$COMMAND" | sed -E "s/\"[^\"]*\"//g; s/'[^']*'//g" | sed -E '/^[[:space:]]*#/d; s/[[:space:]]#.*$//')
 
 # Check if a Guardian agent is currently active (marker files in TRACE_STORE).
 is_guardian_active() {

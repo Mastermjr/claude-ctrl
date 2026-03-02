@@ -269,6 +269,48 @@ OUTPUT=$(echo "$INPUT_JSON" | bash "$HOOKS_DIR/pre-bash.sh" 2>&1) || true
 
 assert_deny "$OUTPUT" "git clean -f"
 
+# --- Test 14: False positive — comment line with "git commit" + read-only git on main ---
+run_test "Comment stripping: comment with 'git commit' + git ls-tree on main must NOT be denied"
+
+# This test must run while the current branch is main (or the test repo's default)
+COMMENT_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-comment-XXXXXX")
+git -C "$COMMENT_REPO" init > /dev/null 2>&1
+git -C "$COMMENT_REPO" config user.email "test@test.com" > /dev/null 2>&1
+git -C "$COMMENT_REPO" config user.name "Test" > /dev/null 2>&1
+echo "init" > "$COMMENT_REPO/init.txt"
+git -C "$COMMENT_REPO" add init.txt > /dev/null 2>&1
+git -C "$COMMENT_REPO" commit -m "init" > /dev/null 2>&1
+
+# The comment mentions "git commit" but the actual command is read-only
+CMD="$(printf '# This comment mentions git commit for documentation\ngit -C %s ls-tree HEAD' "$COMMENT_REPO")"
+INPUT_JSON=$(make_input "$CMD")
+
+OUTPUT=$(echo "$INPUT_JSON" | bash "$HOOKS_DIR/pre-bash.sh" 2>&1) || true
+
+rm -rf "$COMMENT_REPO"
+
+assert_allow "$OUTPUT" "comment with 'git commit' + ls-tree"
+
+# --- Test 15: False positive — inline comment with "git commit" on read-only command ---
+run_test "Comment stripping: inline comment with 'git commit' on git ls-files must NOT be denied"
+
+COMMENT_REPO2=$(mktemp -d "$PROJECT_ROOT/tmp/test-comment2-XXXXXX")
+git -C "$COMMENT_REPO2" init > /dev/null 2>&1
+git -C "$COMMENT_REPO2" config user.email "test@test.com" > /dev/null 2>&1
+git -C "$COMMENT_REPO2" config user.name "Test" > /dev/null 2>&1
+echo "init" > "$COMMENT_REPO2/init.txt"
+git -C "$COMMENT_REPO2" add init.txt > /dev/null 2>&1
+git -C "$COMMENT_REPO2" commit -m "init" > /dev/null 2>&1
+
+CMD="git -C $COMMENT_REPO2 ls-files  # check the git commit index"
+INPUT_JSON=$(make_input "$CMD")
+
+OUTPUT=$(echo "$INPUT_JSON" | bash "$HOOKS_DIR/pre-bash.sh" 2>&1) || true
+
+rm -rf "$COMMENT_REPO2"
+
+assert_allow "$OUTPUT" "inline comment with 'git commit'"
+
 # --- Summary ---
 echo ""
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
