@@ -42,13 +42,14 @@ write_statusline_cache() {
 
     # Atomic write — only git/agent state, no plan or test fields
     # @decision DEC-CACHE-003
-    # @title Add todo_project, todo_global, lifetime_cost fields to statusline cache
+    # @title Add todo_project, todo_global, lifetime_cost, lifetime_tokens fields to statusline cache
     # @status accepted
     # @rationale Phase 2 splits the single todo count into project-specific and global
     # counts (REQ-P0-005). Callers set TODO_PROJECT_COUNT and TODO_GLOBAL_COUNT globals
     # before calling write_statusline_cache(). lifetime_cost is the running sum of all
-    # session costs from .session-cost-history (REQ-P1-001). All three default to 0
-    # when not set so the cache is always valid JSON.
+    # session costs from .session-cost-history (REQ-P1-001). lifetime_tokens is the
+    # running sum of all session tokens from .session-token-history (DEC-LIFETIME-TOKENS-003).
+    # All fields default to 0 when not set so the cache is always valid JSON.
     local tmp_cache="${cache_file}.tmp.$$"
     jq -n \
         --arg dirty "${GIT_DIRTY_COUNT:-0}" \
@@ -60,10 +61,11 @@ write_statusline_cache() {
         --arg todo_project "${TODO_PROJECT_COUNT:-0}" \
         --arg todo_global "${TODO_GLOBAL_COUNT:-0}" \
         --arg lifetime_cost "${LIFETIME_COST:-0}" \
+        --arg lifetime_tokens "${LIFETIME_TOKENS:-0}" \
         --arg initiative "${PLAN_ACTIVE_INITIATIVE_NAME:-}" \
         --arg phase "${PLAN_IN_PROGRESS_PHASE:-}" \
         --arg active_initiatives "${PLAN_ACTIVE_INITIATIVES:-0}" \
-        '{dirty:($dirty|tonumber),worktrees:($wt|tonumber),updated:($ts|tonumber),agents_active:($sa_count|tonumber),agents_types:$sa_types,agents_total:($sa_total|tonumber),todo_project:($todo_project|tonumber),todo_global:($todo_global|tonumber),lifetime_cost:($lifetime_cost|tonumber),initiative:$initiative,phase:$phase,active_initiatives:($active_initiatives|tonumber)}' \
+        '{dirty:($dirty|tonumber),worktrees:($wt|tonumber),updated:($ts|tonumber),agents_active:($sa_count|tonumber),agents_types:$sa_types,agents_total:($sa_total|tonumber),todo_project:($todo_project|tonumber),todo_global:($todo_global|tonumber),lifetime_cost:($lifetime_cost|tonumber),lifetime_tokens:($lifetime_tokens|tonumber),initiative:$initiative,phase:$phase,active_initiatives:($active_initiatives|tonumber)}' \
         > "$tmp_cache" && mv "$tmp_cache" "$cache_file"
 }
 

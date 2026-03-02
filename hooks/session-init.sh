@@ -290,6 +290,22 @@ if [[ -f "$_COST_HISTORY" ]]; then
     LIFETIME_COST="${_LIFETIME:-0}"
 fi
 
+# --- Sum lifetime tokens from .session-token-history ---
+# @decision DEC-LIFETIME-TOKENS-003
+# @title Sum lifetime tokens from .session-token-history at session start
+# @status accepted
+# @rationale Mirrors DEC-LIFETIME-COST-001 for tokens. .session-token-history is
+# written by session-end.sh (timestamp|total_tokens|main|subagent|session_id).
+# Summing the total_tokens column with awk at session start is inexpensive
+# (O(N) over ~100 lines) and gives the user a running lifetime token count
+# visible in the statusline as "(Σ1.2M)" next to the current session tokens.
+LIFETIME_TOKENS=0
+_TOKEN_HISTORY="${CLAUDE_DIR}/.session-token-history"
+if [[ -f "$_TOKEN_HISTORY" ]]; then
+    _LIFETIME_TOK=$(awk -F'|' '{sum += $2} END {print sum+0}' "$_TOKEN_HISTORY" 2>/dev/null || echo "0")
+    LIFETIME_TOKENS="${_LIFETIME_TOK:-0}"
+fi
+
 write_statusline_cache "$PROJECT_ROOT"
 
 if [[ "$PLAN_EXISTS" == "true" ]]; then
