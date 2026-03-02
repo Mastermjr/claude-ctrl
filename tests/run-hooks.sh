@@ -39,6 +39,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOOKS_DIR="$(dirname "$SCRIPT_DIR")/hooks"
 FIXTURES_DIR="$SCRIPT_DIR/fixtures"
+SETTINGS="$(dirname "$HOOKS_DIR")/settings.json"
 
 # Source context-lib for safe_cleanup (prevents CWD bricking on rm -rf)
 source "$HOOKS_DIR/context-lib.sh"
@@ -202,7 +203,6 @@ fi
 # --- Test: settings.json is valid ---
 if should_run_section "Configuration"; then
 echo "--- Configuration ---"
-SETTINGS="$(dirname "$HOOKS_DIR")/settings.json"
 if python3 -m json.tool "$SETTINGS" > /dev/null 2>&1; then
     pass "settings.json — valid JSON"
 else

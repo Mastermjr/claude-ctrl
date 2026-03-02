@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hook library bootstrapper — sources log.sh and context-lib.sh.
+# Hook library bootstrapper — sources log.sh and core-lib.sh.
 #
 # Usage: source "$(dirname "$0")/source-lib.sh"
 #
