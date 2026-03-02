@@ -478,23 +478,8 @@ if echo "$_stripped_cmd" | grep -qE 'git\s+[^|;&]*\b(commit|merge)([^a-zA-Z0-9-]
         PROOF_DIR=$(detect_project_root)
     fi
     if git -C "$PROOF_DIR" rev-parse --git-dir > /dev/null 2>&1; then
-        _proof_dir_phash=$(project_hash "$PROOF_DIR")
-        _orch_claude_dir=$(get_claude_dir)
-        if [[ "$PROOF_DIR" == "${HOME}/.claude" ]]; then
-            PROOF_FILE="${PROOF_DIR}/.proof-status-${_proof_dir_phash}"
-            [[ -f "$PROOF_FILE" ]] || PROOF_FILE="${PROOF_DIR}/.proof-status"
-        else
-            PROOF_FILE="${PROOF_DIR}/.claude/.proof-status"
-        fi
-        if [[ ! -f "$PROOF_FILE" ]]; then
-            ORCH_SCOPED_FILE="${_orch_claude_dir}/.proof-status-${_proof_dir_phash}"
-            ORCH_FILE="${_orch_claude_dir}/.proof-status"
-            if [[ -f "$ORCH_SCOPED_FILE" ]]; then
-                PROOF_FILE="$ORCH_SCOPED_FILE"
-            elif [[ -f "$ORCH_FILE" ]]; then
-                PROOF_FILE="$ORCH_FILE"
-            fi
-        fi
+        PROOF_FILE=$(PROJECT_ROOT="$PROOF_DIR" resolve_proof_file)
+        [[ ! -f "$PROOF_FILE" ]] && PROOF_FILE=""
         if [[ -f "$PROOF_FILE" ]]; then
             if validate_state_file "$PROOF_FILE" 1; then
                 PROOF_STATUS=$(cut -d'|' -f1 "$PROOF_FILE")

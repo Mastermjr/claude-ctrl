@@ -55,18 +55,15 @@ fi
 # Checks project-scoped file first, falls back to unscoped for backward compat.
 declare_gate "guardian-proof-gate" "Guardian requires .proof-status = verified" "deny"
 if [[ "$AGENT_TYPE" == "guardian" ]]; then
-    _PHASH=$(project_hash "$PROJECT_ROOT")
-    SCOPED_PROOF_FILE="${CLAUDE_DIR}/.proof-status-${_PHASH}"
-    LEGACY_PROOF_FILE="${CLAUDE_DIR}/.proof-status"
-    if [[ -f "$SCOPED_PROOF_FILE" ]]; then
-        PROOF_FILE="$SCOPED_PROOF_FILE"
-    elif [[ -f "$LEGACY_PROOF_FILE" ]]; then
-        PROOF_FILE="$LEGACY_PROOF_FILE"
-    else
-        PROOF_FILE=""
-    fi
+    _PHASH=$(project_hash "$PROJECT_ROOT")  # keep — needed for guardian marker filename
+    PROOF_FILE=$(resolve_proof_file)
+    [[ ! -f "$PROOF_FILE" ]] && PROOF_FILE=""
     if [[ -n "$PROOF_FILE" && -f "$PROOF_FILE" ]]; then
-        PROOF_STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
+        if validate_state_file "$PROOF_FILE" 2; then
+            PROOF_STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
+        else
+            PROOF_STATUS="corrupt"
+        fi
         if [[ "$PROOF_STATUS" != "verified" ]]; then
             emit_deny "Cannot dispatch Guardian: proof-of-work is '$PROOF_STATUS' (requires 'verified'). Dispatch tester or complete verification before dispatching Guardian."
         fi

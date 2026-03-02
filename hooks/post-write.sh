@@ -82,25 +82,23 @@ if [[ -e "$(dirname "$FILE_PATH")" ]]; then
 
     # Invalidate proof-status when non-test source files change
     # @decision DEC-PROOF-PATH-003
-    # @title Use get_claude_dir() for proof-status path
+    # @title Use resolve_proof_file() for proof-status path (supersedes get_claude_dir approach)
     # @status accepted
-    # @rationale For the meta-repo (PROJECT_ROOT = ~/.claude), TRACKING_DIR is
-    #   "$PROJECT_ROOT/.claude" = "~/.claude/.claude" — double-nested. get_claude_dir()
-    #   handles this correctly. Using it here ensures the proof-status path is consistent
-    #   with where resolve_proof_file(), prompt-submit.sh, and check-tester.sh write it.
-    _PROOF_PHASH=$(project_hash "$PROJECT_ROOT")
-    _PROOF_SCOPED="$(get_claude_dir)/.proof-status-${_PROOF_PHASH}"
-    _PROOF_LEGACY="$(get_claude_dir)/.proof-status"
-    if [[ -f "$_PROOF_SCOPED" ]]; then
-        PROOF_FILE="$_PROOF_SCOPED"
-    elif [[ -f "$_PROOF_LEGACY" ]]; then
-        PROOF_FILE="$_PROOF_LEGACY"
-    else
-        PROOF_FILE="$_PROOF_SCOPED"
-    fi
+    # @rationale Replaced inline scoped/legacy resolution with the canonical resolve_proof_file().
+    #   The function handles meta-repo (PROJECT_ROOT = ~/.claude), breadcrumb-based worktree
+    #   resolution, scoped→legacy fallback, and stale breadcrumb detection in one place.
+    #   write_proof_status() mirrors the same logic for writes, ensuring all 3 paths
+    #   (scoped, legacy, worktree) are invalidated atomically. Previously only the resolved
+    #   PROOF_FILE path was written — worktree copies were missed on invalidation.
+    PROOF_FILE=$(resolve_proof_file)
+    [[ ! -f "$PROOF_FILE" ]] && PROOF_FILE=""
 
-    if [[ -f "$PROOF_FILE" ]]; then
-        PROOF_STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
+    if [[ -n "$PROOF_FILE" && -f "$PROOF_FILE" ]]; then
+        if validate_state_file "$PROOF_FILE" 2; then
+            PROOF_STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
+        else
+            PROOF_STATUS="corrupt"  # skip invalidation for corrupt files
+        fi
         if [[ "$PROOF_STATUS" == "verified" ]]; then
             # @decision DEC-TRACK-GUARDIAN-001
             # @title Skip proof invalidation when Guardian agent is active
@@ -143,7 +141,7 @@ if [[ -e "$(dirname "$FILE_PATH")" ]]; then
                 RELATIVE_PATH="${FILE_PATH#"${PROJECT_ROOT}"/}"
                 if [[ "$FILE_PATH" =~ \.(ts|tsx|js|jsx|py|rs|go|java|kt|swift|c|cpp|h|hpp|cs|rb|php|sh|bash|zsh)$ ]] \
                    && [[ ! "$RELATIVE_PATH" =~ (\.test\.|\.spec\.|__tests__|\.config\.|node_modules|vendor|dist|\.git|\.claude) ]]; then
-                    echo "pending|$(date +%s)" > "$PROOF_FILE"
+                    write_proof_status "pending" "$PROJECT_ROOT"
                 fi
             fi
         fi
