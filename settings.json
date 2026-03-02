@@ -326,5 +326,6 @@
   "skipDangerousModePermissionPrompt": true,
   "installation": {
     "method": "native"
-  }
+  },
+  "model": "opus"
 }

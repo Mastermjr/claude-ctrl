@@ -78,6 +78,11 @@ The Claude Code configuration directory. It shapes how Claude Code operates acro
 | 2026-03-02 | DEC-RSM-STATEDIR-001 | robust-state-mgmt | Unified state directory $CLAUDE_DIR/state/ | Eliminates breadcrumb heuristics; clean per-project/worktree/agent scoping |
 | 2026-03-02 | DEC-RSM-SELFCHECK-001 | robust-state-mgmt | Triple self-validation at session startup | Version sentinels + generation file + bash -n catch different failure modes |
 | 2026-03-02 | DEC-RSM-DAEMON-001 | robust-state-mgmt | Unix socket state daemon for multi-instance coordination | Graceful degradation; fencing tokens per Kleppmann; MCP bridge for web agents |
+| 2026-03-02 | DEC-BL-TODO-001 | backlog-auto-capture | Restore todo.sh as standalone script matching hook call signatures | Hooks already reference scripts/todo.sh; matches statusline.sh pattern; zero overhead when not called |
+| 2026-03-02 | DEC-BL-CAPTURE-001 | backlog-auto-capture | Fire-and-forget auto-capture in prompt-submit.sh | prompt-submit.sh must stay <100ms; background todo.sh create adds zero latency |
+| 2026-03-02 | DEC-BL-SCAN-001 | backlog-auto-capture | Standalone scan-backlog.sh with /scan command | Script + command pattern for testability; reusable from gaps-report.sh and CI |
+| 2026-03-02 | DEC-BL-GAPS-001 | backlog-auto-capture | gaps-report.sh aggregating .plan-drift, scan-backlog.sh, gh issues | Unified accountability view from multiple existing data sources |
+| 2026-03-02 | DEC-BL-TRIGGER-001 | backlog-auto-capture | Immediate fire-and-forget auto-capture on deferral detection | Batching risks data loss on crash; immediate is reliable and simple |
 
 ---
 
@@ -686,6 +691,267 @@ Main is sacred. Each phase works in its own worktree:
 - Research: `tmp/metanoia-refactor-report.md` (incident history, benchmark data)
 - Key patterns: Kleppmann fencing tokens, CRDT monotonic lattice, graceful degradation
 - Current state files: `.proof-status-{phash}`, `.test-status`, `.active-guardian-*`, `.active-autoverify-*`, `.active-worktree-path`, `state.json`
+
+### Initiative: Backlog Auto-Capture & Gaps Reporting
+**Status:** active
+**Started:** 2026-03-02
+**Goal:** Ensure nothing falls through the cracks by auto-capturing deferred work as GitHub Issues, scanning codebases for untracked markers, and producing unified accountability gaps reports.
+
+> Claude Code sessions routinely defer work ("we'll do that later") and accumulate technical debt markers (TODOs, FIXMEs, HACKs) without systematic tracking. The existing deferral detection in prompt-submit.sh only suggests using /backlog — it doesn't create issues. The todo.sh script that hooks depend on is missing entirely, causing silent failures in session-init.sh and stop.sh. Meanwhile, @decision drift detection exists in stop.sh but has no counterpart for TODO/FIXME scanning, and there is no single view aggregating all accountability gaps. This initiative restores the missing foundation (todo.sh), upgrades deferral detection to auto-capture, adds codebase scanning for debt markers, and produces a unified gaps report.
+
+**Dominant Constraint:** simplicity — hooks must remain fast (<100ms), scanning is on-demand only, auto-capture uses fire-and-forget to avoid latency impact
+
+#### Goals
+- REQ-GOAL-001: Every deferred-work conversation automatically becomes a tracked GitHub Issue with context (file, line, session)
+- REQ-GOAL-002: All TODO/FIXME/HACK markers in code are discoverable via scanning, with GitHub Issues created or updated to match
+- REQ-GOAL-003: A single gaps report aggregates all accountability gaps (open issues, untracked markers, decision drift, stale items) into an actionable view
+- REQ-GOAL-004: The missing todo.sh backing script is restored, unblocking all hook integrations that depend on it
+
+#### Non-Goals
+- REQ-NOGO-001: Real-time TODO scanning on every hook run — too expensive; scanning is on-demand only
+- REQ-NOGO-002: Auto-closing issues when TODOs are removed from code — requires git history diffing; separate initiative
+- REQ-NOGO-003: Cross-project aggregation of gaps reports — each project gets its own report; global view is P2
+- REQ-NOGO-004: IDE integration (VS Code extension for inline TODO tracking) — out of scope, CLI-only
+- REQ-NOGO-005: Modifying existing @decision enforcement in stop.sh — that system works; we build alongside it
+
+#### Requirements
+
+**Must-Have (P0)**
+
+- REQ-P0-001: Restore scripts/todo.sh with hud, count, claim, and create methods matching existing hook call signatures
+  Acceptance: Given session-init.sh calls `todo.sh hud`, When todo.sh exists, Then it returns formatted backlog counts without error. Given stop.sh calls `todo.sh count --all`, When called, Then it returns `project|global|config|total` pipe-delimited counts.
+- REQ-P0-002: Auto-capture of deferred-work language creates GitHub Issues automatically (not just advisory)
+  Acceptance: Given a user says "we'll do that later" in a prompt, When prompt-submit.sh detects deferral language, Then a GitHub Issue is created via fire-and-forget todo.sh with label `claude-todo` and context, and the issue creation is confirmed in additionalContext.
+- REQ-P0-003: On-demand codebase scanning for TODO/FIXME/HACK markers with issue correlation
+  Acceptance: Given a developer invokes /scan, When scan-backlog.sh runs, Then it outputs a table of all markers with file:line, type, text, and linked issue (if any). Untracked markers are flagged.
+- REQ-P0-004: Gaps report aggregating open issues, untracked markers, and decision drift
+  Acceptance: Given a developer invokes /gaps, When gaps-report.sh runs, Then it outputs sections for open backlog issues, untracked code markers, decision drift (from .plan-drift), and a summary accountability score.
+
+**Nice-to-Have (P1)**
+
+- REQ-P1-001: Auto-capture includes file:line references when conversation context mentions specific files
+  Criterion: Issue body includes file reference when the deferral was about a specific file being discussed.
+- REQ-P1-002: Scanner deduplicates — if a TODO already has a matching issue, it links rather than creating a duplicate
+  Criterion: Scanner searches existing issues by body content before creating new ones.
+- REQ-P1-003: Gaps report includes staleness metrics (issues older than 14 days, TODOs older than last commit)
+  Criterion: Report shows age of each item and flags stale ones.
+
+**Future Consideration (P2)**
+
+- REQ-P2-001: Cross-project gaps dashboard aggregating all projects
+- REQ-P2-002: Git blame integration to attribute TODO age and author
+- REQ-P2-003: Automated priority inference from marker context (HACK > FIXME > TODO)
+
+#### Definition of Done
+
+All P0 requirements (001-004) satisfied. todo.sh hud/count/claim/create work without error from hooks. Deferral detection in prompt-submit.sh auto-creates issues. /scan command produces accurate marker inventory. /gaps command produces unified accountability report. Existing 159-test suite passes with no regressions. New tests added for todo.sh, scan-backlog.sh, and gaps-report.sh.
+
+#### Architectural Decisions
+
+- DEC-BL-TODO-001: Restore todo.sh as standalone script in scripts/ matching existing hook call signatures
+  Addresses: REQ-P0-001, REQ-GOAL-004.
+  Rationale: Hooks already reference `scripts/todo.sh` with specific subcommands (hud, count, claim). Matches the established pattern where hooks call scripts (statusline.sh, worktree-roster.sh). A domain library in hooks/ would require require_backlog() and source overhead; a standalone script is called only when needed, zero overhead otherwise.
+
+- DEC-BL-CAPTURE-001: Fire-and-forget auto-capture in prompt-submit.sh via todo.sh create
+  Addresses: REQ-P0-002, REQ-GOAL-001.
+  Rationale: prompt-submit.sh runs on every user prompt and must stay fast (<100ms). Inline gh issue create takes 500ms-2s (network). Fire-and-forget (`todo.sh create "..." &`) adds zero latency. The background process handles issue creation independently. If it fails, the advisory message still appears as fallback.
+
+- DEC-BL-SCAN-001: Standalone scan-backlog.sh with /scan command wrapper
+  Addresses: REQ-P0-003, REQ-GOAL-002.
+  Rationale: Script + command pattern (same as statusline.sh, worktree-roster.sh) keeps scanning logic testable and reusable from gaps-report.sh and CI. A skill would fork context unnecessarily for what is fundamentally grep + issue-list correlation. Uses rg (ripgrep) for scanning, matching stop.sh's existing @decision scanning pattern.
+
+- DEC-BL-GAPS-001: Standalone gaps-report.sh aggregating .plan-drift, scan-backlog.sh, and gh issues
+  Addresses: REQ-P0-004, REQ-GOAL-003.
+  Rationale: The gaps report must combine data from multiple sources: .plan-drift (written by stop.sh surface section), scan-backlog.sh output (TODO/FIXME scan), and gh issue list (open backlog). A standalone script can call scan-backlog.sh as a subprocess and read .plan-drift as a file, producing a unified markdown report. Command wrapper (/gaps) provides the user-facing interface.
+
+- DEC-BL-TRIGGER-001: Immediate fire-and-forget auto-capture on deferral detection
+  Addresses: REQ-P0-002.
+  Rationale: Batching deferrals to session end risks losing them on crash. Immediate creation with fire-and-forget is reliable and simple. The /backlog command already handles manual creation with interview workflow for intentional items. Auto-capture handles the conversational deferrals that would otherwise be lost. Deduplication is P1.
+
+#### Phase 1: Foundation -- todo.sh + Hook Integration
+**Status:** planned
+**Decision IDs:** DEC-BL-TODO-001, DEC-BL-CAPTURE-001, DEC-BL-TRIGGER-001
+**Requirements:** REQ-P0-001, REQ-P0-002
+**Issues:** #81
+**Definition of Done:**
+- REQ-P0-001 satisfied: todo.sh hud, count, claim, create all functional; session-init.sh and stop.sh integrations work
+- REQ-P0-002 satisfied: prompt-submit.sh auto-creates issues on deferral detection via fire-and-forget
+
+##### Planned Decisions
+- DEC-BL-TODO-001: todo.sh as standalone script — matches existing hook call signatures — Addresses: REQ-P0-001
+- DEC-BL-CAPTURE-001: Fire-and-forget auto-capture — zero latency impact on prompt-submit.sh — Addresses: REQ-P0-002
+- DEC-BL-TRIGGER-001: Immediate capture — reliable, no session-crash risk — Addresses: REQ-P0-002
+
+##### Work Items
+
+**W1-0: Create scripts/todo.sh with hud, count, claim, create subcommands**
+- `hud` subcommand: query `gh issue list --label claude-todo --state open` for both project and global repos, format as compact HUD lines for session-init injection
+- `count --all` subcommand: return `project|global|config|total` pipe-delimited counts matching stop.sh expectations
+- `claim N [--auto] [--global]` subcommand: assign issue to current session, add comment "Claimed by Claude Code session"
+- `create "title" [--body "..."] [--context "..."]` subcommand: create issue with `gh issue create --label claude-todo`, return issue URL
+- Handle missing `gh` gracefully (exit 0 with empty output, no errors)
+- Respect scope: project repo when in git context, global repo (cc-todos) otherwise
+
+**W1-1: Upgrade prompt-submit.sh deferral detection to auto-capture**
+- Replace the advisory-only injection (line 239-241) with fire-and-forget issue creation
+- Extract deferral text from prompt context (the sentence containing the trigger word)
+- Call `scripts/todo.sh create "$DEFERRAL_TEXT" --context "session:$SESSION_ID" &`
+- Keep the advisory injection as well (so the model knows an issue was created)
+- Update the advisory message to say "Auto-captured as backlog issue" instead of "Suggest using /backlog"
+
+**W1-2: Verify session-init.sh and stop.sh integrations work**
+- session-init.sh line 102-110: todo.sh hud call should now succeed and inject HUD lines
+- stop.sh line 564-573: todo.sh count --all should now succeed and show pending counts
+- prompt-submit.sh line 223-236: todo.sh claim should now work for auto-claim on issue refs
+- No code changes needed in these hooks — they already have the correct call signatures
+
+**W1-3: Tests for todo.sh**
+- Test: `todo.sh hud` returns formatted output (mock gh with fixture data)
+- Test: `todo.sh count --all` returns pipe-delimited format
+- Test: `todo.sh create "test title"` creates issue (mock gh)
+- Test: `todo.sh` with missing gh exits gracefully
+- Test: prompt-submit.sh deferral detection triggers todo.sh create (integration test)
+
+##### Dispatch Plan
+- Dispatch 1: W1-0, W1-1, W1-2, W1-3 (all tightly coupled — single script + hook modifications + tests)
+
+##### Critical Files
+- `scripts/todo.sh` — new file, the missing backing script for all backlog operations
+- `hooks/prompt-submit.sh` — deferral detection upgrade (line 239-241)
+- `hooks/session-init.sh` — verification only (no changes, existing todo.sh hud call)
+- `hooks/stop.sh` — verification only (no changes, existing todo.sh count call)
+- `tests/run-hooks.sh` — new test additions for todo.sh
+
+##### Decision Log
+<!-- Guardian appends here after phase completion -->
+
+#### Phase 2: Codebase Scanner -- scan-backlog.sh + /scan
+**Status:** planned
+**Decision IDs:** DEC-BL-SCAN-001
+**Requirements:** REQ-P0-003
+**Issues:** #82
+**Definition of Done:**
+- REQ-P0-003 satisfied: /scan produces accurate marker inventory with file:line, type, text, and issue linkage
+
+##### Planned Decisions
+- DEC-BL-SCAN-001: Standalone scan-backlog.sh with rg-based scanning — testable, reusable — Addresses: REQ-P0-003
+
+##### Work Items
+
+**W2-0: Create scripts/scan-backlog.sh — rg-based marker scanner**
+- Scan patterns: `TODO`, `FIXME`, `HACK`, `XXX`, `OPTIMIZE`, `TEMP`, `WORKAROUND`
+- Use rg (ripgrep) with `--line-number --no-heading` for structured output
+- Respect .gitignore (rg does this by default)
+- Skip vendor/, node_modules/, .git/, archive/, _archive/ directories
+- Output format: JSON array of `{file, line, type, text, issue_ref}` objects
+- Also support `--format table` for human-readable markdown table output
+- Exit codes: 0 = markers found, 1 = no markers, 2 = error
+
+**W2-1: Issue correlation — match markers against existing issues**
+- Query `gh issue list --label claude-todo --state open --json number,title,body --limit 200`
+- For each found marker, search issue bodies for matching file:line reference
+- If match found, set `issue_ref` to the issue number
+- If no match, flag as "untracked"
+- Correlation is best-effort (body search), not guaranteed (P1 dedup improves this)
+
+**W2-2: Create commands/scan.md — /scan command**
+- Parse $ARGUMENTS for options: `--json` (raw JSON output), `--create` (auto-create issues for untracked markers)
+- Default: human-readable table showing all markers with tracking status
+- With `--create`: call `todo.sh create` for each untracked marker with file:line in body
+- Summary line: "Found N markers: M tracked, K untracked"
+
+**W2-3: Tests for scan-backlog.sh**
+- Test: scan finds TODO, FIXME, HACK markers in test fixtures
+- Test: scan respects .gitignore exclusions
+- Test: issue correlation matches markers to existing issues
+- Test: JSON output format is valid
+- Test: table output format is readable
+
+##### Dispatch Plan
+- Dispatch 1: W2-0, W2-1, W2-2, W2-3 (tightly coupled — scanner + correlation + command + tests)
+
+##### Critical Files
+- `scripts/scan-backlog.sh` — new file, the codebase marker scanner
+- `commands/scan.md` — new file, /scan command wrapper
+- `scripts/todo.sh` — used for issue queries and creation (Phase 1 dependency)
+- `tests/run-hooks.sh` — new test additions for scan-backlog.sh
+
+##### Decision Log
+<!-- Guardian appends here after phase completion -->
+
+#### Phase 3: Gaps Report -- gaps-report.sh + /gaps
+**Status:** planned
+**Decision IDs:** DEC-BL-GAPS-001
+**Requirements:** REQ-P0-004
+**Issues:** #83
+**Definition of Done:**
+- REQ-P0-004 satisfied: /gaps produces unified accountability report with open issues, untracked markers, decision drift, and summary score
+
+##### Planned Decisions
+- DEC-BL-GAPS-001: Standalone gaps-report.sh aggregating multiple data sources — unified accountability view — Addresses: REQ-P0-004
+
+##### Work Items
+
+**W3-0: Create scripts/gaps-report.sh — unified accountability aggregator**
+- Section 1: Open Backlog Issues — `gh issue list --label claude-todo --state open` formatted as table
+- Section 2: Untracked Code Markers — call `scan-backlog.sh --json`, filter to untracked only
+- Section 3: Decision Drift — read `.plan-drift` file (written by stop.sh surface section), format unplanned/unimplemented counts
+- Section 4: Staleness — issues older than 14 days (configurable via STALE_THRESHOLD_DAYS env var)
+- Section 5: Summary Score — weighted score: open_issues * 1 + untracked_markers * 2 + drift_count * 3 + stale_count * 1 (lower is better)
+- Output format: markdown sections with tables, human-readable
+- Also support `--json` for machine-readable output
+
+**W3-1: Create commands/gaps.md — /gaps command**
+- No arguments: full gaps report
+- `--json`: machine-readable output
+- `--section <name>`: only show specific section (issues, markers, drift, staleness, score)
+- Present results to user and suggest remediation actions for worst gaps
+
+**W3-2: Integration with existing stop.sh surface data**
+- Read `.plan-drift` for decision drift counts (already written by stop.sh lines 367-377)
+- Read `.doc-drift` for documentation freshness data (already written by stop.sh lines 380-391)
+- Read `.audit-log` for historical gap trends (already written by stop.sh lines 355-364)
+- No modifications to stop.sh needed — just consume its output files
+
+**W3-3: Tests for gaps-report.sh**
+- Test: report includes all 5 sections with correct formatting
+- Test: summary score calculation is correct
+- Test: report handles missing .plan-drift gracefully (no surface data = skip drift section)
+- Test: report handles missing scan-backlog.sh gracefully (degraded mode)
+- Test: JSON output format is valid
+
+##### Dispatch Plan
+- Dispatch 1: W3-0, W3-1, W3-2, W3-3 (tightly coupled — report + command + integration + tests)
+
+##### Critical Files
+- `scripts/gaps-report.sh` — new file, the unified accountability aggregator
+- `commands/gaps.md` — new file, /gaps command wrapper
+- `scripts/scan-backlog.sh` — called as subprocess for marker scanning (Phase 2 dependency)
+- `.plan-drift` — consumed for decision drift data (written by stop.sh)
+- `.doc-drift` — consumed for documentation freshness data (written by stop.sh)
+- `tests/run-hooks.sh` — new test additions for gaps-report.sh
+
+##### Decision Log
+<!-- Guardian appends here after phase completion -->
+
+#### Backlog Auto-Capture Worktree Strategy
+
+Main is sacred. Each phase works in its own worktree:
+- **Phase 1:** `~/.claude/.worktrees/backlog-foundation` on branch `feature/backlog-foundation`
+- **Phase 2:** `~/.claude/.worktrees/backlog-scanner` on branch `feature/backlog-scanner`
+- **Phase 3:** `~/.claude/.worktrees/backlog-gaps` on branch `feature/backlog-gaps`
+
+#### Backlog Auto-Capture References
+
+- Issue #57: Auto-file backlog issues when agents encounter errors (related)
+- Issue #38: Timeout wrappers for todo.sh hud and gh run list calls (related)
+- `hooks/prompt-submit.sh` — deferral detection (line 239), auto-claim (line 223), todo.sh HUD (line 102)
+- `hooks/stop.sh` — surface section (@decision audit, plan drift), session summary (todo counts)
+- `hooks/session-init.sh` — todo.sh HUD injection at startup
+- `commands/backlog.md` — existing /backlog command (manual creation)
+- `.plan-drift` — decision drift state file written by stop.sh
+- `.doc-drift` — documentation freshness state file written by stop.sh
+- `.audit-log` — historical gap audit log written by stop.sh
 
 ---
 

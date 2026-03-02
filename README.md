@@ -214,6 +214,110 @@ For the complete agent protocol and dispatch rules, see [`ARCHITECTURE.md`](ARCH
 
 ---
 
+## Performance
+
+The Metanoia refactor (deployed 2026-02-23) consolidated 17 individual hook scripts into 4 entry points backed by 10 lazy-loaded domain libraries. The result: **74% less hook overhead per session** with zero governance loss.
+
+### Architecture Change
+
+```
+Before (v2.0):                          After (Metanoia):
+
+Bash cmd fires 3 hooks:                 Bash cmd fires 1 hook:
+  guard.sh          134ms avg             pre-bash.sh       93ms p50
+  auto-review.sh     83ms avg               (guard + auto-review + doc-freshness
+  doc-freshness.sh   50ms avg                merged, libraries lazy-loaded)
+  ─────────────────────────
+  Total:            ~267ms               Total:             ~93ms  (65% reduction)
+
+Write cmd fires 6 hooks:                Write cmd fires 1 hook:
+  branch-guard.sh    48ms avg             pre-write.sh      100ms p50
+  plan-check.sh     134ms avg               (all 6 merged, require_*() loads
+  doc-gate.sh        58ms avg                only needed domains)
+  test-gate.sh       10ms avg
+  mock-gate.sh       28ms avg
+  checkpoint.sh      25ms avg
+  ─────────────────────────
+  Total:            ~303ms               Total:            ~100ms  (67% reduction)
+```
+
+### Benchmark Results
+
+Measured with `tests/bench-hooks.sh` (5 iterations per fixture, 63 fixtures total). Timing via cross-platform nanosecond library (`tests/lib/timing.sh`).
+
+**Pre-Bash** — fires before every Bash tool call:
+
+| Scenario | p50 | p95 |
+|----------|-----|-----|
+| Nuclear denials (`rm -rf /`, fork bomb, `dd`, shutdown) | 50–84ms | 52–87ms |
+| Safe commands (`ls`, `git status`, `curl`) | 88–96ms | 90–98ms |
+| Git write operations (`commit`, `merge`, `reset --hard`) | 116–163ms | 117–167ms |
+| Git remote merge (`git -C <path> merge`) | 250ms | 258ms |
+
+**Pre-Write** — fires before every Write/Edit tool call:
+
+| Scenario | p50 | p95 |
+|----------|-----|-----|
+| Plan and config files (MASTER_PLAN.md, CLAUDE.md) | 86–102ms | 88–104ms |
+| Test files | 113ms | 117ms |
+| Source files on feature branch | 133–135ms | 136–137ms |
+| Large files requiring @decision audit | 228ms | 229ms |
+
+**Post-Write** — fires after every Write/Edit (lint, track, validate):
+
+| Scenario | p50 | p95 |
+|----------|-----|-----|
+| All post-write scenarios | 39–42ms | 39–44ms |
+
+**Lifecycle hooks:**
+
+| Hook | p50 | p95 | Fires on |
+|------|-----|-----|----------|
+| prompt-submit.sh | 276ms | 278ms | Every user message |
+| task-track.sh | 233–254ms | 253–262ms | Agent dispatch |
+| stop.sh | 1,091–1,150ms | 1,111–1,207ms | End of every response |
+
+Library-load baseline (sourcing `context-lib.sh` cold): **13ms**.
+
+### Production Metrics
+
+Derived from 39,644 timing entries across 5 days of real sessions. Pre-refactor entries use the legacy 4-field format; post-refactor entries use the new 5-field format with event-type classification.
+
+| Hook | Pre-Refactor Avg | Post-Refactor Avg | Improvement |
+|------|-------------------|-------------------|-------------|
+| Bash protection | 134ms (guard alone) | 128ms (all 3 merged) | Same latency, 3x fewer spawns |
+| Write protection | 303ms (6 hooks summed) | 66ms (all 6 merged) | **78% faster** |
+| Post-write tracking | 42ms | 6ms | **86% faster** |
+
+### Session-Level Impact
+
+Modeled on a representative session: 50 Bash commands + 20 Write/Edit calls.
+
+| Metric | Pre-Refactor | Post-Refactor | Savings |
+|--------|-------------|---------------|---------|
+| Shell processes spawned | ~270 | ~70 | **74% fewer** |
+| Total hook overhead | ~26s | ~6.7s | **74% less** |
+| Library code loaded per hook | 3,222 lines (full) | ~1,200 lines (selective) | **63% less** |
+
+The lazy-loading mechanism (`require_git()`, `require_plan()`, `require_trace()`, etc.) means each hook loads only the domain libraries it actually needs. A simple `git status` check loads `core-lib.sh` (400 lines) and `git-lib.sh` (76 lines). A source file write additionally loads `plan-lib.sh` and `doc-lib.sh`. The full 3,222-line library set is never loaded by any single invocation.
+
+### Test Suite
+
+| Metric | Value |
+|--------|-------|
+| Total tests | 160 |
+| Passing | 159 (99.4%) |
+| Benchmark fixtures | 63 |
+| Test scopes (`--scope`) | 10 (syntax, pre-bash, pre-write, post-write, unit, session, integration, trace, gate, state) |
+| Full suite runtime | 45–90s |
+| Scoped run runtime | 5–15s |
+
+Run benchmarks: `bash tests/bench-hooks.sh`
+Run timing report: `bash scripts/hook-timing-report.sh`
+Run scoped tests: `bash tests/run-hooks.sh --scope pre-bash`
+
+---
+
 ## Sacred Practices
 
 These are non-negotiable. Each one is enforced by hooks that run every time, regardless of context window state or model behavior.
