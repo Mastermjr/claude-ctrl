@@ -77,6 +77,8 @@ _archive/
 .proof-status
 .proof-status-*
 .cwd-recovery-needed
+.session-cost-history
+.test-status
 
 # CI state files (ephemeral runtime state, never commit)
 .ci-status-*

@@ -42,6 +42,22 @@
 # Line 1: model+workspace | dirty: N  wt: N | agents: N (types) | todos: N
 # Line 2: context bar | tokens: Nk | ~$cost | duration | +lines/-lines | cache %
 #
+# @decision DEC-STATUSLINE-DEPS-001
+# @title Statusline configuration dependency chain
+# @status accepted
+# @rationale Five runtime dependencies feed the statusline, audited 2026-03-02:
+#   1. stdin JSON (12 fields) — written by Claude Code runtime, read by single jq call (line ~54)
+#   2. .statusline-cache — written by write_statusline_cache() in session-lib.sh (6 hooks),
+#      read for git dirty/worktrees, agents, todo split, lifetime cost. JSON schema.
+#   3. .todo-count — written by todo.sh, read as legacy fallback only (Phase 2 split supersedes).
+#      Plain text integer. No staleness guard (acceptable: fallback-only path).
+#   4. .session-cost-history — written by session-end.sh, read by session-init.sh for lifetime
+#      cost summation. Pipe-delimited: ts|cost|sid. Runtime data, never committed.
+#   5. .subagent-tracker-* — written by track_subagent_start/stop(), read by get_subagent_status().
+#      Line text: ACTIVE|type|epoch. Session-scoped, cleaned on exit.
+#   Stale consumers removed: .community-status (dead), .worktree-roster.tsv (corrupt).
+#   See also: DEC-CACHE-RESEARCH-001 (cache % semantics), DEC-TODO-SPLIT-002/003 (todo split).
+#
 set -euo pipefail
 
 TODO_CACHE="$HOME/.claude/.todo-count"
@@ -186,6 +202,20 @@ format_tokens() {
 
 # ---------------------------------------------------------------------------
 # Cache efficiency: cache_read / (input + cache_read + cache_create) * 100
+# @decision DEC-CACHE-RESEARCH-001
+# @title Prompt cache semantics and the cache % statusline segment
+# @status accepted
+# @rationale The cache % segment shows per-turn cache read ratio:
+#   cache_read / (input + cache_read + cache_create) * 100.
+# This fluctuates per-turn because:
+#   - Cache key is cumulative hash of all previous blocks (tools → system → messages)
+#   - 5-minute TTL (refreshed on hit), no cross-session persistence
+#   - Conversation history grows monotonically → earlier turns always cache-hit
+# What users CAN influence: CLAUDE.md stability (stable prefix → better cache hits).
+# What users CANNOT influence: TTL, server-side eviction, cross-session persistence.
+# The KV cache is server-side and ephemeral. A new session = cache miss on first call.
+# Cache read pricing is 0.1x base (90% discount on Opus), so high cache % = cost savings.
+# No code changes needed — the metric is correctly calculated and informative.
 # ---------------------------------------------------------------------------
 cache_efficiency=-1
 total_input=$(( input_tokens + cache_read + cache_create ))
