@@ -43,10 +43,20 @@ TODO_COUNT_FILE="$HOME/.claude/.todo-count"
 
 # --- Graceful gh check ---
 # If gh is not installed or not authenticated, exit 0 with no output.
+# Checks both presence (command -v) and auth (gh auth token). The auth check
+# is fast (~5ms, reads local config — no network call) and catches the case
+# where gh is installed but not logged in (e.g. CI runners with gh pre-installed).
+# @decision DEC-BL-GH-CHECK-001
+# @title _require_gh checks both presence and auth to prevent zero-count leaks
+# @status accepted
+# @rationale On GitHub Actions runners, gh is pre-installed at /usr/bin/gh but
+# may not be authenticated. The original presence-only check passed, causing
+# gh issue list to fail with || echo "0" fallback, producing "0|0|0|0" output
+# when the caller expected silence. Adding gh auth token catches both cases:
+# truly missing binary and present-but-unauthenticated.
 _require_gh() {
-    if ! command -v gh >/dev/null 2>&1; then
-        exit 0
-    fi
+    command -v gh >/dev/null 2>&1 || exit 0
+    gh auth token >/dev/null 2>&1 || exit 0
 }
 
 # --- Detect current project repo ---

@@ -2070,9 +2070,14 @@ else
     fail "todo.sh no-args" "expected 'Usage:' in output: ${_TODO_NO_ARGS:0:100}"
 fi
 
-# 4. Missing gh → graceful exit (exit 0, no output, no stderr)
-# Override PATH to simulate missing gh
-_TODO_NO_GH_STDOUT=$(PATH=/usr/bin:/bin bash "$TODO_SCRIPT" hud 2>/tmp/todo_test_stderr) || true
+# 4-6. Missing/unauthenticated gh → graceful exit (exit 0, no output, no stderr)
+# On CI runners, gh may be pre-installed at /usr/bin/gh but not authenticated.
+# Use empty HOME + cleared tokens to ensure gh auth token fails reliably,
+# regardless of whether the gh binary exists in PATH.
+_TODO_NOAUTH_HOME=$(mktemp -d)
+mkdir -p "$_TODO_NOAUTH_HOME/.claude"
+
+_TODO_NO_GH_STDOUT=$(HOME="$_TODO_NOAUTH_HOME" GH_TOKEN= GITHUB_TOKEN= bash "$TODO_SCRIPT" hud 2>/tmp/todo_test_stderr) || true
 _TODO_NO_GH_STDERR=$(cat /tmp/todo_test_stderr 2>/dev/null || echo "")
 rm -f /tmp/todo_test_stderr
 if [[ -z "$_TODO_NO_GH_STDOUT" && -z "$_TODO_NO_GH_STDERR" ]]; then
@@ -2082,7 +2087,7 @@ else
 fi
 
 # 5. Missing gh + count --all → graceful exit
-_TODO_COUNT_NO_GH=$(PATH=/usr/bin:/bin bash "$TODO_SCRIPT" count --all 2>/tmp/todo_test_stderr2) || true
+_TODO_COUNT_NO_GH=$(HOME="$_TODO_NOAUTH_HOME" GH_TOKEN= GITHUB_TOKEN= bash "$TODO_SCRIPT" count --all 2>/tmp/todo_test_stderr2) || true
 _TODO_COUNT_NO_GH_STDERR=$(cat /tmp/todo_test_stderr2 2>/dev/null || echo "")
 rm -f /tmp/todo_test_stderr2
 if [[ -z "$_TODO_COUNT_NO_GH" && -z "$_TODO_COUNT_NO_GH_STDERR" ]]; then
@@ -2092,7 +2097,7 @@ else
 fi
 
 # 6. Missing gh + create → graceful exit
-_TODO_CREATE_NO_GH=$(PATH=/usr/bin:/bin bash "$TODO_SCRIPT" create "test title" 2>/tmp/todo_test_stderr3) || true
+_TODO_CREATE_NO_GH=$(HOME="$_TODO_NOAUTH_HOME" GH_TOKEN= GITHUB_TOKEN= bash "$TODO_SCRIPT" create "test title" 2>/tmp/todo_test_stderr3) || true
 _TODO_CREATE_NO_GH_STDERR=$(cat /tmp/todo_test_stderr3 2>/dev/null || echo "")
 rm -f /tmp/todo_test_stderr3
 if [[ -z "$_TODO_CREATE_NO_GH" && -z "$_TODO_CREATE_NO_GH_STDERR" ]]; then
@@ -2101,6 +2106,8 @@ else
     fail "todo.sh create missing gh" "expected empty stdout/stderr; got stdout='${_TODO_CREATE_NO_GH:0:60}' stderr='${_TODO_CREATE_NO_GH_STDERR:0:60}'"
 fi
 
+rm -rf "$_TODO_NOAUTH_HOME"
+
 # 7. count --all output format: must be N|N|N|N (pipe-delimited 4 integers)
 # Use a mock gh that returns "5" for any query (simulates 5 open issues)
 _TODO_MOCK_DIR=$(mktemp -d)
@@ -2108,6 +2115,9 @@ cat > "$_TODO_MOCK_DIR/gh" << 'MOCKGH'
 #!/usr/bin/env bash
 # Mock gh: return "5" for issue list queries, succeed for anything else
 case "${*}" in
+    *"auth token"*)
+        echo "mock-token"
+        ;;
     *"issue list"*"--json"*"--jq"*)
         echo "5"
         ;;
