@@ -115,21 +115,16 @@ if [[ "$AGENT_TYPE" == "guardian" ]]; then
         #   loop terminates when finalize_trace() removes the marker.
         #
         # @decision DEC-GUARDIAN-HEARTBEAT-002
-        # @title Hard 15-minute ceiling on heartbeat to prevent zombie accumulation
+        # @title Existence check + 3-min ceiling replaces broken touch-based exit
         # @status accepted
-        # @rationale When the Guardian agent fails to start (API rate limit, Opus capacity
-        #   exhaustion), SubagentStop never fires, finalize_trace never runs, and the
-        #   marker is never removed. The original || break exit condition only works when
-        #   the marker file disappears — it cannot detect a missing SubagentStop. This
-        #   created zombie heartbeat processes that ran indefinitely. Forensic analysis
-        #   found 26 orphaned heartbeat processes and 26 stale .active-guardian-* files
-        #   accumulated from failed guardian dispatches. Adding a 15-iteration ceiling
-        #   (15 × 60s = 15 min) self-terminates every heartbeat regardless of marker
-        #   state. 15 min exceeds the longest expected guardian operation (large repo
-        #   push + PR creation + CI wait) while being short enough to prevent permanent
-        #   accumulation. The || break path remains for normal termination (marker removed
-        #   by finalize_trace), so healthy operations continue to self-clean promptly.
-        ( _hb_count=0; while sleep 60; do _hb_count=$((_hb_count+1)); [[ $_hb_count -ge 15 ]] && break; touch "$_GUARDIAN_MARKER" 2>/dev/null || break; done ) &
+        # @rationale Two bugs: (1) touch creates the file if missing, so the original
+        #   `touch ... || break` never fires — finalize_trace removes the marker, touch
+        #   recreates it, heartbeat runs forever. Fix: `[[ -f marker ]] || break` checks
+        #   existence without side effects. (2) When guardian agents fail to start (API
+        #   rate limit), SubagentStop never fires, marker is never removed. Found 26
+        #   orphaned heartbeats. Fix: 3-iteration ceiling (3 × 60s = 3 min) — guardians
+        #   never legitimately take longer. Both exit paths are now verified by e2e test.
+        ( _hb_count=0; while sleep 60; do _hb_count=$((_hb_count+1)); [[ $_hb_count -ge 3 ]] && break; [[ -f "$_GUARDIAN_MARKER" ]] || break; touch "$_GUARDIAN_MARKER"; done ) &
     fi
     # File missing → no implementation in progress → allow (bootstrap path)
 fi
