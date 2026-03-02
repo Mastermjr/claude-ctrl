@@ -93,6 +93,7 @@ if [[ "$AGENT_TYPE" == "guardian" ]]; then
         #   init_trace() overwrites with the real trace_id (harmless). finalize_trace()
         #   cleans all markers regardless of format. Fixes #151.
         _SESSION="${CLAUDE_SESSION_ID:-$$}"
+        mkdir -p "$TRACE_STORE" 2>/dev/null || true
         echo "pre-dispatch|$(date +%s)" > "${TRACE_STORE}/.active-guardian-${_SESSION}-${_PHASH}"
     fi
     # File missing → no implementation in progress → allow (bootstrap path)
