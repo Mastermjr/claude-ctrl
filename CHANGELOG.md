@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `feature/backlog-scanner`: scan-backlog.sh rg-based codebase debt marker scanner (TODO, FIXME, HACK, WORKAROUND, OPTIMIZE, TEMP, XXX) with JSON/table/text output formats, grep fallback, recursive directory scanning; /scan command wrapper for orchestrator dispatch; 15 new scan tests (#82)
 - `feature/statusline-initiative`: Initiative/phase context in statusline — shows active initiative name and in-progress phase (e.g. "Backlog:P3") between workspace and git clusters; truncates long names, +N suffix for multiple initiatives; 6 new tests (#91)
 - `feature/subagent-token-tracking`: Universal SubagentStop hook parses agent transcript JSONL to accumulate token usage; statusline shows combined tokens as `tokens: 145k (Σ240k)` with sigma grand total; 10 new tests (cc-todos#37)
 - `feature/backlog-foundation`: todo.sh backlog backing layer (hud/count/claim/create) + fire-and-forget auto-capture of deferred-work language in prompt-submit.sh; 15 new tests (#81)
