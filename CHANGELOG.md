@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `feature/fix-bootstrap-amendment`: Bootstrap vs amendment flow — hooks now detect whether MASTER_PLAN.md is already tracked and only permit first-time creation on main; amendments route through worktrees
+
 ### Changed
 - `feature/statusline-data`: Phase 2 data pipeline — todo split display (`todos: 3p 7g` with project/global counts), session cost persistence to `.session-cost-history`, lifetime cost annotation (`Σ~$12.40`) next to session cost; +9 new tests (48 total dedicated) (#72)
 - `feature/statusline-rendering`: Statusline rendering overhaul — domain-clustered labels (`dirty:`, `wt:`, `agents:`, `todos:`), aggregate token segment with K/M notation, `~$` cost prefix; +12 new tests (39 total dedicated)
