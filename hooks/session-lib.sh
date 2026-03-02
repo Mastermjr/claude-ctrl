@@ -633,6 +633,36 @@ build_resume_directive() {
     fi
 }
 
+# --- Transcript token parser ---
+# @decision DEC-SUBAGENT-TOKENS-001
+# @title sum_transcript_tokens() parses JSONL transcripts for token accumulation
+# @status accepted
+# @rationale SubagentStop hooks receive the path to the agent's transcript JSONL file.
+# Each line in the transcript is a JSON object that may have a .message.usage field
+# containing {input_tokens, output_tokens, cache_read_input_tokens,
+# cache_creation_input_tokens}. A single jq -s pass sums all four fields across all
+# messages to give the complete token cost for the agent's run. This feeds
+# track-agent-tokens.sh which accumulates subagent totals in a session-scoped state
+# file, enabling the statusline to display main + subagent tokens as "145k (Σ240k)".
+# jq -s is used (slurp mode) rather than streaming because transcripts are small
+# enough to fit in memory and -s enables clean reduce/add semantics.
+
+# sum_transcript_tokens <transcript_path>
+# Parses JSONL transcript, sums all usage fields across messages.
+# Outputs JSON: {"input":N,"output":N,"cache_read":N,"cache_create":N}
+# Returns 1 if transcript missing or unparseable.
+sum_transcript_tokens() {
+    local transcript_path="$1"
+    [[ -f "$transcript_path" ]] || return 1
+
+    jq -s '[.[] | select(.message.usage) | .message.usage] |
+      { input: (map(.input_tokens // 0) | add // 0),
+        output: (map(.output_tokens // 0) | add // 0),
+        cache_read: (map(.cache_read_input_tokens // 0) | add // 0),
+        cache_create: (map(.cache_creation_input_tokens // 0) | add // 0) }' "$transcript_path" 2>/dev/null || return 1
+}
+export -f sum_transcript_tokens
+
 export -f write_statusline_cache track_subagent_start track_subagent_stop get_subagent_status
 export -f append_session_event get_session_trajectory get_session_summary_context
 export -f get_prior_sessions build_resume_directive

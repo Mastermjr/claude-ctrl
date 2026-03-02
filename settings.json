@@ -282,6 +282,15 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/track-agent-tokens.sh",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PreCompact": [
