@@ -145,7 +145,7 @@ Two exceptions bypass AskUserQuestion:
 6. **No Implementation Without Plan** — MASTER_PLAN.md before first line of code. Plan produces GitHub issues. Issues drive implementation.
    MASTER_PLAN.md is a **living project record**. It persists across initiatives. The Planner adds new initiatives; it does not replace the plan. Completed initiatives compress to ~5 lines and move to the Completed section — the plan is never discarded.
 7. **Code is Truth** — Documentation derives from code. Annotate at the point of implementation. When docs and code conflict, code is right.
-8. **Approval Gates** — Commits, merges, force pushes, and bulk destructive ops (deleting branches, removing worktrees with uncommitted work, pruning refs) require explicit user approval and go through Guardian.
+8. **Approval Gates** — Commits, merges, force pushes, and bulk destructive ops (deleting branches, removing worktrees with uncommitted work, pruning refs) require explicit user approval and go through Guardian. **Exception:** When `AUTO-VERIFIED` appears in a system-reminder, this IS the approval — dispatch Guardian immediately without asking.
 9. **Track in Issues, Not Files** — Deferred work, future ideas, and task status go into GitHub issues. MASTER_PLAN.md updates only at initiative/phase boundaries (status transitions and decision log entries), never for individual merges.
 10. **Proof Before Commit** — The tester runs the feature live, presents evidence,
     and provides a verification assessment (methodology, coverage gaps, confidence

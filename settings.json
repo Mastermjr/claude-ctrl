@@ -189,12 +189,12 @@
         ]
       },
       {
-        "matcher": "Task",
+        "matcher": "Task|Agent",
         "hooks": [
           {
             "type": "command",
             "command": "$HOME/.claude/hooks/post-task.sh",
-            "timeout": 5
+            "timeout": 15
           }
         ]
       }

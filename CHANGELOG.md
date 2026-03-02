@@ -8,9 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `feature/backlog-foundation`: todo.sh backlog backing layer (hud/count/claim/create) + fire-and-forget auto-capture of deferred-work language in prompt-submit.sh; 15 new tests (#81)
 - `feature/cache-audit`: @decision annotations for statusline dependency chain (DEC-STATUSLINE-DEPS-001) and prompt cache semantics (DEC-CACHE-RESEARCH-001); .gitignore entries for `.session-cost-history` and `.test-status` (#66, #70)
 
 ### Fixed
+- PostToolUse matcher `Task` -> `Task|Agent` — auto-verify hook (post-task.sh) never fired because the dispatched tool is named "Agent", not "Task"; also bumped check-tester.sh timeout 5s -> 15s for 308+ trace dirs; added SP#8 auto-verify exception to CLAUDE.md
 - `feature/fix-bootstrap-amendment`: Bootstrap vs amendment flow — hooks now detect whether MASTER_PLAN.md is already tracked and only permit first-time creation on main; amendments route through worktrees
 
 ### Changed
