@@ -101,6 +101,31 @@ case "$AGENT_TYPE" in
         if [[ -n "$TRACE_DIR" ]]; then
             CONTEXT_PARTS+=("TRACE_DIR=$TRACE_DIR — Write verbose output to TRACE_DIR/artifacts/ (analysis.md, decisions.json). Write TRACE_DIR/summary.md before returning. Keep return message under 1500 tokens.")
         fi
+        # Diagnostic: log context size for planner spawn to aid silent-return diagnosis.
+        # Large MASTER_PLAN.md + large planner.md can exhaust context before planning begins.
+        # @decision DEC-PLAN-DIAG-001
+        # @title Log planner spawn context size for silent-return diagnosis
+        # @status accepted
+        # @rationale Planner silent returns correlate with large context at spawn time.
+        #   Logging plan file size and injected context byte count provides actionable
+        #   signal when investigating "Agent returned no response" failures. Logs go to
+        #   stderr (hook diagnostic stream) — not visible to the model, not polluting output.
+        _plan_size=0
+        if [[ -f "$PROJECT_ROOT/MASTER_PLAN.md" ]]; then
+            _plan_size=$(wc -c < "$PROJECT_ROOT/MASTER_PLAN.md" 2>/dev/null || echo 0)
+        fi
+        _agent_size=0
+        _agent_file="$PROJECT_ROOT/agents/planner.md"
+        if [[ -f "$_agent_file" ]]; then
+            _agent_size=$(wc -c < "$_agent_file" 2>/dev/null || echo 0)
+        fi
+        echo "subagent-start[planner]: plan=${_plan_size}B agent=${_agent_size}B trace=${TRACE_DIR:-none}" >&2
+        if [[ "$_plan_size" -gt 30000 ]]; then
+            echo "subagent-start[planner]: WARNING plan file is large (${_plan_size}B > 30KB) — context exhaustion risk" >&2
+        fi
+        if [[ "$_agent_size" -gt 20000 ]]; then
+            echo "subagent-start[planner]: WARNING agent file is large (${_agent_size}B > 20KB) — consider slimming agents/planner.md" >&2
+        fi
         ;;
     implementer)
         # Check if any worktrees exist for this project

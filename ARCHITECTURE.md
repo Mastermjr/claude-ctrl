@@ -1346,7 +1346,7 @@ Orchestrator analyzes request
    │ Decision: Not in plan → dispatch to Planner
    │
    ▼
-PLANNER AGENT (agents/planner.md, claude-opus-4-6, max_turns=40)
+PLANNER AGENT (agents/planner.md, claude-opus-4-6, max_turns=65)
    │
    ├─ [SubagentStart: subagent-start.sh]
    │   Injects: git state, research log status, TRACE_DIR
