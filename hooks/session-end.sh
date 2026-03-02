@@ -191,6 +191,57 @@ if [[ "${_COST_LINES:-0}" -gt 100 ]]; then
 fi
 log_info "SESSION-END" "Persisted session cost: ${_SESSION_COST}"
 
+# --- Persist session tokens to .session-token-history ---
+# @decision DEC-LIFETIME-TOKENS-002
+# @title Append session tokens to pipe-delimited history file at session-end
+# @status accepted
+# @rationale Mirrors DEC-COST-PERSIST-002 for tokens. A pipe-delimited file
+# (timestamp|total_tokens|main_tokens|subagent_tokens|session_id) is the
+# lowest-overhead persistence format: append-only, awk-summable, human-readable.
+# main_tokens are read from .session-main-tokens (written by statusline.sh on
+# each render — most recent value before session ends). subagent_tokens are summed
+# from the session-scoped .subagent-tokens-<SESSION_ID> file (field 7 = total).
+# The subagent tokens file MUST be read before it is deleted in the cleanup section.
+# session-init.sh sums the total_tokens column for the lifetime display.
+# History is trimmed to 100 entries to prevent unbounded disk growth.
+_SUBAGENT_TOKEN_FILE="${CLAUDE_DIR}/.subagent-tokens-${CLAUDE_SESSION_ID:-$$}"
+_SUBAGENT_TOTAL=0
+if [[ -f "$_SUBAGENT_TOKEN_FILE" ]]; then
+    # Sum the 'total' column (field 7) from all lines
+    _SUBAGENT_TOTAL=$(awk -F'|' '{sum += $7} END {print sum+0}' "$_SUBAGENT_TOKEN_FILE" 2>/dev/null || echo "0")
+fi
+
+# Main session tokens from .session-main-tokens (written by statusline.sh each render)
+_MAIN_TOKENS=0
+_MAIN_TOKEN_FILE="${CLAUDE_DIR}/.session-main-tokens"
+if [[ -f "$_MAIN_TOKEN_FILE" ]]; then
+    _MAIN_TOKENS=$(cat "$_MAIN_TOKEN_FILE" 2>/dev/null || echo "0")
+    _MAIN_TOKENS="${_MAIN_TOKENS%.*}"
+    _MAIN_TOKENS=$(( ${_MAIN_TOKENS:-0} ))
+fi
+
+# Fallback: try context_window fields from session-end JSON
+if [[ "$_MAIN_TOKENS" -eq 0 ]]; then
+    _MAIN_IN=$(printf '%s' "$_SESSION_END_INPUT" | jq -r '.context_window.total_input_tokens // 0' 2>/dev/null || echo "0")
+    _MAIN_OUT=$(printf '%s' "$_SESSION_END_INPUT" | jq -r '.context_window.total_output_tokens // 0' 2>/dev/null || echo "0")
+    _MAIN_TOKENS=$(( ${_MAIN_IN:-0} + ${_MAIN_OUT:-0} ))
+fi
+
+_SESSION_TOKENS=$(( _MAIN_TOKENS + _SUBAGENT_TOTAL ))
+if [[ "$_SESSION_TOKENS" -gt 0 ]]; then
+    _TOKEN_HISTORY="${CLAUDE_DIR}/.session-token-history"
+    _TOKEN_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%SZ)
+    echo "${_TOKEN_TS}|${_SESSION_TOKENS}|${_MAIN_TOKENS}|${_SUBAGENT_TOTAL}|${CLAUDE_SESSION_ID:-unknown}" >> "$_TOKEN_HISTORY"
+
+    # Trim to last 100 entries (prevent unbounded growth)
+    _TOKEN_LINES=$(wc -l < "$_TOKEN_HISTORY" 2>/dev/null | tr -d ' ')
+    if [[ "${_TOKEN_LINES:-0}" -gt 100 ]]; then
+        tail -100 "$_TOKEN_HISTORY" > "${_TOKEN_HISTORY}.tmp"
+        mv "${_TOKEN_HISTORY}.tmp" "$_TOKEN_HISTORY"
+    fi
+fi
+log_info "SESSION-END" "Persisted session tokens: main=${_MAIN_TOKENS} subagent=${_SUBAGENT_TOTAL} total=${_SESSION_TOKENS}"
+
 # --- Age-based .agent-findings cleanup ---
 # Findings accumulate from agent hooks and are surfaced in session-init.
 # Clear stale findings so resolved issues stop re-surfacing.
@@ -247,6 +298,8 @@ rm -f "${CLAUDE_DIR}/.mock-gate-strikes"
 rm -f "${CLAUDE_DIR}/.track."*
 rm -f "${CLAUDE_DIR}/.skill-result"*
 rm -f "${CLAUDE_DIR}/.subagent-tracker-${CLAUDE_SESSION_ID:-$$}"
+rm -f "${CLAUDE_DIR}/.subagent-tokens-${CLAUDE_SESSION_ID:-$$}"
+rm -f "${CLAUDE_DIR}/.session-main-tokens"
 rm -f "${CLAUDE_DIR}/.active-worktree-path"*
 rm -f "${CLAUDE_DIR}/.cwd-recovery-needed"
 

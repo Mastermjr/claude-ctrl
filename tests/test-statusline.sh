@@ -1007,6 +1007,133 @@ test_initiative_position_before_dirty() {
 }
 
 # ============================================================================
+# Test group 13: Lifetime token display (DEC-LIFETIME-TOKENS-001)
+# ============================================================================
+
+# Helper: build a cache with lifetime_tokens set
+make_lifetime_token_cache() {
+    local dir="$1" lifetime_tokens="$2" subagent_tokens="${3:-0}"
+    mkdir -p "$dir/.claude"
+    printf '{"dirty":0,"worktrees":0,"agents_active":0,"agents_types":"","todo_project":0,"todo_global":0,"lifetime_cost":0,"lifetime_tokens":%d,"subagent_tokens":%d}' \
+        "$lifetime_tokens" "$subagent_tokens" > "$dir/.claude/.statusline-cache"
+}
+
+test_lifetime_tokens_absent_when_zero_history_no_subagent() {
+    run_test
+    # No past sessions (lifetime_tokens=0), no subagents → plain "tokens: 145k", no Σ
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    make_lifetime_token_cache "$tmpdir" 0 0
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
+    local line2
+    line2=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    # tokens: 145k should be present, Σ should NOT be present
+    if [[ "$line2" == *"tokens: 145k"* ]] && [[ "$line2" != *"Σ"* ]]; then
+        pass_test "Lifetime tokens: no Σ when lifetime=0 and no subagents (first session)"
+    else
+        fail_test "Lifetime tokens: unexpected Σ on first session or wrong token display" "line2=$line2"
+    fi
+}
+
+test_lifetime_tokens_shown_with_past_sessions() {
+    run_test
+    # Past sessions contributed 1M tokens; current session adds 145k → Σ1.1M
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    make_lifetime_token_cache "$tmpdir" 1000000 0
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
+    local line2
+    line2=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    # Should show "tokens: 145k (Σ1.1M)" — 1000000 past + 145000 current
+    if [[ "$line2" == *"tokens: 145k"* ]] && [[ "$line2" == *"Σ"* ]] && [[ "$line2" == *"1.1M"* ]]; then
+        pass_test "Lifetime tokens: Σ1.1M shown when past sessions contributed 1M tokens"
+    else
+        fail_test "Lifetime tokens: Σ annotation or value wrong for past sessions" "line2=$line2"
+    fi
+}
+
+test_lifetime_tokens_includes_subagent() {
+    run_test
+    # No past sessions, but current session has 95k subagent tokens
+    # current main=145k + subagent=95k → Σ240k
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    make_lifetime_token_cache "$tmpdir" 0 95000
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
+    local line2
+    line2=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    # 0 past + 145k main + 95k subagent = 240k → Σ240k
+    if [[ "$line2" == *"tokens: 145k"* ]] && [[ "$line2" == *"Σ"* ]] && [[ "$line2" == *"240k"* ]]; then
+        pass_test "Lifetime tokens: Σ240k shown when subagent adds 95k (no past sessions)"
+    else
+        fail_test "Lifetime tokens: Σ with subagent only wrong" "line2=$line2"
+    fi
+}
+
+test_lifetime_tokens_grand_total_all_sources() {
+    run_test
+    # Past=500k, current main=145k, subagent=55k → Σ700k
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    make_lifetime_token_cache "$tmpdir" 500000 55000
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
+    local line2
+    line2=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    # 500000 + 145000 + 55000 = 700000 → 700k
+    if [[ "$line2" == *"tokens: 145k"* ]] && [[ "$line2" == *"Σ"* ]] && [[ "$line2" == *"700k"* ]]; then
+        pass_test "Lifetime tokens: Σ700k = past(500k) + main(145k) + subagent(55k)"
+    else
+        fail_test "Lifetime tokens: grand total from all 3 sources wrong" "line2=$line2"
+    fi
+}
+
+test_lifetime_tokens_absent_when_cache_absent() {
+    run_test
+    # No cache file → lifetime_tokens defaults to 0 → no Σ (same as first session)
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"/tmp/nocache_tok"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
+    local line2
+    line2=$(run_statusline "$json" | tail -1 | strip_ansi)
+
+    if [[ "$line2" != *"Σ"* ]]; then
+        pass_test "Lifetime tokens: no Σ when cache absent (no history)"
+    else
+        fail_test "Lifetime tokens: Σ shown without cache file" "line2=$line2"
+    fi
+}
+
+test_lifetime_tokens_dim_rendering() {
+    run_test
+    # Verify Σ annotation is rendered dim (ESC[2m before the paren)
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    make_lifetime_token_cache "$tmpdir" 500000 0
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
+    local line2_raw
+    line2_raw=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1)
+    rm -rf "$tmpdir"
+
+    # Dim annotation pattern: ESC[2m(ΣNk)
+    if printf '%s' "$line2_raw" | grep -q $'\033\[2m(Σ'; then
+        pass_test "Lifetime tokens: Σ annotation rendered dim (ESC[2m)"
+    else
+        fail_test "Lifetime tokens: Σ not dim-rendered" "raw: $(printf '%s' "$line2_raw" | cat -v)"
+    fi
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 
@@ -1101,6 +1228,15 @@ test_initiative_present_without_phase
 test_initiative_truncation
 test_initiative_multiple_shows_plus
 test_initiative_position_before_dirty
+
+echo ""
+echo "--- Lifetime token display (DEC-LIFETIME-TOKENS-001) ---"
+test_lifetime_tokens_absent_when_zero_history_no_subagent
+test_lifetime_tokens_shown_with_past_sessions
+test_lifetime_tokens_includes_subagent
+test_lifetime_tokens_grand_total_all_sources
+test_lifetime_tokens_absent_when_cache_absent
+test_lifetime_tokens_dim_rendering
 
 echo ""
 echo "========================================="

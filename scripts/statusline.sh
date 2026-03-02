@@ -99,6 +99,7 @@ cache_agents_types=""
 cache_todo_project=-1
 cache_todo_global=-1
 cache_lifetime_cost=0
+cache_lifetime_tokens=0
 cache_subagent_tokens=0
 cache_initiative=""
 cache_phase=""
@@ -118,6 +119,7 @@ if [[ -f "$CACHE_FILE" ]]; then
   cache_todo_project=$(jq -r 'if has("todo_project") then .todo_project else -1 end' "$CACHE_FILE" 2>/dev/null || echo -1)
   cache_todo_global=$(jq -r 'if has("todo_global") then .todo_global else -1 end' "$CACHE_FILE" 2>/dev/null || echo -1)
   cache_lifetime_cost=$(jq -r '.lifetime_cost // 0' "$CACHE_FILE" 2>/dev/null || echo 0)
+  cache_lifetime_tokens=$(jq -r '.lifetime_tokens // 0' "$CACHE_FILE" 2>/dev/null || echo 0)
   cache_subagent_tokens=$(jq -r '.subagent_tokens // 0' "$CACHE_FILE" 2>/dev/null || echo 0)
   cache_initiative=$(jq -r '.initiative // ""' "$CACHE_FILE" 2>/dev/null || echo "")
   cache_phase=$(jq -r '.phase // ""' "$CACHE_FILE" 2>/dev/null || echo "")
@@ -352,24 +354,38 @@ fi
 tokens_display=$(printf '\033[%smtokens: %s\033[0m' "$tokens_color" "$tokens_str")
 line2=$(printf '%s %b %s' "$line2" "$sep" "$tokens_display")
 
-# Subagent token accumulation (Σ = session + subagent total)
-# @decision DEC-SUBAGENT-TOKENS-004
-# @title Display combined session+subagent tokens as "tokens: 145k (Σ240k)"
+# Lifetime project token total (Σ = past sessions + current session + current subagent)
+# @decision DEC-LIFETIME-TOKENS-001
+# @title Display project lifetime tokens as Σ annotation on token segment
 # @status accepted
-# @rationale When subagents (implementer, tester, guardian) run, they consume tokens
-# that don't appear in the main session's token count. Without this display, the user
-# sees only their direct session cost and has no visibility into subagent spend.
-# The Σ annotation (grand total) is shown dim to avoid visual noise — same pattern
-# as DEC-LIFETIME-COST-002 which dims the lifetime cost annotation. The grand total
-# replaces the plain token display only when subagent tokens > 0, so the baseline
-# "tokens: 145k" display is unchanged for sessions without subagents.
+# @rationale Users care more about cumulative token consumption per project than
+# per-session totals. Lifetime tokens directly map to project cost and context pressure
+# across sessions. The Σ shows the running total: all past sessions (from
+# .session-token-history summed at session-init and written to cache as lifetime_tokens)
+# + current session main tokens (total_tokens_int from stdin JSON) + current session
+# subagent tokens (cache_subagent_tokens from the subagent tracker). Dim rendering
+# matches the cost Σ pattern (DEC-LIFETIME-COST-002). The Σ annotation is only shown
+# when grand total exceeds current session tokens (i.e., there are past sessions or
+# subagent tokens), so brand-new projects with no history show plain "tokens: 145k".
+# Supersedes DEC-SUBAGENT-TOKENS-004 which only showed session+subagent total.
+cache_lifetime_tokens_int="${cache_lifetime_tokens%.*}"
+cache_lifetime_tokens_int=$(( ${cache_lifetime_tokens_int:-0} ))
 cache_subagent_tokens_int="${cache_subagent_tokens%.*}"
 cache_subagent_tokens_int=$(( ${cache_subagent_tokens_int:-0} ))
-if (( cache_subagent_tokens_int > 0 )); then
-  grand_total=$(( total_tokens_int + cache_subagent_tokens_int ))
-  grand_total_str=$(format_tokens "$grand_total")
+# Grand total = past sessions + current main + current subagent
+_token_grand_total=$(( cache_lifetime_tokens_int + total_tokens_int + cache_subagent_tokens_int ))
+if (( _token_grand_total > total_tokens_int && _token_grand_total > 0 )); then
+  grand_total_str=$(format_tokens "$_token_grand_total")
   tokens_display=$(printf '\033[%smtokens: %s \033[2m(Σ%s)\033[0m' "$tokens_color" "$tokens_str" "$grand_total_str")
   line2=$(printf '%s %b %s' "$(build_context_bar "$ctx_pct")" "$sep" "$tokens_display")
+fi
+
+# Persist main session token count for session-end.sh to read as fallback.
+# .session-main-tokens lets session-end capture the most recent token count even
+# when the session-end JSON doesn't include context_window token fields.
+# Written to the same .claude dir as the cache file, cleaned up by session-end.sh.
+if [[ -n "${CACHE_FILE:-}" ]]; then
+  printf '%d' "$total_tokens_int" > "${CACHE_FILE%/*}/.session-main-tokens" 2>/dev/null || true
 fi
 
 # Cost (always shown, ~$X.XX, green <$1, yellow $1-5, red >$5)
