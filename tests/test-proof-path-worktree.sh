@@ -616,6 +616,182 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Part J: Resolver consistency — all hooks find the same proof file
+#
+# Verifies that resolve_proof_file() returns the SAME path regardless of how
+# env vars are arranged, so every hook (task-track, prompt-submit, guard,
+# check-tester) reads and writes the same file.
+#
+# States under test:
+#   J1. Worktree active with breadcrumb → all calls find worktree proof
+#   J2. Breadcrumb stale (target deleted) → all fall back to scoped CLAUDE_DIR
+#   J3. Only legacy .proof-status exists (no scoped file) → found correctly
+#   J4. No proof file, no breadcrumb → all return scoped default (write target)
+#   J5. Scoped file exists, no breadcrumb → returns scoped (not legacy)
+#   J6. Both scoped and legacy exist, no breadcrumb → returns scoped (priority)
+#   J7. Breadcrumb exists but worktree proof is absent → scoped fallback
+#   J8. needs-verification in worktree with breadcrumb → returns worktree path
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Helper: call resolve_proof_file() with explicit CLAUDE_DIR and PROJECT_ROOT,
+# no breadcrumb manipulation beyond what the caller provides.
+# Both CLAUDE_DIR and PROJECT_ROOT are set so project_hash is deterministic.
+_resolve_j() {
+    local claude_dir="$1"
+    local project_root="$2"
+    bash -c "
+        source '$HOOKS_DIR/log.sh' 2>/dev/null
+        export CLAUDE_DIR='$claude_dir'
+        export PROJECT_ROOT='$project_root'
+        resolve_proof_file 2>/dev/null
+    "
+}
+
+# Helper: compute project_hash the same way log.sh does
+_phash_j() {
+    echo "$1" | shasum -a 256 | cut -c1-8 2>/dev/null || echo "00000000"
+}
+
+run_test "Part J1: worktree active with breadcrumb → all resolve calls find worktree proof"
+J1_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-j1-cl-XXXXXX")
+J1_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j1-proj-XXXXXX")
+J1_WT=$(mktemp -d "$PROJECT_ROOT/tmp/test-j1-wt-XXXXXX")
+mkdir -p "$J1_WT/.claude"
+J1_PHASH=$(_phash_j "$J1_PROJ")
+echo "$J1_WT" > "$J1_CLAUDE/.active-worktree-path-${J1_PHASH}"
+echo "pending|12345" > "$J1_WT/.claude/.proof-status"
+
+# Simulate three different callers: task-track, prompt-submit, guard.sh
+R1=$(_resolve_j "$J1_CLAUDE" "$J1_PROJ")
+R2=$(_resolve_j "$J1_CLAUDE" "$J1_PROJ")
+R3=$(_resolve_j "$J1_CLAUDE" "$J1_PROJ")
+EXPECTED_J1="$J1_WT/.claude/.proof-status"
+
+if [[ "$R1" == "$EXPECTED_J1" && "$R2" == "$EXPECTED_J1" && "$R3" == "$EXPECTED_J1" ]]; then
+    pass_test
+else
+    fail_test "Inconsistent resolution: R1='$R1' R2='$R2' R3='$R3' (want '$EXPECTED_J1')"
+fi
+rm -rf "$J1_CLAUDE" "$J1_PROJ" "$J1_WT"
+
+run_test "Part J2: stale breadcrumb (worktree dir deleted) → all fall back to scoped CLAUDE_DIR path"
+J2_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-j2-cl-XXXXXX")
+J2_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j2-proj-XXXXXX")
+J2_PHASH=$(_phash_j "$J2_PROJ")
+echo "/nonexistent/worktree/path" > "$J2_CLAUDE/.active-worktree-path-${J2_PHASH}"
+# No scoped proof — should return default scoped path
+EXPECTED_J2="$J2_CLAUDE/.proof-status-${J2_PHASH}"
+
+R1=$(_resolve_j "$J2_CLAUDE" "$J2_PROJ")
+R2=$(_resolve_j "$J2_CLAUDE" "$J2_PROJ")
+if [[ "$R1" == "$EXPECTED_J2" && "$R2" == "$EXPECTED_J2" ]]; then
+    pass_test
+else
+    fail_test "Expected scoped fallback '$EXPECTED_J2', got R1='$R1' R2='$R2'"
+fi
+rm -rf "$J2_CLAUDE" "$J2_PROJ"
+
+run_test "Part J3: only legacy .proof-status exists (no scoped file) → found at legacy path"
+J3_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-j3-cl-XXXXXX")
+J3_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j3-proj-XXXXXX")
+# No scoped proof, no breadcrumb; only legacy
+echo "pending|12345" > "$J3_CLAUDE/.proof-status"
+EXPECTED_J3="$J3_CLAUDE/.proof-status"
+
+R1=$(_resolve_j "$J3_CLAUDE" "$J3_PROJ")
+if [[ "$R1" == "$EXPECTED_J3" ]]; then
+    pass_test
+else
+    fail_test "Expected legacy path '$EXPECTED_J3', got '$R1'"
+fi
+rm -rf "$J3_CLAUDE" "$J3_PROJ"
+
+run_test "Part J4: no proof file, no breadcrumb → all callers return scoped default (new write target)"
+J4_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-j4-cl-XXXXXX")
+J4_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j4-proj-XXXXXX")
+J4_PHASH=$(_phash_j "$J4_PROJ")
+EXPECTED_J4="$J4_CLAUDE/.proof-status-${J4_PHASH}"
+
+R1=$(_resolve_j "$J4_CLAUDE" "$J4_PROJ")
+R2=$(_resolve_j "$J4_CLAUDE" "$J4_PROJ")
+if [[ "$R1" == "$EXPECTED_J4" && "$R2" == "$EXPECTED_J4" ]]; then
+    pass_test
+else
+    fail_test "Expected scoped default '$EXPECTED_J4', got R1='$R1' R2='$R2'"
+fi
+rm -rf "$J4_CLAUDE" "$J4_PROJ"
+
+run_test "Part J5: scoped file exists, no breadcrumb → returns scoped (not legacy)"
+J5_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-j5-cl-XXXXXX")
+J5_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j5-proj-XXXXXX")
+J5_PHASH=$(_phash_j "$J5_PROJ")
+echo "verified|12345" > "$J5_CLAUDE/.proof-status-${J5_PHASH}"
+echo "pending|99999" > "$J5_CLAUDE/.proof-status"
+EXPECTED_J5="$J5_CLAUDE/.proof-status-${J5_PHASH}"
+
+R1=$(_resolve_j "$J5_CLAUDE" "$J5_PROJ")
+if [[ "$R1" == "$EXPECTED_J5" ]]; then
+    pass_test
+else
+    fail_test "Expected scoped '$EXPECTED_J5' over legacy, got '$R1'"
+fi
+rm -rf "$J5_CLAUDE" "$J5_PROJ"
+
+run_test "Part J6: both scoped and legacy exist, no breadcrumb → scoped takes priority"
+J6_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-j6-cl-XXXXXX")
+J6_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j6-proj-XXXXXX")
+J6_PHASH=$(_phash_j "$J6_PROJ")
+echo "verified|11111" > "$J6_CLAUDE/.proof-status-${J6_PHASH}"
+echo "needs-verification|22222" > "$J6_CLAUDE/.proof-status"
+EXPECTED_J6="$J6_CLAUDE/.proof-status-${J6_PHASH}"
+
+R1=$(_resolve_j "$J6_CLAUDE" "$J6_PROJ")
+if [[ "$R1" == "$EXPECTED_J6" ]]; then
+    pass_test
+else
+    fail_test "Expected scoped '$EXPECTED_J6' to have priority over legacy, got '$R1'"
+fi
+rm -rf "$J6_CLAUDE" "$J6_PROJ"
+
+run_test "Part J7: breadcrumb present but worktree has no proof → scoped CLAUDE_DIR fallback"
+J7_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-j7-cl-XXXXXX")
+J7_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j7-proj-XXXXXX")
+J7_WT=$(mktemp -d "$PROJECT_ROOT/tmp/test-j7-wt-XXXXXX")
+mkdir -p "$J7_WT/.claude"
+J7_PHASH=$(_phash_j "$J7_PROJ")
+echo "$J7_WT" > "$J7_CLAUDE/.active-worktree-path-${J7_PHASH}"
+# No .proof-status in the worktree
+EXPECTED_J7="$J7_CLAUDE/.proof-status-${J7_PHASH}"
+
+R1=$(_resolve_j "$J7_CLAUDE" "$J7_PROJ")
+if [[ "$R1" == "$EXPECTED_J7" ]]; then
+    pass_test
+else
+    fail_test "Expected scoped fallback '$EXPECTED_J7' when worktree has no proof, got '$R1'"
+fi
+rm -rf "$J7_CLAUDE" "$J7_PROJ" "$J7_WT"
+
+run_test "Part J8: needs-verification in worktree with breadcrumb → worktree path (W4-2 regression)"
+J8_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-j8-cl-XXXXXX")
+J8_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j8-proj-XXXXXX")
+J8_WT=$(mktemp -d "$PROJECT_ROOT/tmp/test-j8-wt-XXXXXX")
+mkdir -p "$J8_WT/.claude"
+J8_PHASH=$(_phash_j "$J8_PROJ")
+echo "$J8_WT" > "$J8_CLAUDE/.active-worktree-path-${J8_PHASH}"
+echo "needs-verification|12345" > "$J8_WT/.claude/.proof-status"
+# Simulating stale orchestrator-side "verified" from a prior session (the dedup-guard scenario)
+echo "verified|00001" > "$J8_CLAUDE/.proof-status-${J8_PHASH}"
+EXPECTED_J8="$J8_WT/.claude/.proof-status"
+
+R1=$(_resolve_j "$J8_CLAUDE" "$J8_PROJ")
+if [[ "$R1" == "$EXPECTED_J8" ]]; then
+    pass_test
+else
+    fail_test "W4-2 regression: expected worktree path '$EXPECTED_J8', got '$R1'"
+fi
+rm -rf "$J8_CLAUDE" "$J8_PROJ" "$J8_WT"
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
 
