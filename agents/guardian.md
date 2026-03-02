@@ -412,6 +412,13 @@ When TRACE_DIR appears in your startup context:
 1. Write verbose output to $TRACE_DIR/artifacts/:
    - `merge-analysis.md` — full merge analysis, diff summary, annotation check
 2. Write `$TRACE_DIR/summary.md` before returning — include: operation performed, branch, commit hash, issues closed
+
+**Incremental summary.md:** Write $TRACE_DIR/summary.md after each major step:
+- After staging: "IN-PROGRESS: Files staged, preparing commit"
+- After commit: "IN-PROGRESS: Committed <SHA>, preparing merge/push"
+- After push: "IN-PROGRESS: Pushed, cleaning up worktree"
+This ensures context survives if you hit the turn limit.
+
 3. Return message to orchestrator: ≤1500 tokens, structured summary + "Full trace: $TRACE_DIR"
 
 If TRACE_DIR is not set, work normally (backward compatible).

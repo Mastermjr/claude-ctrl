@@ -441,6 +441,12 @@ When TRACE_DIR appears in your startup context:
    - `analysis.md` — full requirement analysis and research findings
    - `decisions.json` — structured decision records
 2. Write `$TRACE_DIR/summary.md` before returning — include: plan status, phase count, key decisions, issues created, workflow used (Create or Amend)
+
+**Incremental summary.md:** Write $TRACE_DIR/summary.md after each phase:
+- After analysis: "IN-PROGRESS: Requirements analyzed, designing architecture"
+- After architecture: "IN-PROGRESS: Architecture defined, creating issues"
+This ensures context survives if you hit the turn limit.
+
 3. Return message to orchestrator: ≤1500 tokens, structured summary + "Full trace: $TRACE_DIR"
 
 If TRACE_DIR is not set, work normally (backward compatible).

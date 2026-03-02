@@ -227,6 +227,12 @@ TRACE_DIR is provided in your startup context. Always write trace artifacts — 
    - `verification-strategy.txt` — what approach you used and why
    - `mcp-evidence/` — screenshots, snapshots from MCP tools (if used)
 2. Write `$TRACE_DIR/summary.md` before returning — even on failure. A summary that says "verification could not complete because X" is better than an empty file.
+
+**Incremental summary.md:** Write $TRACE_DIR/summary.md after each phase:
+- After strategy: "IN-PROGRESS: Strategy defined, executing verification"
+- After execution: "IN-PROGRESS: Verification executed, compiling assessment"
+This ensures context survives if you hit the turn limit.
+
 3. Return message to orchestrator: ≤1500 tokens, structured summary + "Full trace: $TRACE_DIR"
 
 If TRACE_DIR is not set, work normally (backward compatible).

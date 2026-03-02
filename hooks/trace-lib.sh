@@ -91,15 +91,17 @@ init_trace() {
         fi
     fi
 
-    # Clean up stale .active-* markers older than 2 hours
+    # Clean up stale .active-* markers older than 30 minutes
     # @decision DEC-OBS-020
     # @title Age-based cleanup of orphaned .active-* markers
     # @status accepted
     # @rationale Agents that crash leave behind .active-* markers that can
     #             cause false "agent already running" blocks. Cleaning markers
-    #             older than 2 hours on every init_trace() call is safe because
-    #             no legitimate agent runs for more than 2 hours.
-    local stale_threshold=7200  # 2 hours in seconds
+    #             older than 30 minutes on every init_trace() call is safe because
+    #             no legitimate agent runs for more than 30 minutes (max_turns
+    #             enforcement caps all agents). Reduced from 2 hours to 30 minutes
+    #             to detect stuck/crashed agents faster and recover sooner.
+    local stale_threshold=1800  # 30 minutes in seconds
     local now_epoch
     now_epoch=$(date +%s)
     for marker in "${TRACE_STORE}/.active-"*; do

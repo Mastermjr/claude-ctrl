@@ -54,27 +54,44 @@ HOOK_INPUT=$(read_input)
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
 SUBAGENT_TYPE=$(echo "$HOOK_INPUT" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")
 
+# Normalize: both Task and Agent tools invoke subagents
+# @decision DEC-POST-TASK-AGENT-001
+# @title Normalize Task and Agent tool names to IS_SUBAGENT flag
+# @status accepted
+# @rationale Claude Code uses both "Task" and "Agent" as tool_name values for
+#   subagent invocations (the name changed between versions). Normalizing early
+#   to IS_SUBAGENT prevents duplicate checks and ensures all downstream logic
+#   handles both tool names without repetition. Issue #158.
+IS_SUBAGENT=false
+[[ "$TOOL_NAME" == "Task" || "$TOOL_NAME" == "Agent" ]] && IS_SUBAGENT=true
+
 # Diagnostic: confirm hook fires (DEC-AV-DIAG-001)
 append_audit "$(detect_project_root 2>/dev/null || echo /)" "post_task_fire" \
-    "subagent_type=${SUBAGENT_TYPE:-empty} tool_name=${TOOL_NAME:-empty}" 2>/dev/null || true
+    "subagent_type=${SUBAGENT_TYPE:-empty} tool_name=${TOOL_NAME:-empty} is_subagent=${IS_SUBAGENT}" 2>/dev/null || true
 
-# Fallback: PostToolUse:Task may not provide tool_input.subagent_type (undocumented).
-# Detect active tester trace as proxy.
-if [[ "$TOOL_NAME" == "Task" && -z "$SUBAGENT_TYPE" ]]; then
-    _fb_trace=$(detect_active_trace "$(detect_project_root 2>/dev/null || echo /)" "tester" 2>/dev/null || echo "")
-    if [[ -n "$_fb_trace" ]]; then
-        SUBAGENT_TYPE="tester"
-        log_info "POST-TASK" "subagent_type empty — detected active tester trace, assuming tester"
+# Fallback: PostToolUse:Task/Agent may not provide tool_input.subagent_type (undocumented).
+# Detect active agent traces as proxy.
+if [[ "$IS_SUBAGENT" == "true" && -z "$SUBAGENT_TYPE" ]]; then
+    _fb_root=$(detect_project_root 2>/dev/null || echo "")
+    if [[ -n "$_fb_root" ]]; then
+        for _try_type in guardian implementer planner tester; do
+            _fb_trace=$(detect_active_trace "$_fb_root" "$_try_type" 2>/dev/null || echo "")
+            if [[ -n "$_fb_trace" ]]; then
+                SUBAGENT_TYPE="$_try_type"
+                log_info "POST-TASK" "subagent_type empty — detected active $_try_type trace, assuming $_try_type"
+                break
+            fi
+        done
     fi
 fi
 
-# Universal fallback: for any Task tool completion with a known agent type
+# Universal fallback: for any Task/Agent tool completion with a known agent type
 # that isn't the tester, attempt to finalize any active trace.
 # This catches edge cases where the SubagentStop hook for the agent type doesn't
 # fire reliably (same root cause as DEC-PROOF-LIFE-001 for tester).
 #
 # @decision DEC-POST-TASK-FALLBACK-001
-# @title Universal PostToolUse:Task trace finalization for non-tester agents
+# @title Universal PostToolUse:Task/Agent trace finalization for non-tester agents
 # @status accepted
 # @rationale SubagentStop does not fire reliably for any agent type. The tester
 #   path above has comprehensive trace finalization. Non-tester agents (implementer,
@@ -83,16 +100,106 @@ fi
 #   any active trace for the completing agent type and calls finalize_trace, ensuring
 #   the observatory gets complete data regardless of hook reliability. The fallback
 #   is a no-op when the active trace was already finalized by SubagentStop.
-if [[ "$TOOL_NAME" == "Task" && "$SUBAGENT_TYPE" != "tester" && -n "$SUBAGENT_TYPE" ]]; then
+#   Extended in DEC-POST-TASK-AGENT-001 to cover "Agent" tool_name.
+#
+# @decision DEC-POST-TASK-DIAG-001
+# @title Write diagnostic summary.md for non-tester agents that omit it
+# @status accepted
+# @rationale When an agent silently returns (no visible text, no summary.md), the
+#   orchestrator loses context. The _write_diagnostic_summary() function reconstructs
+#   a minimal summary from available state (git diff, git log) so the silent-return
+#   recovery path in check-*.sh has something to inject. Only writes if summary.md
+#   is missing or trivially small (<10 bytes). Never overwrites real summaries.
+#   Also emits additionalContext so the orchestrator sees the summary immediately.
+
+# --- Diagnostic summary reconstruction for agents that return without writing summary.md ---
+# This function is called from the non-tester fallback below.
+_write_diagnostic_summary() {
+    local trace_dir="$1" agent_type="$2" project_root="$3"
+    local sum_file="${trace_dir}/summary.md"
+    local sum_size
+    sum_size=$(wc -c < "$sum_file" 2>/dev/null || echo 0)
+    [[ -f "$sum_file" && "$sum_size" -ge 10 ]] && return 0  # don't overwrite real summaries
+
+    case "$agent_type" in
+        guardian)
+            local start_sha="" current_sha="" log_line=""
+            local sha_file="${CLAUDE_DIR:-$project_root/.claude}/.guardian-start-sha"
+            [[ -f "$sha_file" ]] && start_sha=$(cat "$sha_file" 2>/dev/null || echo "")
+            current_sha=$(git -C "$project_root" rev-parse HEAD 2>/dev/null || echo "")
+            if [[ -n "$start_sha" && -n "$current_sha" && "$start_sha" != "$current_sha" ]]; then
+                log_line=$(git -C "$project_root" log --oneline "${start_sha}..${current_sha}" 2>/dev/null | head -5 || echo "")
+                cat > "$sum_file" <<DIAG
+# Guardian Summary (auto-reconstructed by post-task.sh)
+## Operation: Commit detected
+## Commits
+$log_line
+## Note
+Guardian did not write summary.md. This was reconstructed from git state.
+DIAG
+            else
+                cat > "$sum_file" <<DIAG
+# Guardian Summary (auto-reconstructed by post-task.sh)
+## Operation: No commit detected (HEAD unchanged)
+## Note
+Guardian did not write summary.md. HEAD=$current_sha start=$start_sha.
+DIAG
+            fi
+            ;;
+        implementer)
+            local diff_stat=""
+            diff_stat=$(git -C "$project_root" diff --stat HEAD 2>/dev/null | tail -5 || echo "")
+            cat > "$sum_file" <<DIAG
+# Implementer Summary (auto-reconstructed by post-task.sh)
+## Changes
+$diff_stat
+## Note
+Implementer did not write summary.md. Reconstructed from git diff.
+DIAG
+            ;;
+        planner)
+            cat > "$sum_file" <<DIAG
+# Planner Summary (auto-reconstructed by post-task.sh)
+## Note
+Planner did not write summary.md. Check MASTER_PLAN.md for changes.
+DIAG
+            ;;
+        *)
+            cat > "$sum_file" <<DIAG
+# Agent Summary (auto-reconstructed by post-task.sh)
+## Agent: $agent_type
+## Note
+Agent did not write summary.md before returning.
+DIAG
+            ;;
+    esac
+    log_info "POST-TASK" "wrote diagnostic summary for ${agent_type} at ${sum_file}"
+}
+
+if [[ "$IS_SUBAGENT" == "true" && "$SUBAGENT_TYPE" != "tester" && -n "$SUBAGENT_TYPE" ]]; then
     _fb_project_root=$(detect_project_root 2>/dev/null || echo "")
     if [[ -n "$_fb_project_root" ]]; then
         _fb_trace_id=$(detect_active_trace "$_fb_project_root" "$SUBAGENT_TYPE" 2>/dev/null || echo "")
         if [[ -n "$_fb_trace_id" ]]; then
-            log_info "POST-TASK" "fallback: detected active ${SUBAGENT_TYPE} trace ${_fb_trace_id} — finalizing"
+            _fb_trace_dir="${TRACE_STORE}/${_fb_trace_id}"
+            log_info "POST-TASK" "fallback: detected active ${SUBAGENT_TYPE} trace ${_fb_trace_id} — writing diagnostic summary + finalizing"
+            _write_diagnostic_summary "$_fb_trace_dir" "$SUBAGENT_TYPE" "$_fb_project_root"
             finalize_trace "$_fb_trace_id" "$_fb_project_root" "$SUBAGENT_TYPE" 2>/dev/null || true
             log_info "POST-TASK" "fallback: trace finalized for agent_type=${SUBAGENT_TYPE}"
             append_audit "$_fb_project_root" "post_task_fallback_finalize" \
                 "agent_type=${SUBAGENT_TYPE} trace=${_fb_trace_id}" 2>/dev/null || true
+            # Emit additionalContext for non-implementer agents (implementer gets its own
+            # DISPATCH TESTER NOW directive below — do not exit here for implementers).
+            if [[ "$SUBAGENT_TYPE" != "implementer" ]]; then
+                _fb_summary=$(head -c 2000 "${TRACE_STORE}/${_fb_trace_id}/summary.md" 2>/dev/null || echo "")
+                if [[ -n "$_fb_summary" ]]; then
+                    _fb_escaped=$(printf 'post-task fallback (%s): %s' "$SUBAGENT_TYPE" "$_fb_summary" | jq -Rs .)
+                    cat <<EOF
+{ "additionalContext": $_fb_escaped }
+EOF
+                    exit 0
+                fi
+            fi
         fi
     fi
 fi
@@ -105,7 +212,7 @@ fi
 #   with passing tests. Previously no hook emitted a directive, causing the
 #   orchestrator to ask "want me to dispatch tester?" instead. This handler
 #   checks test status and emits "DISPATCH TESTER NOW" when tests pass.
-if [[ "$TOOL_NAME" == "Task" && "$SUBAGENT_TYPE" == "implementer" ]]; then
+if [[ "$IS_SUBAGENT" == "true" && "$SUBAGENT_TYPE" == "implementer" ]]; then
     _impl_root=$(detect_project_root 2>/dev/null || echo "")
     if [[ -n "$_impl_root" ]]; then
         _impl_tests_pass=false
@@ -130,8 +237,8 @@ EOF
     fi
 fi
 
-# Only act on Task tool completions for the tester subagent
-if [[ "$TOOL_NAME" != "Task" || "$SUBAGENT_TYPE" != "tester" ]]; then
+# Only act on Task/Agent tool completions for the tester subagent
+if [[ "$IS_SUBAGENT" != "true" || "$SUBAGENT_TYPE" != "tester" ]]; then
     exit 0
 fi
 
