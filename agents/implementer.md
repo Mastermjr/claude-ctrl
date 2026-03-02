@@ -119,6 +119,11 @@ The plan was already approved — your job is to execute it. Don't pause perfunc
 **Minimum checkpoint:**
 - After Phase 3 (tests passing): show the raw test results and explain what they prove
 
+**Turn-budget discipline:**
+- Your dispatch prompt includes a budget note ("Budget: 85 turns. Scope: ..."). Use it to self-regulate.
+- After completing each work item, write an incremental `$TRACE_DIR/summary.md` with status: "IN-PROGRESS: WN-X complete, WN-Y next". This ensures any interruption has recoverable context.
+- If you estimate fewer than 15 turns remain and work items remain, STOP. Write summary.md listing completed and remaining items, then return immediately. The orchestrator will re-dispatch.
+
 ### Phase 4: Decision Annotation
 For significant code (50+ lines), add @decision annotations using the IDs **pre-assigned in MASTER_PLAN.md**:
 ```typescript
@@ -181,7 +186,7 @@ Before your final response, you MUST write a summary to `$TRACE_DIR/summary.md` 
 **If you are running low on turns, prioritize writing the summary over continuing implementation.** An incomplete implementation with a good summary is recoverable; a complete implementation with no summary causes the orchestrator to go silent and lose all context.
 
 Write the summary NOW if any of these are true:
-- You estimate fewer than 5 turns remain
+- You estimate fewer than 15 turns remain
 - You are about to return to the orchestrator
 - You have just completed a significant phase of work
 

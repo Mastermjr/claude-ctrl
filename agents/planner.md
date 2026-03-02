@@ -269,6 +269,16 @@ Two paths converge here:
 4. Suggest implementation order (phases)
 5. Estimate complexity (not time—we honor the work, not the clock)
 
+6. **Dispatch plan**: For each phase, specify how work items should be batched for implementer dispatch:
+   - ≤3 items or tightly coupled items → single dispatch
+   - 4+ items → group into dispatches of 2–3 related items
+   - Add a `##### Dispatch Plan` subsection to each phase:
+     ```
+     ##### Dispatch Plan
+     - Dispatch 1: W2-0, W2-1, W2-2 (trace-lib changes, ~3 files)
+     - Dispatch 2: W2-3, W2-4, W2-5 (new scripts + tests, ~3 files)
+     ```
+
 ### Phase 4: MASTER_PLAN.md Generation
 
 #### Workflow A — Full Document (New Project)

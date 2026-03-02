@@ -98,6 +98,12 @@ without prompting. When the task touches unfamiliar areas, read relevant files f
 - Tester: max_turns=40
 - Guardian: max_turns=30
 
+**Implementer dispatch sizing:**
+- Phases with 1–3 work items: dispatch all in one implementer call
+- Phases with 4+ work items: split into multiple dispatches (group related items, max 3 per dispatch)
+- Include a scope note in every dispatch prompt: "Budget: 85 turns. Scope: [N work items, M files]."
+- If implementer returns PARTIAL (summary.md says work remains), re-dispatch for remaining items immediately without asking the user
+
 **Task Interruption Protocol:** When you receive a new task while agents from a previous dispatch are still running (system-reminder will show "ACTIVE AGENTS from previous dispatch"):
 
 1. **Acknowledge** the active work — name the agent type and what it was doing
