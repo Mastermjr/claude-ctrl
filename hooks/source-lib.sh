@@ -95,18 +95,28 @@ fi
 _SRCLIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 source "${_SRCLIB_DIR}/log.sh"
-source "${_SRCLIB_DIR}/context-lib.sh"
+source "${_SRCLIB_DIR}/core-lib.sh"
 
 # --- Lazy domain library loaders ---
 # These functions load domain libraries on demand. Each is idempotent:
 # calling require_git() twice is safe (second call is a no-op).
 #
 # Usage in hooks that want to minimize load time:
-#   require_git
-#   get_git_state "$PROJECT_ROOT"
+#   require_session
+#   append_session_event "write" "{}" "$PROJECT_ROOT"
 #
-# Or in hooks that use all domains (like session-init.sh):
-#   source "${_SRCLIB_DIR}/source-lib.sh"  # loads everything via context-lib.sh
+# Or in hooks that need all domains (like session-init.sh):
+#   require_all  # loads all domain libraries (same as old context-lib.sh behavior)
+#
+# @decision DEC-PERF-002
+# @title source-lib.sh loads core-lib.sh only; domain libs loaded on demand
+# @status accepted
+# @rationale Previously source-lib.sh sourced context-lib.sh which loaded ALL
+#   domain libraries (3,175 lines total). Every hook paid the full parse cost.
+#   Now source-lib.sh loads only log.sh (269 lines) + core-lib.sh (398 lines) =
+#   667 lines. Domain libraries are loaded on demand via require_*() functions.
+#   Hooks that need all domains call require_all(). context-lib.sh still works
+#   as a compatibility shim for run-hooks.sh and tests that source it directly.
 
 require_git() {
     [[ -n "${_GIT_LIB_LOADED:-}" ]] && return 0
@@ -191,4 +201,15 @@ read_trace_evidence() {
 require_ci() {
     [[ -n "${_CI_LIB_LOADED:-}" ]] && return 0
     source "${_SRCLIB_DIR}/ci-lib.sh"
+}
+
+# require_all — load all domain libraries (equivalent to old context-lib.sh behavior).
+# Use in hooks that need every domain: session-init.sh, compact-preserve.sh, etc.
+require_all() {
+    require_git
+    require_plan
+    require_trace
+    require_session
+    require_doc
+    require_ci
 }

@@ -14,6 +14,10 @@ set -euo pipefail
 
 source "$(dirname "$0")/source-lib.sh"
 
+require_session
+require_git
+require_plan
+
 PROJECT_ROOT=$(detect_project_root)
 CLAUDE_DIR=$(get_claude_dir)
 CONTEXT_PARTS=()

@@ -47,6 +47,8 @@ set -euo pipefail
 
 source "$(dirname "$0")/source-lib.sh"
 
+require_trace
+
 HOOK_INPUT=$(read_input)
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
 SUBAGENT_TYPE=$(echo "$HOOK_INPUT" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")

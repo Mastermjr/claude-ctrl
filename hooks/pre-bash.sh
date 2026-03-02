@@ -74,6 +74,12 @@ source "$(dirname "$0")/source-lib.sh"
 # Replace inline trap with canonical fail-closed trap from core-lib.sh
 enable_fail_closed "pre-bash"
 
+# Lazy-load domain libraries needed by pre-bash.sh gates.
+# require_session: append_session_event, read_test_status (Check 6, 7, 8)
+# require_doc is loaded just before the doc-freshness section (avoids loading
+# it for the common case where a non-git command early-exits at the git gate).
+require_session
+
 # In scan mode: emit all gate declarations and exit cleanly BEFORE reading stdin.
 # Hooks are invoked with < /dev/null in scan mode, so stdin is empty.
 # This block MUST be before read_input() to avoid early-exit on empty COMMAND.
@@ -516,6 +522,10 @@ fi
 # @title doc-freshness fires only on git commit/merge, not all Bash commands
 # @status accepted
 # =============================================================================
+
+# Load doc-lib here (not at top) so the common path (non-commit git commands)
+# exits at the git-early-exit gate above without paying doc-lib parse cost.
+require_doc
 
 # Early-exit: only process git commit/merge commands (already confirmed git above)
 declare_gate "doc-freshness" "Documentation freshness enforcement on commit/merge" "advisory"

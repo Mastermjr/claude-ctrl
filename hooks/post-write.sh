@@ -28,6 +28,10 @@ _HOOK_EVENT_TYPE="PostToolUse:Write"
 
 source "$(dirname "$0")/source-lib.sh"
 
+# Lazy-load domain libraries needed by post-write.sh.
+# require_session: append_session_event (Step 1: track — session change tracking)
+require_session
+
 # In scan mode: emit all step declarations and exit cleanly BEFORE reading stdin.
 # Hooks are invoked with < /dev/null in scan mode, so stdin is empty.
 # This block MUST be before read_input() to avoid early-exit on empty FILE_PATH.

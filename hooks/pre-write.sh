@@ -44,6 +44,13 @@ source "$(dirname "$0")/source-lib.sh"
 
 enable_fail_closed "pre-write"
 
+# Lazy-load domain libraries needed by pre-write.sh gates.
+# require_plan: get_plan_status, get_drift_data (Gate 2: plan-check)
+# require_session: read_test_status, append_session_event, detect_approach_pivots
+#   (Gate 3: test-gate, Gate 6: checkpoint session tracking)
+require_plan
+require_session
+
 # In scan mode: emit all gate declarations and exit cleanly BEFORE reading stdin.
 # Hooks are invoked with < /dev/null in scan mode, so stdin is empty.
 # This block MUST be before read_input() to avoid early-exit on empty FILE_PATH.
@@ -73,6 +80,22 @@ cache_project_context
 _CACHED_WRITE_CONTENT=""
 if [[ "$TOOL_NAME" == "Write" ]]; then
     _CACHED_WRITE_CONTENT=$(get_field '.tool_input.content')
+fi
+
+# Worktree detection: skip low-value gates when writing inside a worktree.
+# plan-check is advisory-at-best in worktrees (plan lives on main).
+# doc-gate @decision enforcement is noisy during rapid iteration.
+# @decision DEC-PERF-003
+# @title Skip plan-check and lighten doc-gate in worktrees
+# @status accepted
+# @rationale plan-check fires on every source write and calls get_plan_status() +
+#   get_drift_data(), each spawning git subprocesses. In worktrees this is wasted
+#   effort — the plan lives on main and worktree writes don't need plan validation.
+#   Similarly, doc-gate's @decision enforcement is advisory noise during rapid
+#   iteration. Branch-guard, test-gate, and mock-gate still fire (safety-critical).
+_IN_WORKTREE=false
+if [[ "${_FORCE_WORKTREE_CHECK:-}" != "0" && "$FILE_PATH" == *"/.worktrees/"* ]]; then
+    _IN_WORKTREE=true
 fi
 
 # ============================================================
@@ -126,72 +149,75 @@ fi
 # ============================================================
 # Gate 2: Plan check (hard deny for planless source writes)
 # Source: plan-check.sh
+# Skipped in worktrees: plan lives on main; worktree writes don't need plan validation.
 # ============================================================
 declare_gate "plan-check" "Writes without MASTER_PLAN.md" "deny"
 
-# Skip non-source files, test files, config, .claude directory itself
-if is_source_file "$FILE_PATH" && ! is_skippable_path "$FILE_PATH" && [[ ! "$FILE_PATH" =~ \.claude/ ]]; then
-    # Edit tool is inherently scoped — skip plan check
-    if [[ "$TOOL_NAME" != "Edit" ]]; then
-        # Write tool: skip small files (<20 lines)
-        if [[ "$TOOL_NAME" == "Write" ]]; then
-            CONTENT_LINES=$(echo "$_CACHED_WRITE_CONTENT" | wc -l | tr -d ' ')
-            if [[ "$CONTENT_LINES" -lt 20 ]]; then
-                emit_advisory "Fast-mode bypass: small file write ($CONTENT_LINES lines) skipped plan check. Surface audit will track this."
-                # Continue to next gates — don't exit
-            else
-                # Large write — check for plan
-                if [[ -d "$_CACHED_PROJECT_ROOT/.git" ]]; then
-                    if [[ ! -f "$_CACHED_PROJECT_ROOT/MASTER_PLAN.md" ]]; then
-                        emit_deny "BLOCKED: No MASTER_PLAN.md in $_CACHED_PROJECT_ROOT. Sacred Practice #6: We NEVER run straight into implementing anything.\n\nAction: Invoke the Planner agent to create MASTER_PLAN.md before implementing."
-                    fi
+if [[ "$_IN_WORKTREE" == "false" ]]; then
+    # Skip non-source files, test files, config, .claude directory itself
+    if is_source_file "$FILE_PATH" && ! is_skippable_path "$FILE_PATH" && [[ ! "$FILE_PATH" =~ \.claude/ ]]; then
+        # Edit tool is inherently scoped — skip plan check
+        if [[ "$TOOL_NAME" != "Edit" ]]; then
+            # Write tool: skip small files (<20 lines)
+            if [[ "$TOOL_NAME" == "Write" ]]; then
+                CONTENT_LINES=$(echo "$_CACHED_WRITE_CONTENT" | wc -l | tr -d ' ')
+                if [[ "$CONTENT_LINES" -lt 20 ]]; then
+                    emit_advisory "Fast-mode bypass: small file write ($CONTENT_LINES lines) skipped plan check. Surface audit will track this."
+                    # Continue to next gates — don't exit
+                else
+                    # Large write — check for plan
+                    if [[ -d "$_CACHED_PROJECT_ROOT/.git" ]]; then
+                        if [[ ! -f "$_CACHED_PROJECT_ROOT/MASTER_PLAN.md" ]]; then
+                            emit_deny "BLOCKED: No MASTER_PLAN.md in $_CACHED_PROJECT_ROOT. Sacred Practice #6: We NEVER run straight into implementing anything.\n\nAction: Invoke the Planner agent to create MASTER_PLAN.md before implementing."
+                        fi
 
-                    # Plan lifecycle check
-                    get_plan_status "$_CACHED_PROJECT_ROOT"
-                    if [[ "$PLAN_LIFECYCLE" == "dormant" ]]; then
-                        emit_deny "BLOCKED: MASTER_PLAN.md is dormant — all initiatives are completed (or plan has no active initiatives).\n\nAction: Add a new initiative to MASTER_PLAN.md before writing code. Invoke the Planner agent with create-or-amend workflow."
-                    fi
+                        # Plan lifecycle check
+                        get_plan_status "$_CACHED_PROJECT_ROOT"
+                        if [[ "$PLAN_LIFECYCLE" == "dormant" ]]; then
+                            emit_deny "BLOCKED: MASTER_PLAN.md is dormant — all initiatives are completed (or plan has no active initiatives).\n\nAction: Add a new initiative to MASTER_PLAN.md before writing code. Invoke the Planner agent with create-or-amend workflow."
+                        fi
 
-                    # Plan staleness check (composite: churn % + drift IDs)
-                    get_drift_data "$_CACHED_PROJECT_ROOT"
+                        # Plan staleness check (composite: churn % + drift IDs)
+                        get_drift_data "$_CACHED_PROJECT_ROOT"
 
-                    CHURN_WARN_PCT="${PLAN_CHURN_WARN:-15}"
-                    CHURN_DENY_PCT="${PLAN_CHURN_DENY:-35}"
+                        CHURN_WARN_PCT="${PLAN_CHURN_WARN:-15}"
+                        CHURN_DENY_PCT="${PLAN_CHURN_DENY:-35}"
 
-                    CHURN_TIER="ok"
-                    [[ "$PLAN_SOURCE_CHURN_PCT" -ge "$CHURN_DENY_PCT" ]] && CHURN_TIER="deny"
-                    [[ "$CHURN_TIER" == "ok" && "$PLAN_SOURCE_CHURN_PCT" -ge "$CHURN_WARN_PCT" ]] && CHURN_TIER="warn"
+                        CHURN_TIER="ok"
+                        [[ "$PLAN_SOURCE_CHURN_PCT" -ge "$CHURN_DENY_PCT" ]] && CHURN_TIER="deny"
+                        [[ "$CHURN_TIER" == "ok" && "$PLAN_SOURCE_CHURN_PCT" -ge "$CHURN_WARN_PCT" ]] && CHURN_TIER="warn"
 
-                    DRIFT_TIER="ok"
-                    TOTAL_DRIFT=0
-                    if [[ "$DRIFT_LAST_AUDIT_EPOCH" -gt 0 ]]; then
-                        TOTAL_DRIFT=$((DRIFT_UNPLANNED_COUNT + DRIFT_UNIMPLEMENTED_COUNT))
-                        [[ "$TOTAL_DRIFT" -ge 5 ]] && DRIFT_TIER="deny"
-                        [[ "$DRIFT_TIER" == "ok" && "$TOTAL_DRIFT" -ge 2 ]] && DRIFT_TIER="warn"
-                    else
-                        [[ "$PLAN_COMMITS_SINCE" -ge 100 ]] && DRIFT_TIER="deny"
-                        [[ "$DRIFT_TIER" == "ok" && "$PLAN_COMMITS_SINCE" -ge 40 ]] && DRIFT_TIER="warn"
-                    fi
+                        DRIFT_TIER="ok"
+                        TOTAL_DRIFT=0
+                        if [[ "$DRIFT_LAST_AUDIT_EPOCH" -gt 0 ]]; then
+                            TOTAL_DRIFT=$((DRIFT_UNPLANNED_COUNT + DRIFT_UNIMPLEMENTED_COUNT))
+                            [[ "$TOTAL_DRIFT" -ge 5 ]] && DRIFT_TIER="deny"
+                            [[ "$DRIFT_TIER" == "ok" && "$TOTAL_DRIFT" -ge 2 ]] && DRIFT_TIER="warn"
+                        else
+                            [[ "$PLAN_COMMITS_SINCE" -ge 100 ]] && DRIFT_TIER="deny"
+                            [[ "$DRIFT_TIER" == "ok" && "$PLAN_COMMITS_SINCE" -ge 40 ]] && DRIFT_TIER="warn"
+                        fi
 
-                    STALENESS="ok"
-                    [[ "$CHURN_TIER" == "deny" || "$DRIFT_TIER" == "deny" ]] && STALENESS="deny"
-                    [[ "$STALENESS" == "ok" ]] && [[ "$CHURN_TIER" == "warn" || "$DRIFT_TIER" == "warn" ]] && STALENESS="warn"
+                        STALENESS="ok"
+                        [[ "$CHURN_TIER" == "deny" || "$DRIFT_TIER" == "deny" ]] && STALENESS="deny"
+                        [[ "$STALENESS" == "ok" ]] && [[ "$CHURN_TIER" == "warn" || "$DRIFT_TIER" == "warn" ]] && STALENESS="warn"
 
-                    DIAG_PARTS=()
-                    [[ "$CHURN_TIER" != "ok" ]] && DIAG_PARTS+=("Source churn: ${PLAN_SOURCE_CHURN_PCT}% of files changed (threshold: ${CHURN_WARN_PCT}%/${CHURN_DENY_PCT}%).")
-                    if [[ "$DRIFT_LAST_AUDIT_EPOCH" -gt 0 ]]; then
-                        [[ "$DRIFT_TIER" != "ok" ]] && DIAG_PARTS+=("Decision drift: $TOTAL_DRIFT decisions out of sync (${DRIFT_UNPLANNED_COUNT} unplanned, ${DRIFT_UNIMPLEMENTED_COUNT} unimplemented).")
-                    else
-                        [[ "$DRIFT_TIER" != "ok" ]] && DIAG_PARTS+=("Commit count fallback: $PLAN_COMMITS_SINCE commits since plan update.")
-                    fi
-                    DIAGNOSTIC=""
-                    [[ ${#DIAG_PARTS[@]} -gt 0 ]] && DIAGNOSTIC=$(printf '%s ' "${DIAG_PARTS[@]}")
+                        DIAG_PARTS=()
+                        [[ "$CHURN_TIER" != "ok" ]] && DIAG_PARTS+=("Source churn: ${PLAN_SOURCE_CHURN_PCT}% of files changed (threshold: ${CHURN_WARN_PCT}%/${CHURN_DENY_PCT}%).")
+                        if [[ "$DRIFT_LAST_AUDIT_EPOCH" -gt 0 ]]; then
+                            [[ "$DRIFT_TIER" != "ok" ]] && DIAG_PARTS+=("Decision drift: $TOTAL_DRIFT decisions out of sync (${DRIFT_UNPLANNED_COUNT} unplanned, ${DRIFT_UNIMPLEMENTED_COUNT} unimplemented).")
+                        else
+                            [[ "$DRIFT_TIER" != "ok" ]] && DIAG_PARTS+=("Commit count fallback: $PLAN_COMMITS_SINCE commits since plan update.")
+                        fi
+                        DIAGNOSTIC=""
+                        [[ ${#DIAG_PARTS[@]} -gt 0 ]] && DIAGNOSTIC=$(printf '%s ' "${DIAG_PARTS[@]}")
 
-                    if [[ "$STALENESS" == "deny" ]]; then
-                        emit_deny "MASTER_PLAN.md is critically stale. ${DIAGNOSTIC}Read MASTER_PLAN.md, scan the codebase for @decision annotations, and update the plan's phase statuses before continuing."
-                    elif [[ "$STALENESS" == "warn" ]]; then
-                        emit_advisory "Plan staleness warning: ${DIAGNOSTIC}Consider reviewing MASTER_PLAN.md — it may not reflect the current codebase state."
-                        # Continue to next gates (warn is advisory)
+                        if [[ "$STALENESS" == "deny" ]]; then
+                            emit_deny "MASTER_PLAN.md is critically stale. ${DIAGNOSTIC}Read MASTER_PLAN.md, scan the codebase for @decision annotations, and update the plan's phase statuses before continuing."
+                        elif [[ "$STALENESS" == "warn" ]]; then
+                            emit_advisory "Plan staleness warning: ${DIAGNOSTIC}Consider reviewing MASTER_PLAN.md — it may not reflect the current codebase state."
+                            # Continue to next gates (warn is advisory)
+                        fi
                     fi
                 fi
             fi
@@ -576,10 +602,13 @@ if is_source_file "$FILE_PATH" && ! is_skippable_path "$FILE_PATH" && [[ ! "$FIL
             FILE_CONTENT_ON_DISK=$(cat "$FILE_PATH" 2>/dev/null || echo "")
             if [[ -n "$FILE_CONTENT_ON_DISK" ]]; then
                 if _has_doc_header "$FILE_CONTENT_ON_DISK" "$_DOC_EXT"; then
-                    LINE_COUNT=$(wc -l < "$FILE_PATH" | tr -d ' ')
-                    if [[ "$LINE_COUNT" -ge "$DECISION_LINE_THRESHOLD" ]]; then
-                        if ! _has_decision "$FILE_CONTENT_ON_DISK"; then
-                            emit_advisory "Note: $FILE_PATH is $LINE_COUNT lines but has no @decision annotation. Consider adding one."
+                    # Skip @decision advisory in worktrees — advisory noise during rapid iteration.
+                    if [[ "$_IN_WORKTREE" == "false" ]]; then
+                        LINE_COUNT=$(wc -l < "$FILE_PATH" | tr -d ' ')
+                        if [[ "$LINE_COUNT" -ge "$DECISION_LINE_THRESHOLD" ]]; then
+                            if ! _has_decision "$FILE_CONTENT_ON_DISK"; then
+                                emit_advisory "Note: $FILE_PATH is $LINE_COUNT lines but has no @decision annotation. Consider adding one."
+                            fi
                         fi
                     fi
                 else

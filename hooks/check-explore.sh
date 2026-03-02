@@ -29,6 +29,9 @@ set -euo pipefail
 
 source "$(dirname "$0")/source-lib.sh"
 
+require_session
+require_trace
+
 # Capture stdin (contains agent response)
 AGENT_RESPONSE=$(read_input 2>/dev/null || echo "{}")
 

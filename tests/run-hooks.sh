@@ -12,7 +12,17 @@
 #   gate hook behavioral tests, context-lib unit tests, integration tests, and
 #   session lifecycle tests for comprehensive coverage (GitHub #63, #68, #70, #71).
 #
-# Usage: bash tests/run-hooks.sh
+# @decision DEC-PERF-002
+# @title Scoped test runs via --scope flag in run-hooks.sh
+# @status accepted
+# @rationale Running all 131 tests takes 45-90s. During hook development, only
+#   a subset is relevant. --scope <name> runs only matching sections, reducing
+#   the feedback loop to <15s. Multiple scopes are ORed. No --scope = full run.
+#   Implemented by wrapping each section in if should_run_section(); then ... fi.
+#   The scope map is a bash associative array keyed by scope name; values are
+#   grep -iE patterns matched against section names in the echo markers.
+#
+# Usage: bash tests/run-hooks.sh [--scope <name>] [--scope <name>] ...
 #
 # Tests verify:
 #   - Hooks exit with code 0 (no crashes)
@@ -44,6 +54,105 @@ fi
 passed=0
 failed=0
 skipped=0
+
+# =============================================================================
+# --scope argument parsing
+# @decision DEC-PERF-002
+# @title Scoped test runs via --scope flag
+# @status accepted
+# @rationale Running all 131 tests takes 45-90s. During hook development, only
+#   a subset of tests is relevant to the change at hand. --scope <name> runs
+#   only the section(s) matching the scope, reducing feedback loop to <15s.
+#   Multiple --scope flags are ORed: --scope unit --scope syntax runs both.
+#   No --scope = backward-compatible full run (no behaviour change for CI).
+#
+# Usage: bash tests/run-hooks.sh [--scope <name>] [--scope <name>] ...
+# Scopes: syntax, pre-bash, pre-write, post-write, unit, session, integration,
+#         trace, gate, state
+# =============================================================================
+
+REQUESTED_SCOPES=()
+
+_print_scope_usage() {
+    echo "Usage: bash tests/run-hooks.sh [--scope <name>] [--scope <name>] ..."
+    echo ""
+    echo "Available scopes:"
+    echo "  syntax      — Syntax Validation + Configuration"
+    echo "  pre-bash    — guard.sh (pre-bash.sh) all variants"
+    echo "  pre-write   — branch-guard, plan-check, plan lifecycle, plan archival, doc-gate, test-gate, mock-gate"
+    echo "  post-write  — plan-validate, statusline, registry lint"
+    echo "  unit        — context-lib.sh unit tests (is_source_file, is_skippable_path, get_git_state, build_resume_directive)"
+    echo "  session     — session-init, prompt-submit, compact-preserve"
+    echo "  integration — settings.json sync, subagent tracking, update-check"
+    echo "  trace       — Trace protocol (init_trace, finalize_trace, detect, subagent injection)"
+    echo "  gate        — Gate hook behavioral tests (branch-guard, doc-gate, test-gate, mock-gate)"
+    echo "  state       — State Registry Lint + Multi-Context Pass"
+    echo ""
+    echo "No --scope = run all tests (default, backward compatible)."
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --scope)
+            shift
+            if [[ -z "${1:-}" ]]; then
+                echo "ERROR: --scope requires an argument" >&2
+                _print_scope_usage >&2
+                exit 1
+            fi
+            REQUESTED_SCOPES+=("$1")
+            shift
+            ;;
+        --help|-h)
+            _print_scope_usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            _print_scope_usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Scope → section name regex patterns (grep -iE)
+# Uses a function instead of declare -A (bash 3.2 on macOS lacks associative arrays).
+_scope_pattern() {
+    case "$1" in
+        syntax)      echo "Syntax Validation|Configuration" ;;
+        pre-bash)    echo "guard\.sh|nuclear commands|false positives|cross-project git|git-in-text|flag bypass|main is sacred" ;;
+        pre-write)   echo "branch-guard\.sh behavioral|plan-check\.sh lifecycle|plan lifecycle|plan archival|doc-gate\.sh behavioral|test-gate\.sh behavioral|mock-gate\.sh behavioral" ;;
+        post-write)  echo "plan-validate\.sh|statusline\.sh|State Registry Lint" ;;
+        unit)        echo "context-lib\.sh: is_source_file|context-lib\.sh: is_skippable_path|context-lib\.sh: get_git_state|context-lib\.sh: build_resume_directive" ;;
+        session)     echo "session-init\.sh|prompt-submit\.sh|compact-preserve\.sh" ;;
+        integration) echo "settings\.json|subagent tracking|update-check\.sh" ;;
+        trace)       echo "trace protocol" ;;
+        gate)        echo "branch-guard\.sh behavioral|doc-gate\.sh behavioral|test-gate\.sh behavioral|mock-gate\.sh behavioral" ;;
+        state)       echo "State Registry Lint|Multi-Context Pass" ;;
+        *)           echo "" ;;
+    esac
+}
+
+# should_run_section "Section Name" — returns 0 (run) or 1 (skip)
+should_run_section() {
+    local section_name="$1"
+    # No scopes specified = run everything
+    if [[ ${#REQUESTED_SCOPES[@]} -eq 0 ]]; then
+        return 0
+    fi
+    local scope pattern
+    for scope in "${REQUESTED_SCOPES[@]}"; do
+        pattern=$(_scope_pattern "$scope")
+        if [[ -z "$pattern" ]]; then
+            echo "WARNING: unknown scope '$scope' — ignoring (use --help for valid scopes)" >&2
+            continue
+        fi
+        if echo "$section_name" | grep -qiE "$pattern"; then
+            return 0
+        fi
+    done
+    return 1  # Skip this section
+}
 
 # Colors (disabled if not a terminal)
 if [[ -t 1 ]]; then
@@ -77,6 +186,7 @@ echo "Fixtures dir: $FIXTURES_DIR"
 echo ""
 
 # --- Test: All hooks parse without syntax errors ---
+if should_run_section "Syntax Validation"; then
 echo "--- Syntax Validation ---"
 for hook in "$HOOKS_DIR"/*.sh; do
     name=$(basename "$hook")
@@ -87,8 +197,10 @@ for hook in "$HOOKS_DIR"/*.sh; do
     fi
 done
 echo ""
+fi
 
 # --- Test: settings.json is valid ---
+if should_run_section "Configuration"; then
 echo "--- Configuration ---"
 SETTINGS="$(dirname "$HOOKS_DIR")/settings.json"
 if python3 -m json.tool "$SETTINGS" > /dev/null 2>&1; then
@@ -97,6 +209,7 @@ else
     fail "settings.json" "invalid JSON"
 fi
 echo ""
+fi
 
 # =============================================================================
 # GATE HOOK BEHAVIORAL TESTS
@@ -108,6 +221,7 @@ echo "=========================================="
 echo ""
 
 # --- Test: branch-guard.sh behavioral tests ---
+if should_run_section "branch-guard.sh behavioral tests"; then
 echo "--- branch-guard.sh behavioral tests ---"
 
 # Test 1: Deny source file write on main branch
@@ -195,8 +309,10 @@ safe_cleanup "$BG_TEST_DIR_PLAN" "$SCRIPT_DIR"
 rm -f "$BG_FIXTURE_PLAN"
 
 echo ""
+fi # end: branch-guard.sh behavioral tests
 
 # --- Test: doc-gate.sh behavioral tests ---
+if should_run_section "doc-gate.sh behavioral tests"; then
 echo "--- doc-gate.sh behavioral tests ---"
 
 # Test 1: Deny Write without header
@@ -273,8 +389,10 @@ fi
 rm -f "$DOC_FIXTURE_WITH_DECISION"
 rm -rf "$DOC_TEST_DIR"
 echo ""
+fi # end: doc-gate.sh behavioral tests
 
 # --- Test: test-gate.sh behavioral tests ---
+if should_run_section "test-gate.sh behavioral tests"; then
 echo "--- test-gate.sh behavioral tests ---"
 
 # NOTE: No git init here — pre-write.sh Gate 1 (branch-guard) blocks writes on main/master.
@@ -341,8 +459,10 @@ rm -f "$TG_FIXTURE_SRC"
 
 safe_cleanup "$TG_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: test-gate.sh behavioral tests
 
 # --- Test: mock-gate.sh behavioral tests ---
+if should_run_section "mock-gate.sh behavioral tests"; then
 echo "--- mock-gate.sh behavioral tests ---"
 
 # NOTE: No git init — pre-write.sh Gate 1 blocks writes on main/master.
@@ -392,6 +512,7 @@ rm -f "$MG_FIXTURE_INTERNAL_MOCK"
 
 safe_cleanup "$MG_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: mock-gate.sh behavioral tests
 
 # =============================================================================
 # CONTEXT-LIB UNIT TESTS
@@ -402,6 +523,7 @@ echo "CONTEXT-LIB UNIT TESTS"
 echo "=========================================="
 echo ""
 
+if should_run_section "context-lib.sh: is_source_file()"; then
 echo "--- context-lib.sh: is_source_file() ---"
 
 # Test source file detection
@@ -428,7 +550,9 @@ test_is_source "script.sh" "true"
 test_is_source "noextension" "false"
 test_is_source "main.tsx" "true"
 echo ""
+fi # end: context-lib.sh: is_source_file()
 
+if should_run_section "context-lib.sh: is_skippable_path()"; then
 echo "--- context-lib.sh: is_skippable_path() ---"
 
 # Test skippable path detection
@@ -453,7 +577,9 @@ test_is_skippable "dist/bundle.min.js" "true"
 test_is_skippable "src/main.py" "false"
 test_is_skippable ".git/config" "true"
 echo ""
+fi # end: context-lib.sh: is_skippable_path()
 
+if should_run_section "context-lib.sh: get_git_state()"; then
 echo "--- context-lib.sh: get_git_state() ---"
 
 GS_TEST_DIR=$(mktemp -d)
@@ -476,7 +602,9 @@ fi
 
 safe_cleanup "$GS_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: context-lib.sh: get_git_state()
 
+if should_run_section "context-lib.sh: build_resume_directive()"; then
 echo "--- context-lib.sh: build_resume_directive() ---"
 
 # Test 1: needs-verification proof status triggers correct directive
@@ -534,7 +662,9 @@ safe_cleanup "$BRD_TEST_DIR" "$SCRIPT_DIR"
 safe_cleanup "$BRD_CLEAN_DIR" "$SCRIPT_DIR"
 safe_cleanup "$BRD_DIRTY_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: context-lib.sh: build_resume_directive()
 
+if should_run_section "session-init.sh: compaction resume directive injection"; then
 echo "--- session-init.sh: compaction resume directive injection ---"
 
 # Test: session-init.sh injects preserved-context resume directive as first element
@@ -581,7 +711,9 @@ fi
 
 safe_cleanup "$SINIT_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: session-init.sh: compaction resume directive injection
 
+if should_run_section "compact-preserve.sh: trajectory and resume directive capture"; then
 echo "--- compact-preserve.sh: trajectory and resume directive capture ---"
 
 # Test: compact-preserve.sh runs without error and produces valid JSON
@@ -628,6 +760,7 @@ fi
 
 safe_cleanup "$COMPACT_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: compact-preserve.sh: trajectory and resume directive capture
 
 # =============================================================================
 # INTEGRATION TESTS
@@ -638,6 +771,7 @@ echo "INTEGRATION TESTS"
 echo "=========================================="
 echo ""
 
+if should_run_section "settings.json ↔ hook file sync"; then
 echo "--- settings.json ↔ hook file sync ---"
 
 # Extract all hooks referenced in settings.json (only hooks/ paths, not scripts/)
@@ -682,6 +816,7 @@ else
     fi
 fi
 echo ""
+fi # end: settings.json ↔ hook file sync
 
 # =============================================================================
 # SESSION LIFECYCLE TESTS
@@ -692,6 +827,7 @@ echo "SESSION LIFECYCLE TESTS"
 echo "=========================================="
 echo ""
 
+if should_run_section "session-init.sh"; then
 echo "--- session-init.sh ---"
 
 if [[ -f "$FIXTURES_DIR/session-init.json" ]]; then
@@ -710,7 +846,9 @@ else
     skip "session-init.sh" "no fixture found"
 fi
 echo ""
+fi # end: session-init.sh
 
+if should_run_section "prompt-submit.sh"; then
 echo "--- prompt-submit.sh ---"
 
 PS_TEST_DIR=$(mktemp -d)
@@ -745,6 +883,7 @@ rm -f "$PS_FIXTURE_NORMAL"
 
 safe_cleanup "$PS_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: prompt-submit.sh
 
 # =============================================================================
 # EXISTING TESTS (PRESERVED)
@@ -758,6 +897,7 @@ echo ""
 # --- Test: guard.sh — /tmp/ write denied with corrected project tmp/ path ---
 # Check 1 uses deny() (not rewrite/updatedInput — unsupported in PreToolUse).
 # The deny reason contains the corrected command using <PROJECT_ROOT>/tmp/.
+if should_run_section "guard.sh"; then
 echo "--- guard.sh ---"
 if [[ -f "$FIXTURES_DIR/guard-tmp-write.json" ]]; then
     output=$(run_hook "$HOOKS_DIR/pre-bash.sh" "$FIXTURES_DIR/guard-tmp-write.json")
@@ -833,7 +973,9 @@ if [[ -f "$FIXTURES_DIR/guard-rm-rf-worktrees.json" ]]; then
         fail "guard.sh — Check 5b: rm -rf .worktrees/" "expected deny, got decision=${decision:-no output}"
     fi
 fi
+fi # end: guard.sh
 
+if should_run_section "guard.sh nuclear commands"; then
 # --- Test: guard.sh — nuclear command deny ---
 echo "--- guard.sh nuclear commands ---"
 
@@ -862,7 +1004,9 @@ nuclear_assert_deny "guard-nuclear-shutdown.json"      "shutdown (system halt)"
 nuclear_assert_deny "guard-nuclear-drop-db.json"       "DROP DATABASE (SQL destruction)"
 nuclear_assert_deny "guard-nuclear-fork-bomb.json"     "fork bomb (resource exhaustion)"
 echo ""
+fi # end: guard.sh nuclear commands
 
+if should_run_section "guard.sh false positives"; then
 # --- Test: guard.sh — false positives (must NOT deny) ---
 echo "--- guard.sh false positives ---"
 
@@ -887,7 +1031,9 @@ nuclear_assert_safe "guard-safe-curl.json"    "curl | jq (not a shell)"
 nuclear_assert_safe "guard-safe-chmod.json"   "chmod 755 ./build (not 777 on root)"
 nuclear_assert_safe "guard-safe-rm-file.json" "rm file.txt (single file)"
 echo ""
+fi # end: guard.sh false positives
 
+if should_run_section "guard.sh cross-project git"; then
 # --- Test: guard.sh — cross-project git (Check 1.5 removed) ---
 echo "--- guard.sh cross-project git ---"
 
@@ -924,7 +1070,9 @@ fi
 safe_cleanup "$CROSS_TEST_DIR" "$SCRIPT_DIR"
 rm -f "$CROSS_FIXTURE"
 echo ""
+fi # end: guard.sh cross-project git
 
+if should_run_section "guard.sh git-in-text false positives"; then
 # --- Test: guard.sh — git-in-text false positives (early-exit gate) ---
 echo "--- guard.sh git-in-text false positives ---"
 
@@ -932,7 +1080,9 @@ nuclear_assert_safe "guard-safe-text-git-commit.json" "todo.sh with 'git committ
 nuclear_assert_safe "guard-safe-text-git-merge.json"  "echo with 'git merging' in quoted text"
 nuclear_assert_safe "guard-safe-text-git-push.json"   "printf with 'git push' in quoted text"
 echo ""
+fi # end: guard.sh git-in-text false positives
 
+if should_run_section "guard.sh git flag bypass"; then
 # --- Test: guard.sh — git flag bypass (git -C /path <subcommand>) ---
 echo "--- guard.sh git flag bypass ---"
 
@@ -951,7 +1101,9 @@ PEOF
 nuclear_assert_safe "guard-safe-pipe-grep-commit.json" "git log | grep commit (pipe false positive)"
 rm -f "$PIPE_FIXTURE"
 echo ""
+fi # end: guard.sh git flag bypass
 
+if should_run_section "guard.sh Check 2: main is sacred"; then
 # --- Test: guard.sh — Check 2: main is sacred (commit on main) ---
 echo "--- guard.sh Check 2: main is sacred ---"
 
@@ -1002,11 +1154,13 @@ rm -f "$C2_FIXTURE_MERGE"
 
 safe_cleanup "$C2_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: guard.sh Check 2: main is sacred
 
 # NOTE: auto-review.sh tests removed — hook was pruned during metanoia consolidation.
 # The hook no longer exists; all its tests have been deleted to match.
 
 # --- Test: plan-validate.sh (PostToolUse) ---
+if should_run_section "plan-validate.sh"; then
 echo "--- plan-validate.sh ---"
 if [[ -f "$FIXTURES_DIR/plan-validate-non-plan.json" ]]; then
     output=$(run_hook "$HOOKS_DIR/post-write.sh" "$FIXTURES_DIR/plan-validate-non-plan.json")
@@ -1017,9 +1171,10 @@ if [[ -f "$FIXTURES_DIR/plan-validate-non-plan.json" ]]; then
         pass "plan-validate.sh — non-plan file (with advisory)"
     fi
 fi
-
 echo ""
+fi # end: plan-validate.sh
 
+if should_run_section "statusline.sh"; then
 # --- Test: statusline.sh — cache rendering ---
 echo "--- statusline.sh ---"
 SL_TEST_DIR=$(mktemp -d)
@@ -1061,7 +1216,9 @@ else
 fi
 safe_cleanup "$SL_TEST_DIR2" "$SCRIPT_DIR"
 echo ""
+fi # end: statusline.sh
 
+if should_run_section "subagent tracking"; then
 # --- Test: statusline.sh — subagent tracking ---
 echo "--- subagent tracking ---"
 SA_TEST_DIR=$(mktemp -d)
@@ -1076,7 +1233,9 @@ else
 fi
 safe_cleanup "$SA_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: subagent tracking
 
+if should_run_section "update-check.sh"; then
 # --- Test: update-check.sh ---
 echo "--- update-check.sh ---"
 
@@ -1131,7 +1290,9 @@ done < <(
 )
 safe_cleanup "$UPD_TEST_DIR2" "$SCRIPT_DIR"
 echo ""
+fi # end: update-check.sh
 
+if should_run_section "plan lifecycle"; then
 # --- Test: Plan lifecycle — completed plan detection ---
 echo "--- plan lifecycle ---"
 PL_TEST_DIR=$(mktemp -d)
@@ -1214,7 +1375,9 @@ done
 
 safe_cleanup "$PL_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: plan lifecycle
 
+if should_run_section "plan archival"; then
 # --- Test: Plan archival ---
 echo "--- plan archival ---"
 PA_TEST_DIR=$(mktemp -d)
@@ -1260,7 +1423,9 @@ fi
 
 safe_cleanup "$PA_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: plan archival
 
+if should_run_section "plan-check.sh lifecycle"; then
 # --- Test: plan-check.sh — completed plan denial ---
 echo "--- plan-check.sh lifecycle ---"
 PC_TEST_DIR=$(mktemp -d)
@@ -1282,11 +1447,12 @@ PLAN_EOF
 
 # NOTE: file_path uses .worktrees/ so Gate 1 (branch-guard) passes through to Gate 2 (plan-check).
 # Without this, Gate 1 blocks writes on master before plan-check can evaluate the plan lifecycle.
+# _FORCE_WORKTREE_CHECK=0 disables Phase 3 worktree optimization so plan-check still fires.
 PC_WORKTREE_PATH="$PC_TEST_DIR/.worktrees/feature-test/src/main.ts"
 # Content has doc header to pass Gate 5 (doc-gate), and @decision for 50+ line threshold.
 # Only 21 lines here so no @decision needed — just the header to pass Gate 5.
 PLAN_CHECK_INPUT=$(jq -n --arg fp "$PC_WORKTREE_PATH" '{tool_name:"Write",tool_input:{file_path:$fp,content:"/** @file main.ts @description Plan-check test fixture. */\nconsole.log(1);\nconsole.log(2);\nconsole.log(3);\nconsole.log(4);\nconsole.log(5);\nconsole.log(6);\nconsole.log(7);\nconsole.log(8);\nconsole.log(9);\nconsole.log(10);\nconsole.log(11);\nconsole.log(12);\nconsole.log(13);\nconsole.log(14);\nconsole.log(15);\nconsole.log(16);\nconsole.log(17);\nconsole.log(18);\nconsole.log(19);\nconsole.log(20);\nconsole.log(21);"}}')
-output=$(echo "$PLAN_CHECK_INPUT" | CLAUDE_PROJECT_DIR="$PC_TEST_DIR" bash "$HOOKS_DIR/pre-write.sh" 2>/dev/null) || true
+output=$(echo "$PLAN_CHECK_INPUT" | _FORCE_WORKTREE_CHECK=0 CLAUDE_PROJECT_DIR="$PC_TEST_DIR" bash "$HOOKS_DIR/pre-write.sh" 2>/dev/null) || true
 decision=$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
 if [[ "$decision" == "deny" ]]; then
     reason=$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null)
@@ -1310,7 +1476,7 @@ cat > "$PC_TEST_DIR/MASTER_PLAN.md" <<'PLAN_EOF'
 **Status:** in-progress
 PLAN_EOF
 
-output=$(echo "$PLAN_CHECK_INPUT" | CLAUDE_PROJECT_DIR="$PC_TEST_DIR" bash "$HOOKS_DIR/pre-write.sh" 2>/dev/null) || true
+output=$(echo "$PLAN_CHECK_INPUT" | _FORCE_WORKTREE_CHECK=0 CLAUDE_PROJECT_DIR="$PC_TEST_DIR" bash "$HOOKS_DIR/pre-write.sh" 2>/dev/null) || true
 decision=$(echo "$output" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)
 if [[ "$decision" != "deny" ]]; then
     pass "plan-check.sh — active plan allows source writes"
@@ -1320,8 +1486,9 @@ fi
 
 safe_cleanup "$PC_TEST_DIR" "$SCRIPT_DIR"
 echo ""
+fi # end: plan-check.sh lifecycle
 
-
+if should_run_section "trace protocol"; then
 # --- Test: Trace Protocol ---
 echo "--- trace protocol ---"
 
@@ -1610,8 +1777,9 @@ for test_file in "${V2_TEST_FILES[@]}"; do
         skipped=$((skipped + 1))
     fi
 done
+fi # end: trace protocol
 
-
+if should_run_section "State Registry Lint"; then
 # ===== State Governance Tests =====
 # Phase 1: Registry lint (verifies all hook writes are registered)
 # Phase 2: Multi-context second pass (re-runs state-writing tests from a temp CWD
@@ -1647,7 +1815,9 @@ else
     echo "  SKIP: test-state-registry.sh not found"
     skipped=$((skipped + 1))
 fi
+fi # end: State Registry Lint
 
+if should_run_section "Multi-Context Pass"; then
 # --- Pass 2: Multi-context re-run from temp CWD ---
 # Create a temp directory that is NOT a git repo, set it as CWD for the subprocess,
 # and re-run the state-writing tests. This verifies hooks don't assume CWD=git root.
@@ -1688,7 +1858,7 @@ if [[ "$MULTI_CTX_PASS2_FAILED" -eq 0 ]]; then
     echo ""
     echo "  Multi-context pass: all ${#MULTI_CTX_TESTS[@]} tests passed from non-git CWD"
 fi
-
+fi # end: Multi-Context Pass
 
 # --- Summary ---
 echo "==========================="
