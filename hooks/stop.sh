@@ -40,6 +40,12 @@ _HOOK_EVENT_TYPE="Stop"
 
 source "$(dirname "$0")/source-lib.sh"
 
+require_git
+require_plan
+require_session
+require_trace
+require_doc
+
 HOOK_INPUT=$(read_input)
 
 # ============================================================================

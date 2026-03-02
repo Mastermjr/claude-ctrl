@@ -49,6 +49,8 @@ set -euo pipefail
 
 source "$(dirname "$0")/source-lib.sh"
 
+require_session
+
 # Redirect stderr to /dev/null — log_info writes to stderr, and Claude Code
 # treats any stderr output from SessionEnd hooks as a failure even when exit
 # code is 0. Nobody reads diagnostic messages at session termination anyway.

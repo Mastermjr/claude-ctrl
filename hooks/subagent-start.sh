@@ -16,6 +16,11 @@ set -euo pipefail
 
 source "$(dirname "$0")/source-lib.sh"
 
+require_git
+require_plan
+require_session
+require_trace
+
 HOOK_INPUT=$(read_input)
 AGENT_TYPE=$(get_field '.agent_type')
 

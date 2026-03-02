@@ -22,6 +22,7 @@ source "$(dirname "$0")/source-lib.sh"
 require_session
 require_git
 require_plan
+require_ci
 
 HOOK_INPUT=$(read_input)
 PROMPT=$(get_field '.prompt')

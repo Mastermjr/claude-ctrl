@@ -34,6 +34,8 @@
 set -euo pipefail
 source "$(dirname "$0")/source-lib.sh"
 
+require_session
+
 HOOK_INPUT=$(read_input)
 TOOL_NAME=$(get_field '.tool_name')
 [[ "$TOOL_NAME" != "Skill" ]] && exit 0

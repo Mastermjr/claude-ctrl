@@ -48,6 +48,7 @@ set -euo pipefail
 source "$(dirname "$0")/source-lib.sh"
 
 require_trace
+require_session
 
 HOOK_INPUT=$(read_input)
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
