@@ -392,6 +392,44 @@ if [[ -n "$TRACE_DIR" && -d "$TRACE_DIR/artifacts" ]]; then
     if [[ "$UNWIRED_COUNT" -gt 0 ]]; then
         ISSUES+=("$UNWIRED_COUNT new file(s) have zero inbound references (potential dead code):\n$UNWIRED_FILES")
     fi
+
+    # Check 7b: Phantom reference check — verify settings.json hook commands point to existing files.
+    # Catches Pattern D: references to non-existent scripts (e.g., community-check.sh, extract-corpus.sh)
+    # that look wired but point to files that were never created or were deleted.
+    #
+    # @decision DEC-IWIRE-002
+    # @title Phantom reference check for settings.json hook commands
+    # @status accepted
+    # @rationale The inbound-reference check (7a) catches new files with no consumers.
+    #   The inverse problem — references to files that don't exist — is equally dangerous:
+    #   settings.json hooks silently fail when their target .sh file is missing. This sub-check
+    #   verifies that every hook command path in settings.json resolves to an existing file,
+    #   catching dead references before they reach the user's live environment.
+    PHANTOM_COUNT=0
+    PHANTOM_FILES=""
+    _SETTINGS_FILE="$PROJECT_ROOT/settings.json"
+    if [[ -f "$_SETTINGS_FILE" ]]; then
+        # Extract all command strings that reference .sh files under hooks/
+        # Normalize $HOME and ~ to the actual home directory for existence checks
+        while IFS= read -r cmd_path; do
+            [[ -z "$cmd_path" ]] && continue
+            # Resolve $HOME and ~ to actual home
+            _resolved="${cmd_path/\$HOME/$HOME}"
+            _resolved="${_resolved/\~/$HOME}"
+            # Only check paths that contain /hooks/ (hook scripts)
+            [[ "$_resolved" != *"/hooks/"* ]] && continue
+            # Extract the actual file path (first token — strip arguments)
+            _file_path=$(echo "$_resolved" | awk '{print $1}')
+            if [[ ! -f "$_file_path" ]]; then
+                ((PHANTOM_COUNT++)) || true
+                PHANTOM_FILES+="  - $cmd_path (file not found)\n"
+            fi
+        done < <(jq -r '.. | strings | select(endswith(".sh"))' "$_SETTINGS_FILE" 2>/dev/null | sort -u)
+    fi
+
+    if [[ "$PHANTOM_COUNT" -gt 0 ]]; then
+        ISSUES+=("$PHANTOM_COUNT hook command(s) in settings.json reference non-existent files (phantom references):\n$PHANTOM_FILES")
+    fi
 fi
 
 # Response size advisory

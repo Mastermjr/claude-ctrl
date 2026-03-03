@@ -105,6 +105,10 @@ For each new file created by the implementer:
    - APIs: new endpoints must be registered in the router
 3. **Entry-point trace**: Starting from the application's main entry point(s), can you reach the new code through imports/calls? If not, it's dead code.
 
+4. **Declaration trap**: A `mod`, `pub use`, `import`, or `source` statement in a parent file does NOT count as usage. Verify that an actual consumer (a function, route handler, or command dispatcher) calls into the new code. Example: `pub mod diff;` in lib.rs with zero `use crate::diff::` anywhere = dead code.
+
+5. **Phantom reference check**: For referenced scripts/modules, verify targets exist. If `settings.json` references `hooks/foo.sh`, confirm `hooks/foo.sh` exists. If `CLAUDE.md` lists a skill, confirm `skills/<name>/SKILL.md` exists. If code references a script path, confirm the script file exists.
+
 If ANY new file has zero inbound references, report it in the Coverage table as:
 | Integration wiring | **NOT WIRED** | `<filename>` has no inbound references — dead code |
 
