@@ -380,6 +380,11 @@ if [[ -n "$RESPONSE_TEXT" ]]; then
             fi
         done
 
+        # Clean .proof-epoch to prevent stale epoch from allowing lattice bypass in next cycle.
+        # .proof-epoch is created by write_proof_status() (log.sh) but never cleaned up,
+        # which could allow status regression on subsequent implementations.
+        rm -f "${CLAUDE_DIR}/.proof-epoch"* 2>/dev/null || true
+
         # Check 7b: Post-merge worktree directory verification
         # If the breadcrumb exists AND directory still exists after merge, attempt cleanup.
         # This runs BEFORE the breadcrumb cleanup below so the breadcrumb is still readable.

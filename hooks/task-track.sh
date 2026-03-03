@@ -133,6 +133,7 @@ fi
 # Prevents premature tester dispatch before implementer has returned.
 declare_gate "tester-impl-gate" "Tester requires implementer to have returned" "advisory"
 if [[ "$AGENT_TYPE" == "tester" ]]; then
+    _PHASH=$(project_hash "$PROJECT_ROOT")
     IMPL_TRACE=$(detect_active_trace "$PROJECT_ROOT" "implementer" 2>/dev/null || echo "")
     if [[ -n "$IMPL_TRACE" ]]; then
         IMPL_MANIFEST="${TRACE_STORE}/${IMPL_TRACE}/manifest.json"
@@ -147,7 +148,8 @@ if [[ "$AGENT_TYPE" == "tester" ]]; then
             #   Clean it here and allow tester dispatch rather than falling through to the
             #   5-minute staleness check. This is the fast path: manifest already shows done,
             #   so no refinalize needed — just rm the stale marker and allow dispatch.
-            rm -f "${TRACE_STORE}/.active-implementer-"* 2>/dev/null || true
+            #   Scoped to current project's phash to avoid deleting other projects' markers.
+            rm -f "${TRACE_STORE}/.active-implementer-"*"-${_PHASH}" 2>/dev/null || true
             # Fall through — no deny needed, tester dispatch is allowed
         elif [[ "$IMPL_STATUS" == "active" ]]; then
             # Check staleness before denying — orphaned traces shouldn't block forever
@@ -185,8 +187,9 @@ if [[ "$AGENT_TYPE" == "tester" ]]; then
                 #   directly here since that was the meaningful part of the repair.
                 jq '. + {status: "completed"}' "$IMPL_MANIFEST" > "${IMPL_MANIFEST}.tmp" 2>/dev/null \
                     && mv "${IMPL_MANIFEST}.tmp" "$IMPL_MANIFEST" 2>/dev/null || true
-                # Clean the marker so future checks don't hit this path
-                rm -f "${TRACE_STORE}/.active-implementer-"* 2>/dev/null || true
+                # Clean the marker so future checks don't hit this path.
+                # Scoped to current project's phash to avoid deleting other projects' markers.
+                rm -f "${TRACE_STORE}/.active-implementer-"*"-${_PHASH}" 2>/dev/null || true
                 # Re-read status after repair
                 IMPL_STATUS=$(jq -r '.status // "unknown"' "$IMPL_MANIFEST" 2>/dev/null || echo "unknown")
             fi

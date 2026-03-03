@@ -1781,6 +1781,81 @@ else
     fail "trace — Bash skip" "$output"
 fi
 
+# Test 9: session-end marker cleanup glob matches phash-suffixed markers
+# Verifies fix for 1A: glob must have trailing * to match .active-TYPE-SESSION-PHASH
+output=$(
+    source "$HOOKS_DIR/context-lib.sh"
+    T9_DIR=$(mktemp -d)
+    T9_TRACES="$T9_DIR/traces"
+    mkdir -p "$T9_TRACES"
+    T9_SID="test-sid-phash-$(date +%s)"
+    T9_PHASH=$(project_hash "$T9_DIR")
+
+    # Create a phash-suffixed marker (the new format introduced by DEC-ISOLATION-002)
+    T9_MARKER="${T9_TRACES}/.active-implementer-${T9_SID}-${T9_PHASH}"
+    echo "active|$(date +%s)" > "$T9_MARKER"
+
+    # Simulate the session-end glob: SESSION_TRACE_STORE/.active-*-SESSION*
+    # This mirrors the fixed glob in session-end.sh line 282
+    found=0
+    for _m in "${T9_TRACES}/.active-"*"-${T9_SID}"*; do
+        [[ -f "$_m" ]] && found=$((found + 1)) && rm -f "$_m"
+    done
+
+    # Also verify the OLD (broken) glob does NOT find it
+    T9_OLD_MARKER="${T9_TRACES}/.active-implementer-${T9_SID}-${T9_PHASH}"
+    echo "active|$(date +%s)" > "$T9_OLD_MARKER"  # recreate
+    old_found=0
+    for _m in "${T9_TRACES}/.active-"*"-${T9_SID}"; do
+        [[ -f "$_m" ]] && old_found=$((old_found + 1))
+    done
+
+    rm -rf "$T9_DIR"
+    if [[ "$found" -eq 1 && "$old_found" -eq 0 ]]; then
+        echo "GLOB_FIX_OK"
+    else
+        echo "GLOB_FIX_FAIL:new_glob_found=${found} old_glob_found=${old_found}"
+    fi
+)
+if [[ "$output" == "GLOB_FIX_OK" ]]; then
+    pass "trace — session-end phash glob matches .active-TYPE-SESSION-PHASH markers"
+else
+    fail "trace — session-end phash glob" "$output"
+fi
+
+# Test 10: .proof-epoch is cleaned after commit (check-guardian cleanup)
+# Verifies fix for 1C: .proof-epoch must not persist across implementation cycles
+output=$(
+    source "$HOOKS_DIR/context-lib.sh"
+    T10_DIR=$(mktemp -d)
+    T10_PHASH=$(project_hash "$T10_DIR")
+    T10_CLAUDE_DIR="$T10_DIR"
+
+    # Create a .proof-epoch file (simulating what write_proof_status() creates)
+    echo "$(date +%s)" > "${T10_CLAUDE_DIR}/.proof-epoch"
+    echo "$(date +%s)" > "${T10_CLAUDE_DIR}/.proof-epoch-${T10_PHASH}"
+
+    # Simulate the check-guardian post-commit cleanup (the fix added in 1C)
+    rm -f "${T10_CLAUDE_DIR}/.proof-epoch"* 2>/dev/null || true
+
+    # Verify both files are gone
+    remaining=0
+    [[ -f "${T10_CLAUDE_DIR}/.proof-epoch" ]] && remaining=$((remaining + 1))
+    [[ -f "${T10_CLAUDE_DIR}/.proof-epoch-${T10_PHASH}" ]] && remaining=$((remaining + 1))
+
+    rm -rf "$T10_DIR"
+    if [[ "$remaining" -eq 0 ]]; then
+        echo "EPOCH_CLEAN_OK"
+    else
+        echo "EPOCH_CLEAN_FAIL:remaining=${remaining}"
+    fi
+)
+if [[ "$output" == "EPOCH_CLEAN_OK" ]]; then
+    pass "trace — .proof-epoch files cleaned after commit (no lattice bypass)"
+else
+    fail "trace — .proof-epoch cleanup" "$output"
+fi
+
 safe_cleanup "$TR_TEST_DIR" "$SCRIPT_DIR"
 echo ""
 

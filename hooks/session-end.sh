@@ -262,11 +262,14 @@ if [[ -f "$FINDINGS_FILE" ]]; then
 fi
 
 # --- Clean up .active-* trace markers for this session ---
-# Active markers are named .active-TYPE-SESSION_ID. When a session ends normally,
+# Active markers are named .active-TYPE-SESSION_ID-PHASH. When a session ends normally,
 # finalize_trace() already removes the marker via the SubagentStop hook. But if
 # the session ends without SubagentStop firing (crash, /clear, early exit), the
 # marker lingers indefinitely, accumulating as an orphan. Cleaning all markers
 # for the current session here ensures they are always removed on clean exits.
+#
+# The glob uses a trailing * after SESSION_ID to match the phash suffix introduced
+# in DEC-ISOLATION-002: .active-TYPE-SESSION-PHASH
 #
 # @decision DEC-OBS-OVERHAUL-005
 # @title Clean session .active-* markers in session-end.sh
@@ -277,9 +280,10 @@ fi
 #   for the current CLAUDE_SESSION_ID, leaving other sessions' markers intact.
 #   The init_trace 2-hour age-based cleanup remains the backstop for crashed
 #   sessions where even session-end doesn't fire.
+#   Updated: trailing * on glob matches phash suffix (.active-TYPE-SESSION-PHASH).
 SESSION_TRACE_STORE="${TRACE_STORE:-$HOME/.claude/traces}"
 if [[ -n "${CLAUDE_SESSION_ID:-}" && -d "$SESSION_TRACE_STORE" ]]; then
-    for _active_marker in "${SESSION_TRACE_STORE}/.active-"*"-${CLAUDE_SESSION_ID}"; do
+    for _active_marker in "${SESSION_TRACE_STORE}/.active-"*"-${CLAUDE_SESSION_ID}"*; do
         [[ -f "$_active_marker" ]] && rm -f "$_active_marker" && \
             log_info "SESSION-END" "Removed active marker: $(basename "$_active_marker")"
     done
@@ -302,6 +306,7 @@ rm -f "${CLAUDE_DIR}/.subagent-tokens-${CLAUDE_SESSION_ID:-$$}"
 rm -f "${CLAUDE_DIR}/.session-main-tokens"
 rm -f "${CLAUDE_DIR}/.active-worktree-path"*
 rm -f "${CLAUDE_DIR}/.cwd-recovery-needed"
+rm -f "${CLAUDE_DIR}/.proof-epoch"*
 
 # DO NOT delete (cross-session state):
 #   .audit-log       — persistent audit trail
