@@ -176,6 +176,7 @@ DIAG
     log_info "POST-TASK" "wrote diagnostic summary for ${agent_type} at ${sum_file}"
 }
 
+_fb_trace_id=""  # Initialize for use in implementer section below (DEC-CYCLE-DETECT-001)
 if [[ "$IS_SUBAGENT" == "true" && "$SUBAGENT_TYPE" != "tester" && -n "$SUBAGENT_TYPE" ]]; then
     _fb_project_root=$(detect_project_root 2>/dev/null || echo "")
     if [[ -n "$_fb_project_root" ]]; then
@@ -212,6 +213,17 @@ fi
 #   with passing tests. Previously no hook emitted a directive, causing the
 #   orchestrator to ask "want me to dispatch tester?" instead. This handler
 #   checks test status and emits "DISPATCH TESTER NOW" when tests pass.
+#
+# @decision DEC-CYCLE-DETECT-001
+# @title CYCLE COMPLETE detection in post-task.sh implementer section
+# @status accepted
+# @rationale When the implementer runs in CYCLE_MODE: auto-flow, it dispatches
+#   the tester and guardian sub-agents internally and returns with "CYCLE COMPLETE"
+#   in its summary.md. In that case, the orchestrator must NOT dispatch tester or
+#   guardian again — the full cycle is already done. This handler detects CYCLE COMPLETE
+#   in the implementer's trace summary and emits the cycle-complete directive instead
+#   of DISPATCH TESTER NOW. Detection via trace summary ensures the signal survives
+#   silent returns (where summary.md is the recovery path, not the text message).
 if [[ "$IS_SUBAGENT" == "true" && "$SUBAGENT_TYPE" == "implementer" ]]; then
     _impl_root=$(detect_project_root 2>/dev/null || echo "")
     if [[ -n "$_impl_root" ]]; then
@@ -224,7 +236,27 @@ if [[ "$IS_SUBAGENT" == "true" && "$SUBAGENT_TYPE" == "implementer" ]]; then
         fi
 
         if [[ "$_impl_tests_pass" == "true" ]]; then
-            _IMPL_DIR="DISPATCH TESTER NOW: Implementer returned with tests passing. Auto-dispatch tester per CLAUDE.md. Do NOT ask the user."
+            # Check if implementer ran full auto-flow cycle (CYCLE COMPLETE in trace summary)
+            _impl_cycle_complete=false
+            # detect_active_trace may fail if the fallback section above already
+            # finalized the trace and removed the active marker. Use _fb_trace_id
+            # (populated by the fallback section for implementer agents) as a recovery path.
+            _impl_trace_id=$(detect_active_trace "$_impl_root" "implementer" 2>/dev/null || echo "")
+            if [[ -z "$_impl_trace_id" && -n "${_fb_trace_id:-}" ]]; then
+                _impl_trace_id="${_fb_trace_id}"
+            fi
+            if [[ -n "$_impl_trace_id" ]]; then
+                _impl_summary="${TRACE_STORE}/${_impl_trace_id}/summary.md"
+                if [[ -s "$_impl_summary" ]] && grep -q 'CYCLE COMPLETE' "$_impl_summary" 2>/dev/null; then
+                    _impl_cycle_complete=true
+                fi
+            fi
+
+            if [[ "$_impl_cycle_complete" == "true" ]]; then
+                _IMPL_DIR="CYCLE COMPLETE: Implementer completed full auto-flow cycle (implement -> test -> verify -> commit). Present the implementer's summary to the user. Do NOT dispatch tester or guardian — already done."
+            else
+                _IMPL_DIR="DISPATCH TESTER NOW: Implementer returned with tests passing. Auto-dispatch tester per CLAUDE.md. Do NOT ask the user."
+            fi
         else
             _IMPL_DIR="Implementer returned (tests: ${TEST_RESULT:-unknown}). Review findings before dispatching tester."
         fi

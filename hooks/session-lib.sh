@@ -542,7 +542,14 @@ build_resume_directive() {
     fi
 
     # --- Priority 2: Proof status signals ---
-    local proof_file="$claude_dir/.proof-status"
+    # Compute the canonical scoped proof-status path using the local claude_dir
+    # and project_root already resolved above, mirroring resolve_proof_file() logic.
+    # We avoid calling resolve_proof_file() directly here because it reads CLAUDE_DIR/
+    # PROJECT_ROOT globals which may not match the locally-computed claude_dir when
+    # build_resume_directive() is called with an explicit project_root argument (e.g., in tests).
+    local _brd_phash
+    _brd_phash=$(project_hash "$project_root")
+    local proof_file="${claude_dir}/.proof-status-${_brd_phash}"
     if [[ -z "$RESUME_DIRECTIVE" && -f "$proof_file" ]]; then
         local proof_status
         proof_status=$(cut -d'|' -f1 "$proof_file" 2>/dev/null || echo "")

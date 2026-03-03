@@ -3,8 +3,8 @@
 #
 # Validates that project-scoped state files prevent contamination across projects.
 # Tests cover: project_hash(), proof-status isolation, trace marker isolation,
-# breadcrumb isolation, backward-compat fallback, Gate A scoping, finalize cleanup,
-# and the subagent-start.sh ls -t project validation fix.
+# scoped canonical path validation (breadcrumbs removed per DEC-PROOF-BREADCRUMB-001),
+# Gate A scoping, finalize cleanup, and the subagent-start.sh ls -t project validation fix.
 #
 # @decision DEC-TEST-ISOLATION-001
 # @title Fixture-based isolation tests for project-scoped state files
@@ -201,7 +201,9 @@ assert_eq "detect_active_trace for Project A finds its trace" "$TRACE_A" "$FOUND
 teardown_test_env
 
 # ============================================================================
-# Test 4: Scoped breadcrumb isolation
+# Test 4: Scoped proof-status isolation (breadcrumbs removed — DEC-PROOF-BREADCRUMB-001)
+# resolve_proof_file() always returns CLAUDE_DIR/.proof-status-{phash}; no breadcrumb
+# resolution is performed. Both projects get their own scoped canonical paths.
 # ============================================================================
 echo ""
 echo "=== Test: Scoped breadcrumb isolation ==="
@@ -209,31 +211,26 @@ setup_test_env
 
 PROJECT_A="$_TEST_TMPDIR/project-alpha"
 PROJECT_B="$_TEST_TMPDIR/project-beta"
-WT_A="$_TEST_TMPDIR/worktree-alpha"
-mkdir -p "$PROJECT_A" "$PROJECT_B" "$WT_A" "$WT_A/.claude"
+mkdir -p "$PROJECT_A" "$PROJECT_B"
 
 PHASH_A=$(project_hash "$PROJECT_A")
 PHASH_B=$(project_hash "$PROJECT_B")
 
-# Write pending proof in worktree-alpha
-echo "pending|$(date +%s)" > "$WT_A/.claude/.proof-status"
-
-# Write scoped breadcrumb for Project A
-echo "$WT_A" > "${CLAUDE_DIR}/.active-worktree-path-${PHASH_A}"
-
-# Project B should NOT follow Project A's breadcrumb
+# Project B should NOT resolve to Project A's scoped path
 export PROJECT_ROOT="$PROJECT_B"
 PROOF_B=$(resolve_proof_file)
-if [[ "$PROOF_B" == "$WT_A/.claude/.proof-status" ]]; then
+EXPECTED_B="${CLAUDE_DIR}/.proof-status-${PHASH_B}"
+if [[ "$PROOF_B" == "${CLAUDE_DIR}/.proof-status-${PHASH_A}" ]]; then
     fail "Project B followed Project A's breadcrumb (contamination)"
 else
     pass "Project B does not follow Project A's breadcrumb"
 fi
 
-# Project A should follow its own breadcrumb
+# Project A should resolve to its own canonical scoped path
 export PROJECT_ROOT="$PROJECT_A"
 PROOF_A=$(resolve_proof_file)
-assert_eq "Project A follows its own breadcrumb" "$WT_A/.claude/.proof-status" "$PROOF_A"
+assert_eq "Project A resolves to its own scoped canonical path" \
+    "${CLAUDE_DIR}/.proof-status-${PHASH_A}" "$PROOF_A"
 
 teardown_test_env
 
@@ -456,7 +453,9 @@ assert_eq "ls -t fallback finds Project B's trace (not Project A's)" "$TRACE_B" 
 teardown_test_env
 
 # ============================================================================
-# Test 10: resolve_proof_file backward compat — unscoped file returned when no scoped
+# Test 10: resolve_proof_file always returns scoped path (DEC-PROOF-SINGLE-001)
+# The legacy unscoped .proof-status fallback was removed. resolve_proof_file()
+# always returns CLAUDE_DIR/.proof-status-{phash} regardless of what files exist.
 # ============================================================================
 echo ""
 echo "=== Test: resolve_proof_file backward compat ==="
@@ -464,15 +463,17 @@ setup_test_env
 
 PROJECT_A="$_TEST_TMPDIR/project-alpha"
 mkdir -p "$PROJECT_A"
+PHASH_A=$(project_hash "$PROJECT_A")
 
-# Only legacy (unscoped) file exists
+# Legacy unscoped file exists (migration scenario — should be ignored)
 echo "needs-verification|$(date +%s)" > "${CLAUDE_DIR}/.proof-status"
 
 export PROJECT_ROOT="$PROJECT_A"
 PROOF=$(resolve_proof_file)
 
-assert_eq "Backward compat: returns legacy file when no scoped file" \
-    "${CLAUDE_DIR}/.proof-status" "$PROOF"
+# New behavior: always returns the scoped path, never the legacy unscoped file
+assert_eq "Single canonical path: always returns scoped .proof-status-{phash}" \
+    "${CLAUDE_DIR}/.proof-status-${PHASH_A}" "$PROOF"
 
 teardown_test_env
 

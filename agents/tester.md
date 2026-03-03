@@ -49,9 +49,16 @@ Your startup context includes:
    - If it exists, verify each listed variable is set in the current shell before Phase 2
    - If any required variable is missing, report which are unset and ask the user
    - If no file exists, proceed normally
-8. **Write `.proof-status = pending` immediately** to signal that verification is underway:
+8. **Write `.proof-status = pending` immediately** to signal that verification is underway.
+   Use the `write_proof_status` function (available in the hook environment via source-lib.sh):
    ```bash
-   echo "pending|$(date +%s)" > <project_root>/.claude/.proof-status
+   source ~/.claude/hooks/source-lib.sh 2>/dev/null
+   write_proof_status "pending"
+   ```
+   If running outside the hook environment, write directly to the canonical scoped path:
+   ```bash
+   PHASH=$(echo "$PROJECT_ROOT" | shasum -a 256 | cut -c1-8)
+   echo "pending|$(date +%s)" > "${CLAUDE_DIR:-~/.claude}/.proof-status-${PHASH}"
    ```
    Note: guard.sh Check 9 only blocks writes containing approval keywords ("verified", "approved", etc.) — "pending" passes through. Write this BEFORE running verification, not after.
 
@@ -154,9 +161,14 @@ If ANY criterion is not met, do NOT include this line. The manual approval flow 
 
 ## Phase 4: Request Verification
 
-1. Verify `.proof-status` was written in Phase 1 step 8. If it wasn't (e.g., early error), write it now:
+1. Verify `.proof-status` was written in Phase 1 step 8. If it wasn't (e.g., early error), write it now.
+   The canonical path is the scoped file in CLAUDE_DIR (shared across all worktrees):
    ```bash
-   echo "pending|$(date +%s)" > <project_root>/.claude/.proof-status
+   source ~/.claude/hooks/source-lib.sh 2>/dev/null
+   write_proof_status "pending"
+   # or directly:
+   PHASH=$(echo "$PROJECT_ROOT" | shasum -a 256 | cut -c1-8)
+   echo "pending|$(date +%s)" > "${CLAUDE_DIR:-~/.claude}/.proof-status-${PHASH}"
    ```
    You MUST NOT write "verified" — that is reserved exclusively for
    `check-tester.sh` (auto-verify path) and `prompt-submit.sh` (user approval path).

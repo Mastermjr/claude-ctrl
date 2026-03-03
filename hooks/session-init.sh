@@ -725,15 +725,19 @@ if [[ -d "$TRACE_STORE" ]]; then
         ACTIVE_MARKERS=$(ls "$TRACE_STORE"/.active-*-"${_PHASH}" 2>/dev/null | wc -l | tr -d ' \n' || true)
         ACTIVE_MARKERS="${ACTIVE_MARKERS:-0}"
     fi
-    for PROOF_FILE in "${CLAUDE_DIR}/.proof-status-${_PHASH}" "${CLAUDE_DIR}/.proof-status"; do
-        if [[ -f "$PROOF_FILE" ]]; then
-            if [[ "$ACTIVE_MARKERS" -eq 0 ]]; then
-                PROOF_VAL=$(cut -d'|' -f1 "$PROOF_FILE" 2>/dev/null || echo "")
-                rm -f "$PROOF_FILE"
-                CONTEXT_PARTS+=("Cleaned stale $(basename "$PROOF_FILE") ($PROOF_VAL) — no active agents for this project, likely from crashed session")
-            fi
+    PROOF_FILE="${CLAUDE_DIR}/.proof-status-${_PHASH}"
+    if [[ -f "$PROOF_FILE" ]]; then
+        if [[ "$ACTIVE_MARKERS" -eq 0 ]]; then
+            PROOF_VAL=$(cut -d'|' -f1 "$PROOF_FILE" 2>/dev/null || echo "")
+            rm -f "$PROOF_FILE"
+            CONTEXT_PARTS+=("Cleaned stale $(basename "$PROOF_FILE") ($PROOF_VAL) — no active agents for this project, likely from crashed session")
         fi
-    done
+    fi
+    # One-time migration: remove legacy unscoped .proof-status if it exists
+    if [[ -f "${CLAUDE_DIR}/.proof-status" ]]; then
+        rm -f "${CLAUDE_DIR}/.proof-status"
+        CONTEXT_PARTS+=("Migrated: removed legacy .proof-status (replaced by scoped .proof-status-${_PHASH})")
+    fi
 
     # Surface last completed trace for current project
     if [[ -f "$TRACE_STORE/index.jsonl" ]]; then

@@ -656,7 +656,9 @@ BRD_TEST_DIR=$(mktemp -d)
 git init "$BRD_TEST_DIR" >/dev/null 2>&1
 (cd "$BRD_TEST_DIR" && git checkout -b feature/test >/dev/null 2>&1 && git commit -m "init" --allow-empty >/dev/null 2>&1)
 mkdir -p "$BRD_TEST_DIR/.claude"
-echo "needs-verification|$(date +%s)" > "$BRD_TEST_DIR/.claude/.proof-status"
+# Compute scoped proof-status path: build_resume_directive uses claude_dir/.proof-status-{phash}
+BRD_PHASH=$(echo "$BRD_TEST_DIR" | shasum -a 256 | cut -c1-8)
+echo "needs-verification|$(date +%s)" > "$BRD_TEST_DIR/.claude/.proof-status-${BRD_PHASH}"
 
 build_resume_directive "$BRD_TEST_DIR"
 if [[ "$RESUME_DIRECTIVE" == *"unverified"* && "$RESUME_DIRECTIVE" == *"Dispatch tester"* ]]; then
@@ -667,7 +669,7 @@ fi
 
 # Test 2: failing tests take priority over proof status
 echo "fail|3|$(date +%s)" > "$BRD_TEST_DIR/.claude/.test-status"
-rm -f "$BRD_TEST_DIR/.claude/.proof-status"  # no proof signal
+rm -f "$BRD_TEST_DIR/.claude/.proof-status-${BRD_PHASH}"  # no proof signal
 build_resume_directive "$BRD_TEST_DIR"
 if [[ "$RESUME_DIRECTIVE" == *"Tests failing"* && "$RESUME_DIRECTIVE" == *"3 failures"* ]]; then
     pass "build_resume_directive() — failing tests produce correct directive"

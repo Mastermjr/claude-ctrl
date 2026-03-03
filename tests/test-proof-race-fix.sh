@@ -164,20 +164,23 @@ run_task_track_agent() {
 run_test "Baseline race: no guardian marker + source write → proof resets to pending"
 REPO=$(make_temp_repo)
 TRACE=$(make_temp_trace)
-# No .active-guardian-* files in TRACE_STORE — simulates the race window
-echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status"
+BASELINE_PHASH=$(echo "$REPO" | shasum -a 256 | cut -c1-8)
+# No .active-guardian-* files in TRACE_STORE — simulates the race window.
+# Write to the canonical scoped path so track.sh reads it correctly.
+echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status-${BASELINE_PHASH}"
 
 run_track "$REPO/main.sh" "$REPO" "$TRACE"
 
-if [[ -f "$REPO/.claude/.proof-status" ]]; then
-    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
+PROOF_FILE="$REPO/.claude/.proof-status-${BASELINE_PHASH}"
+if [[ -f "$PROOF_FILE" ]]; then
+    STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
     if [[ "$STATUS" == "pending" ]]; then
         pass_test
     else
         fail_test "Expected 'pending' (race condition baseline), got '$STATUS'"
     fi
 else
-    fail_test ".proof-status was deleted unexpectedly"
+    fail_test ".proof-status-${BASELINE_PHASH} was deleted unexpectedly"
 fi
 rm -rf "$REPO" "$TRACE"
 

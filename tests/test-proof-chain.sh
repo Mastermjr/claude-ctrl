@@ -91,9 +91,13 @@ run_guard() {
     local proof_status="${3:-}"
 
     mkdir -p "$repo/.claude"
+    # Compute scoped path (DEC-PROOF-SINGLE-001)
+    local _phash
+    _phash=$(echo "$repo" | shasum -a 256 | cut -c1-8)
     if [[ -n "$proof_status" ]]; then
-        echo "$proof_status" > "$repo/.claude/.proof-status"
+        echo "$proof_status" > "$repo/.claude/.proof-status-${_phash}"
     else
+        rm -f "$repo/.claude/.proof-status-${_phash}"
         rm -f "$repo/.claude/.proof-status"
     fi
 

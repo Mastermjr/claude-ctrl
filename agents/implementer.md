@@ -100,7 +100,44 @@ If guard.sh denies your command, follow the suggestion in the deny message.
    - Refactor as patterns emerge
 3. All tests must pass before proceeding
 
-After tests pass, return to the orchestrator. The **tester agent** handles live verification — you do not demo or write `.proof-status`.
+After tests pass:
+- If `CYCLE_MODE: auto-flow` is set: proceed to Phase 3.5 (full cycle)
+- Otherwise: return to the orchestrator. The **tester agent** handles live verification — you do not demo or write `.proof-status`.
+
+### Phase 3.5: Verification & Commit Cycle (CYCLE_MODE)
+
+<!--
+@decision DEC-CYCLE-MODE-001
+@title CYCLE_MODE protocol for implementer
+@status accepted
+@rationale Routine work items should not require orchestrator round-trips for the
+  implement→test→verify→commit cycle. When dispatched with CYCLE_MODE: auto-flow,
+  the implementer owns the full cycle by dispatching tester and guardian as
+  sub-agents. Phase-completing work items retain the conservative phase-boundary
+  mode so the orchestrator and user can review before commit. This enables
+  parallel progress on routine items while preserving oversight for phase gates.
+-->
+
+When the orchestrator includes `CYCLE_MODE: auto-flow` in your dispatch prompt, you own the full cycle:
+
+1. After tests pass (Phase 3 complete), dispatch a **tester** sub-agent:
+   ```
+   Dispatch tester with max_turns=40. Include:
+   - Worktree path and branch
+   - What was implemented and what to verify
+   - Test results as evidence
+   ```
+2. Evaluate the tester's return:
+   - If the tester signals **AUTOVERIFY: CLEAN** with High confidence and full coverage:
+     - Dispatch a **guardian** sub-agent with `AUTO-VERIFY-APPROVED` in the prompt (max_turns=30)
+     - Wait for Guardian to complete
+     - Return to orchestrator with: "CYCLE COMPLETE: [summary of what was built, tested, verified, and committed]"
+   - If the tester returns with **caveats** (Medium confidence, gaps, no AUTOVERIFY signal):
+     - Do NOT dispatch guardian
+     - Return to orchestrator with the tester's findings — the orchestrator handles user review
+3. If `CYCLE_MODE: phase-boundary` (or not specified): return after tests pass (current behavior, Phase 3 → Phase 4).
+
+**Important:** Sub-agents dispatched from within the implementer get their own turn budgets (tester: 40, guardian: 30). They don't consume the implementer's 85-turn budget.
 
 #### Progress Checkpoints (Show Your Work)
 

@@ -2,10 +2,10 @@
 # clean-state.sh — Session-scoped state file audit and cleanup tool.
 #
 # Purpose: Enumerates all dot-files in ~/.claude/ that are session-scoped or
-# project-scoped (proof-status, active-worktree-path, test-status, guardian-start-sha,
-# last-tester-trace, agent-findings, etc.), identifies orphaned files (breadcrumbs
-# pointing to deleted worktrees, proof-status files for inactive projects), and
-# provides --dry-run (default) and --clean modes.
+# project-scoped (proof-status, test-status, guardian-start-sha,
+# last-tester-trace, agent-findings, etc.), identifies orphaned files
+# (proof-status files for inactive projects), and provides --dry-run
+# (default) and --clean modes.
 #
 # Usage:
 #   clean-state.sh [--dry-run]  (default) — report what would be cleaned
@@ -13,7 +13,6 @@
 #
 # Categories of files managed:
 #   proof-status-*      — project-scoped .proof-status-{phash} files
-#   active-worktree-*   — breadcrumbs (.active-worktree-path-{phash}, .active-worktree-path)
 #   test-status         — .test-status (global, not scoped by project)
 #   guardian-start-sha  — .guardian-start-sha-{phash}
 #   last-tester-trace   — .last-tester-trace-{phash}
@@ -26,17 +25,16 @@
 #
 # A state file is "orphaned" if:
 #   - It has a project hash suffix AND no git repo with that hash exists in common dirs
-#   - It has a breadcrumb pointing to a directory that no longer exists
-#   - It is a legacy (unsuffixed) breadcrumb when no worktrees are currently tracked
+#   - It is older than the configured staleness threshold
 #
 # @decision DEC-STATE-AUDIT-001
 # @title State file audit script with dry-run/clean modes
 # @status accepted
 # @rationale Session-scoped state files accumulate over time: proof-status files
-#   for old projects, breadcrumbs pointing to deleted worktrees, and orphaned
-#   test-status from abandoned sessions. Without a cleanup tool these files cause
-#   subtle cross-session contamination (stale "verified" triggering dedup guards,
-#   stale breadcrumbs causing resolve_proof_file to fall through to wrong paths).
+#   for old projects and orphaned test-status from abandoned sessions. Without a
+#   cleanup tool these files cause subtle cross-session contamination (stale
+#   "verified" triggering dedup guards). Breadcrumb files (.active-worktree-path*)
+#   were removed in DEC-PROOF-BREADCRUMB-001 — this script no longer tracks them.
 #   A dedicated audit script with --dry-run default makes cleanup safe and visible.
 
 set -euo pipefail
@@ -155,41 +153,10 @@ get_active_worktree_paths() {
 ACTIVE_WORKTREES=$(get_active_worktree_paths)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Breadcrumb files (.active-worktree-path*)
-#    Formats: .active-worktree-path-{session}-{phash}  (session-scoped, DEC-SESSION-BREADCRUMB-001)
-#             .active-worktree-path-{phash}              (project-scoped, backward compat)
-#             .active-worktree-path                      (legacy, pre-scoping)
-#    The glob .active-worktree-path* matches all three formats.
+# 1. Proof-status files (.proof-status-{phash})
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "${BOLD}1. Breadcrumb files (.active-worktree-path* — session-scoped, project-scoped, and legacy)${NC}"
-FOUND_BREADCRUMBS=0
-
-for breadcrumb in "$CLAUDE_DIR"/.active-worktree-path*; do
-    [[ -f "$breadcrumb" ]] || continue
-    FOUND_BREADCRUMBS=$((FOUND_BREADCRUMBS + 1))
-
-    target=$(cat "$breadcrumb" 2>/dev/null | tr -d '[:space:]')
-
-    if [[ -z "$target" ]]; then
-        report_file "$breadcrumb" "Empty breadcrumb (no target path)" "breadcrumb"
-        FOUND_ORPHANED=$((FOUND_ORPHANED + 1))
-    elif [[ ! -d "$target" ]]; then
-        report_file "$breadcrumb" "Target directory does not exist: $target" "breadcrumb"
-        FOUND_ORPHANED=$((FOUND_ORPHANED + 1))
-    else
-        echo "  ${GREEN}[valid]${NC} $(basename "$breadcrumb") → $target"
-        echo ""
-    fi
-done
-
-[[ "$FOUND_BREADCRUMBS" -eq 0 ]] && echo "  No breadcrumb files found." && echo ""
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Proof-status files (.proof-status and .proof-status-{phash})
-# ─────────────────────────────────────────────────────────────────────────────
-
-echo "${BOLD}2. Proof-status files (.proof-status*)${NC}"
+echo "${BOLD}1. Proof-status files (.proof-status*)${NC}"
 FOUND_PROOF=0
 
 for proof_file in "$CLAUDE_DIR"/.proof-status*; do
@@ -217,10 +184,10 @@ done
 [[ "$FOUND_PROOF" -eq 0 ]] && echo "  No proof-status files found." && echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Test-status file (.test-status)
+# 2. Test-status file (.test-status)
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "${BOLD}3. Test status (.test-status)${NC}"
+echo "${BOLD}2. Test status (.test-status)${NC}"
 TEST_STATUS_FILE="$CLAUDE_DIR/.test-status"
 if [[ -f "$TEST_STATUS_FILE" ]]; then
     ts_status=$(cut -d'|' -f1 "$TEST_STATUS_FILE" 2>/dev/null || echo "unknown")
@@ -241,10 +208,10 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Guardian start SHA files (.guardian-start-sha-{phash})
+# 3. Guardian start SHA files (.guardian-start-sha-{phash})
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "${BOLD}4. Guardian start SHA files (.guardian-start-sha*)${NC}"
+echo "${BOLD}3. Guardian start SHA files (.guardian-start-sha*)${NC}"
 FOUND_GUARDIAN=0
 
 for sha_file in "$CLAUDE_DIR"/.guardian-start-sha*; do
@@ -266,10 +233,10 @@ done
 [[ "$FOUND_GUARDIAN" -eq 0 ]] && echo "  No guardian-start-sha files found." && echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Last tester trace files (.last-tester-trace-{phash})
+# 4. Last tester trace files (.last-tester-trace-{phash})
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "${BOLD}5. Last tester trace files (.last-tester-trace*)${NC}"
+echo "${BOLD}4. Last tester trace files (.last-tester-trace*)${NC}"
 FOUND_TESTER=0
 
 for trace_file in "$CLAUDE_DIR"/.last-tester-trace*; do
@@ -286,10 +253,10 @@ done
 [[ "$FOUND_TESTER" -eq 0 ]] && echo "  No last-tester-trace files found." && echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Agent findings file (.agent-findings)
+# 5. Agent findings file (.agent-findings)
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "${BOLD}6. Agent findings (.agent-findings)${NC}"
+echo "${BOLD}5. Agent findings (.agent-findings)${NC}"
 AGENT_FINDINGS="$CLAUDE_DIR/.agent-findings"
 if [[ -f "$AGENT_FINDINGS" ]]; then
     mtime=$(stat -f %m "$AGENT_FINDINGS" 2>/dev/null || stat -c %Y "$AGENT_FINDINGS" 2>/dev/null || echo "0")
@@ -309,10 +276,10 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. CWD recovery canary (.cwd-recovery-needed)
+# 6. CWD recovery canary (.cwd-recovery-needed)
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "${BOLD}7. CWD recovery canary (.cwd-recovery-needed)${NC}"
+echo "${BOLD}6. CWD recovery canary (.cwd-recovery-needed)${NC}"
 CWD_CANARY="$CLAUDE_DIR/.cwd-recovery-needed"
 if [[ -f "$CWD_CANARY" ]]; then
     canary_target=$(cat "$CWD_CANARY" 2>/dev/null | tr -d '[:space:]')
@@ -332,7 +299,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. Summary
+# 7. Summary
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo "─────────────────────────────────────────────"
