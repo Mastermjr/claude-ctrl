@@ -86,6 +86,12 @@ state.json
 .session-cost-history
 .test-status
 
+# Stop/session TTL markers (ephemeral, regenerated per session)
+.stop-*
+
+# Subagent token tracking (ephemeral, per-session accounting)
+.subagent-tokens-*
+
 # CI state files (ephemeral runtime state, never commit)
 .ci-status-*
 .ci-watch-*.lock
