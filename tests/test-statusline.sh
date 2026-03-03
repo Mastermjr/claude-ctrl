@@ -79,13 +79,14 @@ test_two_lines_output() {
 test_line1_contains_model() {
     run_test
     local json='{"model":{"display_name":"Opus 4.6"},"workspace":{"current_dir":"/tmp/proj"},"cost":{},"context_window":{}}'
-    local line1
-    line1=$(run_statusline "$json" | head -1 | strip_ansi)
+    local line2
+    # Model is on line 2 (metrics line) — line 1 is project context (workspace/git/agents/todos)
+    line2=$(run_statusline "$json" | sed -n '2p' | strip_ansi)
 
-    if [[ "$line1" == *"Opus 4.6"* ]]; then
-        pass_test "Line 1 contains model name"
+    if [[ "$line2" == *"Opus 4.6"* ]]; then
+        pass_test "Line 2 contains model name"
     else
-        fail_test "Line 1 missing model name" "line1=$line1"
+        fail_test "Line 2 missing model name" "line2=$line2"
     fi
 }
 

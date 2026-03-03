@@ -487,27 +487,27 @@ fi
 
 # ---------------------------------------------------------------------------
 # Output: 3-line layout — each line independently truncated to terminal width.
-#   Line 1 (top):    metrics   — model, context bar, tokens, cost, duration, lines, cache %
-#   Line 2 (middle): project   — workspace, git, agents, todos
+#   Line 1 (top):    project   — workspace, git, agents, todos
+#   Line 2 (middle): metrics   — model, context bar, tokens, cost, duration, lines, cache %
 #   Line 3 (bottom): highlight — initiative banner (conditional, bold cyan)
 # @decision DEC-STATUSLINE-004 (output section — see truncate_ansi above for function annotation)
 # @title Three-line status bar with per-line ANSI-aware truncation
 # @status accepted
 # @rationale Each domain gets its own line and its own truncation boundary.
-# Line 1 (metrics) truncates independently so a long model name does not push
-# the context bar off screen. Line 2 (project) truncates independently so
-# many agents/todos don't crowd workspace context. Line 3 (initiative highlight)
+# Line 1 (project) is shorter and fits easily at the top — workspace context is
+# the first thing the eye should land on. Line 2 (metrics) is longer and benefits
+# from being below the shorter project line. Line 3 (initiative highlight)
 # renders at the bottom as a visual anchor — bold cyan so it reads as a banner,
 # not inline noise. When no active initiative exists, only lines 1+2 are emitted.
 # ---------------------------------------------------------------------------
-term_w="${COLUMNS:-$(tput cols 2>/dev/null || echo 120)}"
+term_w="${COLUMNS:-250}"
 
-# Line 1: metrics (model + context bar + tokens + cost + duration + lines + cache)
-truncate_ansi "$line2" "$term_w"
+# Line 1: project context (workspace + git + agents + todos)
+truncate_ansi "$line1" "$term_w"
 printf '\n'
 
-# Line 2: project context (workspace + git + agents + todos)
-truncate_ansi "$line1" "$term_w"
+# Line 2: metrics (model + context bar + tokens + cost + duration + lines + cache)
+truncate_ansi "$line2" "$term_w"
 
 # Line 3: initiative highlight bar (conditional — only when active initiative exists)
 if [[ -n "$line0" ]]; then
