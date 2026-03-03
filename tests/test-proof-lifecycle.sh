@@ -22,6 +22,14 @@
 #   own temp directory and cleanup.
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -252,7 +260,7 @@ rm -rf "$T07_REPO" "$T07_TRACE_STORE"
 run_test "T08: W4 — prompt-submit.sh emits DISPATCH GUARDIAN NOW on approval"
 
 T08_REPO=$(make_temp_repo)
-T08_PHASH=$(echo "$T08_REPO" | shasum -a 256 | cut -c1-8)
+T08_PHASH=$(echo "$T08_REPO" | $_SHA256_CMD | cut -c1-8)
 
 # Create pending proof-status
 echo "pending|$(date +%s)" > "$T08_REPO/.claude/.proof-status-${T08_PHASH}"

@@ -35,6 +35,14 @@
 #   - Session lifecycle tests (session-init, prompt-submit)
 #
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 HOOKS_DIR="$(dirname "$SCRIPT_DIR")/hooks"
@@ -659,7 +667,7 @@ git init "$BRD_TEST_DIR" >/dev/null 2>&1
 (cd "$BRD_TEST_DIR" && git checkout -b feature/test >/dev/null 2>&1 && git commit -m "init" --allow-empty >/dev/null 2>&1)
 mkdir -p "$BRD_TEST_DIR/.claude"
 # Compute scoped proof-status path: build_resume_directive uses claude_dir/.proof-status-{phash}
-BRD_PHASH=$(echo "$BRD_TEST_DIR" | shasum -a 256 | cut -c1-8)
+BRD_PHASH=$(echo "$BRD_TEST_DIR" | $_SHA256_CMD | cut -c1-8)
 echo "needs-verification|$(date +%s)" > "$BRD_TEST_DIR/.claude/.proof-status-${BRD_PHASH}"
 
 build_resume_directive "$BRD_TEST_DIR"

@@ -124,7 +124,8 @@ Before presenting any commit for approval, verify proof-of-work status:
    `$PROJECT_ROOT`. The file is shared across all agents and worktrees — no breadcrumb lookup needed.
    If you cannot source source-lib.sh, compute directly:
    ```bash
-   PHASH=$(echo "$PROJECT_ROOT" | shasum -a 256 | cut -c1-8)
+   SHA256CMD=$(command -v shasum >/dev/null && echo 'shasum -a 256' || echo 'sha256sum')
+   PHASH=$(echo "$PROJECT_ROOT" | $SHA256CMD | cut -c1-8)
    PROOF_FILE="${CLAUDE_DIR:-~/.claude}/.proof-status-${PHASH}"
    ```
 2. If missing or shows `pending`:

@@ -11,6 +11,14 @@
 #   used by trace-lib.sh's init_trace().
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 HOOK_DIR="$(cd "$(dirname "$0")/../hooks" && pwd)"
 FIXTURE_DIR="$(cd "$(dirname "$0")/fixtures" && pwd)"
@@ -27,7 +35,7 @@ trap 'rm -rf "$TMPDIR_BASE"' EXIT
 
 # Compute a consistent project hash for the temp dir
 # (matches what detect_project_root + project_hash produce)
-PHASH=$(echo "$TMPDIR_BASE" | shasum -a 256 | cut -c1-8)
+PHASH=$(echo "$TMPDIR_BASE" | $_SHA256_CMD | cut -c1-8)
 TRACE_DIR="$TMPDIR_BASE/traces"
 mkdir -p "$TRACE_DIR"
 

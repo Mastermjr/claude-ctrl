@@ -35,6 +35,14 @@
 #   than invoking the full hook keeps tests fast and free of hook-layer side-effects.
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
@@ -64,7 +72,7 @@ fail_test() {
 
 # Helper: compute project_hash identically to core-lib.sh / log.sh
 compute_phash() {
-    echo "$1" | shasum -a 256 | cut -c1-8 2>/dev/null || echo "00000000"
+    echo "$1" | $_SHA256_CMD | cut -c1-8 2>/dev/null || echo "00000000"
 }
 
 # Helper: run the session-init proof-cleanup logic in an isolated subshell.
@@ -86,10 +94,13 @@ run_cleanup_logic() {
 
     bash -c "
         set -euo pipefail
+        if command -v shasum >/dev/null 2>&1; then _SHA256_CMD='shasum -a 256';
+        elif command -v sha256sum >/dev/null 2>&1; then _SHA256_CMD='sha256sum';
+        else _SHA256_CMD='cat'; fi
 
         # Inline project_hash (same as core-lib.sh/log.sh)
         project_hash() {
-            echo \"\${1:?project_hash requires a path}\" | shasum -a 256 | cut -c1-8
+            echo \"\${1:?project_hash requires a path}\" | \$_SHA256_CMD | cut -c1-8
         }
 
         PROJECT_ROOT='$project_root'

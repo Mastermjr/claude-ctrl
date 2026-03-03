@@ -49,7 +49,7 @@ init_trace() {
     local timestamp
     timestamp=$(date +%Y%m%d-%H%M%S)
     local hash
-    hash=$(echo "${session_id}" | shasum -a 256 2>/dev/null | cut -c1-6)
+    hash=$(echo "${session_id}" | ${_SHA256_CMD:-shasum -a 256} 2>/dev/null | cut -c1-6)
     local trace_id="${agent_type}-${timestamp}-${hash}"
     local trace_dir="${TRACE_STORE}/${trace_id}"
 

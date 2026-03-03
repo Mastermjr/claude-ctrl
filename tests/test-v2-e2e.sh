@@ -27,6 +27,14 @@
 # Each intent is isolated (separate temp dir) so failures don't cascade.
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="$(dirname "$SCRIPT_DIR")/hooks"
@@ -86,7 +94,7 @@ done < "$EVENT_FILE"
 
 # Verify: session archive simulation
 # Create session archive directory structure
-PROJECT_HASH=$(echo "$I01_DIR" | shasum -a 256 | cut -c1-12)
+PROJECT_HASH=$(echo "$I01_DIR" | $_SHA256_CMD | cut -c1-12)
 ARCHIVE_DIR="$I01_DIR/sessions/$PROJECT_HASH"
 mkdir -p "$ARCHIVE_DIR"
 SESSION_ID="test-session-$(date +%s)"
@@ -285,7 +293,7 @@ I05_DIR=$(mktemp -d)
 mkdir -p "$I05_DIR/.git"
 
 # Create session archive with 4 synthetic entries
-PROJECT_HASH=$(echo "$I05_DIR" | shasum -a 256 | cut -c1-12)
+PROJECT_HASH=$(echo "$I05_DIR" | $_SHA256_CMD | cut -c1-12)
 SESSION_DIR="$HOME/.claude/sessions/$PROJECT_HASH"
 mkdir -p "$SESSION_DIR"
 
@@ -322,7 +330,7 @@ fi
 # Verify: threshold check — fewer than 3 sessions returns empty
 SPARSE_DIR=$(mktemp -d)
 mkdir -p "$SPARSE_DIR/.git"
-SPARSE_HASH=$(echo "$SPARSE_DIR" | shasum -a 256 | cut -c1-12)
+SPARSE_HASH=$(echo "$SPARSE_DIR" | $_SHA256_CMD | cut -c1-12)
 SPARSE_SESSION_DIR="$HOME/.claude/sessions/$SPARSE_HASH"
 mkdir -p "$SPARSE_SESSION_DIR"
 echo '{"id":"s1","started":"2026-02-14T10:00:00Z","duration_min":5,"outcome":"pass","files_touched":[],"friction":[]}' > "$SPARSE_SESSION_DIR/index.jsonl"
@@ -418,7 +426,7 @@ fi
 
 # --- Stage 8: session archive simulation ---
 # Simulate what session-end.sh does: copy event file to archive dir, remove original.
-LC_PROJECT_HASH=$(echo "$LC_DIR" | shasum -a 256 2>/dev/null | cut -c1-12)
+LC_PROJECT_HASH=$(echo "$LC_DIR" | $_SHA256_CMD 2>/dev/null | cut -c1-12)
 LC_ARCHIVE_DIR="$HOME/.claude/sessions/${LC_PROJECT_HASH}"
 mkdir -p "$LC_ARCHIVE_DIR"
 LC_SESSION_ID="lifecycle-session-$(date +%s)"
@@ -552,7 +560,7 @@ else
 fi
 
 # --- Stage 9: archive ---
-I06_PROJECT_HASH=$(echo "$I06_DIR" | shasum -a 256 2>/dev/null | cut -c1-12)
+I06_PROJECT_HASH=$(echo "$I06_DIR" | $_SHA256_CMD 2>/dev/null | cut -c1-12)
 I06_ARCHIVE_DIR="$HOME/.claude/sessions/${I06_PROJECT_HASH}"
 mkdir -p "$I06_ARCHIVE_DIR"
 I06_SESSION_ID="intent06-session-$(date +%s)"

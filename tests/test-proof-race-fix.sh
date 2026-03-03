@@ -29,6 +29,14 @@
 # Returns: 0 if all tests pass, 1 if any fail
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
@@ -111,7 +119,7 @@ run_task_track_guardian() {
     local proof_content="$3"
 
     local phash
-    phash=$(echo "$repo" | shasum -a 256 | cut -c1-8)
+    phash=$(echo "$repo" | $_SHA256_CMD | cut -c1-8)
 
     if [[ "$proof_content" != "missing" ]]; then
         echo "$proof_content" > "$repo/.claude/.proof-status-${phash}"
@@ -137,7 +145,7 @@ run_task_track_agent() {
     local proof_content="${4:-missing}"
 
     local phash
-    phash=$(echo "$repo" | shasum -a 256 | cut -c1-8)
+    phash=$(echo "$repo" | $_SHA256_CMD | cut -c1-8)
 
     if [[ "$proof_content" != "missing" ]]; then
         echo "$proof_content" > "$repo/.claude/.proof-status-${phash}"
@@ -164,7 +172,7 @@ run_task_track_agent() {
 run_test "Baseline race: no guardian marker + source write → proof resets to pending"
 REPO=$(make_temp_repo)
 TRACE=$(make_temp_trace)
-BASELINE_PHASH=$(echo "$REPO" | shasum -a 256 | cut -c1-8)
+BASELINE_PHASH=$(echo "$REPO" | $_SHA256_CMD | cut -c1-8)
 # No .active-guardian-* files in TRACE_STORE — simulates the race window.
 # Write to the canonical scoped path so track.sh reads it correctly.
 echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status-${BASELINE_PHASH}"
@@ -193,7 +201,7 @@ rm -rf "$REPO" "$TRACE"
 run_test "Fix: Gate A creates .active-guardian-* marker when proof is verified"
 REPO=$(make_temp_repo)
 TRACE=$(make_temp_trace)
-PHASH=$(echo "$REPO" | shasum -a 256 | cut -c1-8)
+PHASH=$(echo "$REPO" | $_SHA256_CMD | cut -c1-8)
 
 run_task_track_guardian "$REPO" "$TRACE" "verified|$(date +%s)"
 
@@ -217,7 +225,7 @@ rm -rf "$REPO" "$TRACE"
 run_test "Fix end-to-end: dispatch-time marker prevents verified→pending reset"
 REPO=$(make_temp_repo)
 TRACE=$(make_temp_trace)
-PHASH=$(echo "$REPO" | shasum -a 256 | cut -c1-8)
+PHASH=$(echo "$REPO" | $_SHA256_CMD | cut -c1-8)
 
 # Step 1: write verified proof (scoped)
 echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status-${PHASH}"
@@ -302,7 +310,7 @@ rm -rf "$REPO" "$TRACE"
 run_test "Marker naming: .active-guardian-{session}-{phash} pattern"
 REPO=$(make_temp_repo)
 TRACE=$(make_temp_trace)
-PHASH=$(echo "$REPO" | shasum -a 256 | cut -c1-8)
+PHASH=$(echo "$REPO" | $_SHA256_CMD | cut -c1-8)
 EXPECTED_SESSION="test-session-race-001"
 
 run_task_track_guardian "$REPO" "$TRACE" "verified|$(date +%s)"

@@ -77,7 +77,7 @@ get_doc_freshness() {
         fi
     done | tr '\n' ':')
     local _doc_mod_hash
-    _doc_mod_hash=$(echo "$_doc_keys" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "x")
+    _doc_mod_hash=$(echo "$_doc_keys" | ${_SHA256_CMD:-shasum -a 256} 2>/dev/null | cut -c1-8 || echo "x")
 
     local _cache_file="$root/.claude/.doc-freshness-cache"
 

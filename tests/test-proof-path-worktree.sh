@@ -22,6 +22,14 @@
 #   Supersedes the breadcrumb-based test suite that tested the 3-tier model.
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
@@ -128,7 +136,7 @@ _scoped_proof_path() {
     local claude_dir="$1"
     local project_root="$2"
     local phash
-    phash=$(echo "$project_root" | shasum -a 256 | cut -c1-8 2>/dev/null || echo "00000000")
+    phash=$(echo "$project_root" | $_SHA256_CMD | cut -c1-8 2>/dev/null || echo "00000000")
     echo "$claude_dir/.proof-status-${phash}"
 }
 
@@ -202,8 +210,8 @@ run_test "resolve_proof_file: same project root always produces same phash"
 T_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-rpf-XXXXXX")
 T_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-rpf-proj-XXXXXX")
 # Compute phash via two paths
-PHASH_A=$(echo "$T_PROJ" | shasum -a 256 | cut -c1-8)
-PHASH_B=$(echo "$T_PROJ" | shasum -a 256 | cut -c1-8)
+PHASH_A=$(echo "$T_PROJ" | $_SHA256_CMD | cut -c1-8)
+PHASH_B=$(echo "$T_PROJ" | $_SHA256_CMD | cut -c1-8)
 EXPECTED="$T_CLAUDE/.proof-status-${PHASH_A}"
 RESULT=$(_resolve_proof_file "$T_CLAUDE" "$T_PROJ")
 if [[ "$PHASH_A" == "$PHASH_B" && "$RESULT" == "$EXPECTED" ]]; then
@@ -256,7 +264,7 @@ TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-tt-gate-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 git -C "$TEMP_REPO" commit --allow-empty -m "init" > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
-IMPL_PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+IMPL_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 # Gate C.1 requires at least one linked worktree
 IMPL_WORKTREE="$TEMP_REPO/.worktrees/feature-test"
 mkdir -p "$IMPL_WORKTREE"
@@ -303,7 +311,7 @@ run_test "prompt-submit: 'verified' keyword transitions pending -> verified (sco
 TEMP_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-ps-XXXXXX")
 git -C "$TEMP_PROJ" init > /dev/null 2>&1
 mkdir -p "$TEMP_PROJ/.claude"
-TEMP_PHASH=$(echo "$TEMP_PROJ" | shasum -a 256 | cut -c1-8)
+TEMP_PHASH=$(echo "$TEMP_PROJ" | $_SHA256_CMD | cut -c1-8)
 echo "pending|12345" > "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}"
 
 INPUT_JSON=$(jq -n '{"hook_event_name":"UserPromptSubmit","prompt":"verified"}')
@@ -325,7 +333,7 @@ run_test "prompt-submit: 'lgtm' keyword also transitions pending -> verified"
 TEMP_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-ps-lgtm-XXXXXX")
 git -C "$TEMP_PROJ" init > /dev/null 2>&1
 mkdir -p "$TEMP_PROJ/.claude"
-TEMP_PHASH=$(echo "$TEMP_PROJ" | shasum -a 256 | cut -c1-8)
+TEMP_PHASH=$(echo "$TEMP_PROJ" | $_SHA256_CMD | cut -c1-8)
 echo "pending|12345" > "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}"
 
 INPUT_JSON=$(jq -n '{"hook_event_name":"UserPromptSubmit","prompt":"lgtm"}')
@@ -347,7 +355,7 @@ run_test "prompt-submit: 'verified' with needs-verification also transitions to 
 TEMP_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-ps-nv-XXXXXX")
 git -C "$TEMP_PROJ" init > /dev/null 2>&1
 mkdir -p "$TEMP_PROJ/.claude"
-TEMP_PHASH=$(echo "$TEMP_PROJ" | shasum -a 256 | cut -c1-8)
+TEMP_PHASH=$(echo "$TEMP_PROJ" | $_SHA256_CMD | cut -c1-8)
 echo "needs-verification|12345" > "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}"
 
 INPUT_JSON=$(jq -n '{"hook_event_name":"UserPromptSubmit","prompt":"verified"}')
@@ -371,7 +379,7 @@ run_test "prompt-submit: 'verified' writes only to canonical scoped path (no wor
 TEMP_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-ps-nodual-XXXXXX")
 git -C "$TEMP_PROJ" init > /dev/null 2>&1
 mkdir -p "$TEMP_PROJ/.claude"
-TEMP_PHASH=$(echo "$TEMP_PROJ" | shasum -a 256 | cut -c1-8)
+TEMP_PHASH=$(echo "$TEMP_PROJ" | $_SHA256_CMD | cut -c1-8)
 echo "pending|12345" > "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}"
 # Simulate: legacy breadcrumb pointing to a worktree (should NOT be followed)
 FAKE_WT=$(mktemp -d "$PROJECT_ROOT/tmp/test-ps-fakewt-XXXXXX")
@@ -404,7 +412,7 @@ run_test "guard.sh: canonical scoped verified allows commit"
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-guard-ver-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
-GUARD_PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+GUARD_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 echo "verified|12345" > "$TEMP_REPO/.claude/.proof-status-${GUARD_PHASH}"
 
 INPUT_JSON=$(cat <<EOF
@@ -434,7 +442,7 @@ run_test "guard.sh: canonical scoped pending blocks commit"
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-guard-pend-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
-GUARD_PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+GUARD_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 echo "pending|12345" > "$TEMP_REPO/.claude/.proof-status-${GUARD_PHASH}"
 
 INPUT_JSON=$(cat <<EOF
@@ -469,7 +477,7 @@ TEMP_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-cg-XXXXXX")
 git -C "$TEMP_PROJ" init > /dev/null 2>&1
 git -C "$TEMP_PROJ" commit --allow-empty -m "init" > /dev/null 2>&1
 mkdir -p "$TEMP_PROJ/.claude"
-CG_PHASH=$(echo "$TEMP_PROJ" | shasum -a 256 | cut -c1-8)
+CG_PHASH=$(echo "$TEMP_PROJ" | $_SHA256_CMD | cut -c1-8)
 echo "verified|12345" > "$TEMP_PROJ/.claude/.proof-status-${CG_PHASH}"
 
 RESPONSE_JSON=$(jq -n '{"response":"Guardian committed successfully — commit abc123 created"}')
@@ -525,7 +533,7 @@ run_test "Regression: needs-verification in scoped path blocks Guardian dispatch
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-reg-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
-REG_PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+REG_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 echo "needs-verification|12345" > "$TEMP_REPO/.claude/.proof-status-${REG_PHASH}"
 
 INPUT_JSON=$(cat <<EOF
@@ -556,7 +564,7 @@ run_test "Regression: verified in scoped path allows Guardian dispatch"
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-reg2-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
-REG2_PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+REG2_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 echo "verified|12345" > "$TEMP_REPO/.claude/.proof-status-${REG2_PHASH}"
 
 INPUT_JSON=$(cat <<EOF
@@ -603,7 +611,7 @@ TEMP_I=$(mktemp -d "$PROJECT_ROOT/tmp/test-gi-XXXXXX")
 git -C "$TEMP_I" init > /dev/null 2>&1
 git -C "$TEMP_I" commit --allow-empty -m "init" > /dev/null 2>&1
 mkdir -p "$TEMP_I/.claude"
-TEMP_I_PHASH=$(echo "$TEMP_I" | shasum -a 256 | cut -c1-8)
+TEMP_I_PHASH=$(echo "$TEMP_I" | $_SHA256_CMD | cut -c1-8)
 IMPL_WT="$TEMP_I/.worktrees/feature-test"
 mkdir -p "$IMPL_WT"
 git -C "$TEMP_I" worktree add "$IMPL_WT" -b feature/i-test > /dev/null 2>&1 || \
@@ -653,7 +661,7 @@ _resolve_j() {
 run_test "Part J1: all callers resolve to same canonical scoped path"
 J1_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-j1-cl-XXXXXX")
 J1_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j1-proj-XXXXXX")
-J1_PHASH=$(echo "$J1_PROJ" | shasum -a 256 | cut -c1-8)
+J1_PHASH=$(echo "$J1_PROJ" | $_SHA256_CMD | cut -c1-8)
 EXPECTED_J1="$J1_CLAUDE/.proof-status-${J1_PHASH}"
 
 # Simulate task-track, prompt-submit, guard.sh each calling resolve_proof_file
@@ -678,7 +686,7 @@ J2_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j2-proj-XXXXXX")
 J2_CLAUDE="$J2_PROJ/.claude"
 mkdir -p "$J2_CLAUDE"
 git -C "$J2_PROJ" init --quiet > /dev/null 2>&1
-J2_PHASH=$(echo "$J2_PROJ" | shasum -a 256 | cut -c1-8)
+J2_PHASH=$(echo "$J2_PROJ" | $_SHA256_CMD | cut -c1-8)
 
 # Write via write_proof_status — uses get_claude_dir = <J2_PROJ>/.claude
 (
@@ -704,8 +712,8 @@ J3_PROJ_A=$(mktemp -d "$PROJECT_ROOT/tmp/test-j3-projA-XXXXXX")
 J3_PROJ_B=$(mktemp -d "$PROJECT_ROOT/tmp/test-j3-projB-XXXXXX")
 git -C "$J3_PROJ_A" init --quiet > /dev/null 2>&1
 git -C "$J3_PROJ_B" init --quiet > /dev/null 2>&1
-J3_PHASH_A=$(echo "$J3_PROJ_A" | shasum -a 256 | cut -c1-8)
-J3_PHASH_B=$(echo "$J3_PROJ_B" | shasum -a 256 | cut -c1-8)
+J3_PHASH_A=$(echo "$J3_PROJ_A" | $_SHA256_CMD | cut -c1-8)
+J3_PHASH_B=$(echo "$J3_PROJ_B" | $_SHA256_CMD | cut -c1-8)
 
 # Write different statuses to each project's canonical path
 echo "pending|11111" > "$J3_CLAUDE/.proof-status-${J3_PHASH_A}"
@@ -724,7 +732,7 @@ rm -rf "$J3_CLAUDE" "$J3_PROJ_A" "$J3_PROJ_B"
 run_test "Part J4: no proof file → resolve_proof_file returns scoped path as default write target"
 J4_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-j4-cl-XXXXXX")
 J4_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j4-proj-XXXXXX")
-J4_PHASH=$(echo "$J4_PROJ" | shasum -a 256 | cut -c1-8)
+J4_PHASH=$(echo "$J4_PROJ" | $_SHA256_CMD | cut -c1-8)
 EXPECTED_J4="$J4_CLAUDE/.proof-status-${J4_PHASH}"
 
 R1=$(_resolve_j "$J4_CLAUDE" "$J4_PROJ")

@@ -17,6 +17,14 @@
 #   regressions in the guards that protect hook stability.
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
@@ -211,7 +219,7 @@ bash -c "
 " 2>/dev/null
 
 # After write completes, find all proof files and verify each has both fields
-PHASH=$(echo "$ATOMIC_PROJECT" | shasum -a 256 | cut -c1-8)
+PHASH=$(echo "$ATOMIC_PROJECT" | $_SHA256_CMD | cut -c1-8)
 SCOPED_PROOF="$ATOMIC_CLAUDE/.proof-status-${PHASH}"
 LEGACY_PROOF="$ATOMIC_CLAUDE/.proof-status"
 

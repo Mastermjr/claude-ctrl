@@ -41,6 +41,16 @@
 #   The canonical proof-status file is .proof-status-{phash} in CLAUDE_DIR.
 #   Cleanup removes the scoped file only (no legacy fallbacks remain).
 
+# Portable SHA-256 command — macOS has shasum, Ubuntu/Linux has sha256sum
+# Both produce identical output format: "hash  filename" — cut works the same way.
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"  # last resort — won't hash but won't crash
+fi
+
 # Cache stdin so multiple functions can read it
 HOOK_INPUT=""
 
@@ -138,7 +148,7 @@ get_claude_dir() {
 # Usage: project_hash "/path/to/project"
 # Returns: 8-character hex string, consistent across calls for the same input.
 project_hash() {
-    echo "${1:?project_hash requires a path argument}" | shasum -a 256 | cut -c1-8
+    echo "${1:?project_hash requires a path argument}" | $_SHA256_CMD | cut -c1-8
 }
 
 # resolve_proof_file — return the canonical .proof-status path for the current project.

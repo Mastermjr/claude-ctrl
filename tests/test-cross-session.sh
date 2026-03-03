@@ -17,6 +17,14 @@
 #   Writing output to a temp file and reading it back avoids this.
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="${SCRIPT_DIR}/../hooks"
@@ -66,7 +74,7 @@ make_index_entry() {
 
 # Helper: compute project hash (same algorithm as get_prior_sessions)
 project_hash() {
-    echo "$1" | shasum -a 256 2>/dev/null | cut -c1-12
+    echo "$1" | $_SHA256_CMD 2>/dev/null | cut -c1-12
 }
 
 # Helper: set up isolated sessions dir

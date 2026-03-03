@@ -27,6 +27,14 @@
 # Returns: 0 if all tests pass, 1 if any fail
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKTREE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -97,7 +105,7 @@ MANIFEST
 
     # Create the active marker
     local phash
-    phash=$(echo "$WORKTREE_ROOT" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "testhash")
+    phash=$(echo "$WORKTREE_ROOT" | $_SHA256_CMD 2>/dev/null | cut -c1-8 || echo "testhash")
     echo "${trace_id}" > "${store}/.active-implementer-${CLAUDE_SESSION_ID}-${phash}"
 
     echo "${trace_dir}"
@@ -290,7 +298,7 @@ CYCLE COMPLETE: Built feature X, tests passed, tester verified (AUTOVERIFY: CLEA
 SUM8
 
 # Create active marker
-phash_t8=$(echo "$WORKTREE_ROOT" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "testhash")
+phash_t8=$(echo "$WORKTREE_ROOT" | $_SHA256_CMD 2>/dev/null | cut -c1-8 || echo "testhash")
 echo "${TRACE_ID_T8}" > "${FAKE_STORE_T8}/.active-implementer-${SESSION_T8}-${phash_t8}"
 
 # Write a passing test-status file where read_test_status() expects it:
@@ -362,7 +370,7 @@ All tests pass. Implemented feature Y.
 SUM9
 
 # Create active marker
-phash_t9=$(echo "$WORKTREE_ROOT" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "testhash")
+phash_t9=$(echo "$WORKTREE_ROOT" | $_SHA256_CMD 2>/dev/null | cut -c1-8 || echo "testhash")
 echo "${TRACE_ID_T9}" > "${FAKE_STORE_T9}/.active-implementer-${SESSION_T9}-${phash_t9}"
 
 REAL_CLAUDE_T9="${WORKTREE_ROOT}/.claude"

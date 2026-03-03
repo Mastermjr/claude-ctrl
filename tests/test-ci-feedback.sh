@@ -14,6 +14,14 @@
 #   Uses the same run_test/pass_test/fail_test pattern as test-proof-gate.sh.
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
@@ -468,7 +476,7 @@ TEMP_CLAUDE_DIR="$TEMP_REPO"
 mkdir -p "$TEMP_CLAUDE_DIR"
 
 # Compute phash for the repo
-PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 LOCK_FILE="${TEMP_CLAUDE_DIR}/.ci-watch-${PHASH}.lock"
 
 # Write our own PID to the lock file (simulate live watcher)

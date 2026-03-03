@@ -29,6 +29,14 @@
 # Returns: 0 if all 17 tests pass, 1 if any fail
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
@@ -95,7 +103,7 @@ make_temp_repo() {
 scoped_proof_path() {
     local repo="$1"
     local phash
-    phash=$(echo "$repo" | shasum -a 256 | cut -c1-8)
+    phash=$(echo "$repo" | $_SHA256_CMD | cut -c1-8)
     echo "$repo/.claude/.proof-status-${phash}"
 }
 

@@ -743,7 +743,7 @@ if $_RUN_SUMMARY; then
         # Write structured retrospective to sessions dir
         SESSIONS_DIR="$HOME/.claude/sessions"
         if [[ -d "$SESSIONS_DIR" ]]; then
-            PROJECT_HASH=$(echo "$PROJECT_ROOT" | shasum -a 256 2>/dev/null | cut -c1-8 || echo "unknown")
+            PROJECT_HASH=$(echo "$PROJECT_ROOT" | ${_SHA256_CMD:-shasum -a 256} 2>/dev/null | cut -c1-8 || echo "unknown")
             SESSION_DIR="$SESSIONS_DIR/$PROJECT_HASH"
             mkdir -p "$SESSION_DIR"
             SESSION_LABEL="${CLAUDE_SESSION_ID:-$(date +%Y%m%d-%H%M%S)}"

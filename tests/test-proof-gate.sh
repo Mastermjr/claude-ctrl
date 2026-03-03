@@ -11,6 +11,14 @@
 #   Also validates the guard.sh Check 10 which blocks deletion of active gates.
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
@@ -74,7 +82,7 @@ run_task_track() {
 
     # Compute project hash for this temp repo (matches what task-track.sh will compute)
     local PHASH
-    PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+    PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 
     # Set up .proof-status-{phash} (scoped) if not missing
     if [[ "$proof_file" != "missing" ]]; then
@@ -154,7 +162,7 @@ run_test "Gate C: Implementer dispatch creates needs-verification"
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-pg-impl-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
-IMPL_PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+IMPL_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 # Gate C.1 requires at least one linked worktree (enforces worktree isolation).
 # Without this, task-track.sh denies implementer dispatch before Gate C.2 writes .proof-status.
 IMPL_WORKTREE="$TEMP_REPO/.worktrees/feature-test"
@@ -195,7 +203,7 @@ run_test "Gate C: Implementer does not overwrite existing .proof-status"
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-pg-exist-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
-EXIST_PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+EXIST_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 echo "pending|99999" > "$TEMP_REPO/.claude/.proof-status-${EXIST_PHASH}"
 # Gate C.1 requires at least one linked worktree — add one so the hook reaches Gate C.2
 EXIST_WORKTREE="$TEMP_REPO/.worktrees/feature-exist"
@@ -307,7 +315,7 @@ run_guard_proof() {
     mkdir -p "$TEMP_REPO/.claude"
 
     local PHASH
-    PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+    PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 
     if [[ "$proof_file" != "missing" ]]; then
         # Write scoped file (primary) so guard.sh Check 8 finds it
@@ -364,7 +372,7 @@ run_test "Check 10: Block rm .proof-status when needs-verification"
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-pg-del-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
-C10_PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+C10_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 echo "needs-verification|12345" > "$TEMP_REPO/.claude/.proof-status-${C10_PHASH}"
 
 INPUT_JSON=$(cat <<EOF
@@ -393,7 +401,7 @@ run_test "Check 10: Block rm .proof-status when pending"
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-pg-pend-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
-C10_PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+C10_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 echo "pending|12345" > "$TEMP_REPO/.claude/.proof-status-${C10_PHASH}"
 
 INPUT_JSON=$(cat <<EOF
@@ -422,7 +430,7 @@ run_test "Check 10: Allow rm .proof-status when verified"
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-pg-ver-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
-C10_PHASH=$(echo "$TEMP_REPO" | shasum -a 256 | cut -c1-8)
+C10_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 echo "verified|12345" > "$TEMP_REPO/.claude/.proof-status-${C10_PHASH}"
 
 INPUT_JSON=$(cat <<EOF

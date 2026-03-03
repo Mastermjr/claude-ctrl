@@ -444,7 +444,7 @@ get_prior_sessions() {
     fi
 
     local project_hash
-    project_hash=$(echo "$project_root" | shasum -a 256 2>/dev/null | cut -c1-12 || echo "")
+    project_hash=$(echo "$project_root" | ${_SHA256_CMD:-shasum -a 256} 2>/dev/null | cut -c1-12 || echo "")
     [[ -z "$project_hash" ]] && return 0
 
     local index_file="$HOME/.claude/sessions/${project_hash}/index.jsonl"

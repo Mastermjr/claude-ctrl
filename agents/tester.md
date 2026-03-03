@@ -57,7 +57,8 @@ Your startup context includes:
    ```
    If running outside the hook environment, write directly to the canonical scoped path:
    ```bash
-   PHASH=$(echo "$PROJECT_ROOT" | shasum -a 256 | cut -c1-8)
+   SHA256CMD=$(command -v shasum >/dev/null && echo 'shasum -a 256' || echo 'sha256sum')
+   PHASH=$(echo "$PROJECT_ROOT" | $SHA256CMD | cut -c1-8)
    echo "pending|$(date +%s)" > "${CLAUDE_DIR:-~/.claude}/.proof-status-${PHASH}"
    ```
    Note: guard.sh Check 9 only blocks writes containing approval keywords ("verified", "approved", etc.) — "pending" passes through. Write this BEFORE running verification, not after.
@@ -191,7 +192,8 @@ If ANY criterion is not met, do NOT include this line. The manual approval flow 
    source ~/.claude/hooks/source-lib.sh 2>/dev/null
    write_proof_status "pending"
    # or directly:
-   PHASH=$(echo "$PROJECT_ROOT" | shasum -a 256 | cut -c1-8)
+   SHA256CMD=$(command -v shasum >/dev/null && echo 'shasum -a 256' || echo 'sha256sum')
+   PHASH=$(echo "$PROJECT_ROOT" | $SHA256CMD | cut -c1-8)
    echo "pending|$(date +%s)" > "${CLAUDE_DIR:-~/.claude}/.proof-status-${PHASH}"
    ```
    You MUST NOT write "verified" — that is reserved exclusively for

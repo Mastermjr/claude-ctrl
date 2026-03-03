@@ -85,7 +85,7 @@
 # Both definitions are identical; double-sourcing is safe (last definition wins).
 # @decision DEC-ISOLATION-001 (see log.sh for full rationale)
 project_hash() {
-    echo "${1:?project_hash requires a path argument}" | shasum -a 256 | cut -c1-8
+    echo "${1:?project_hash requires a path argument}" | $_SHA256_CMD | cut -c1-8
 }
 
 # --- Protected State Files Registry ---

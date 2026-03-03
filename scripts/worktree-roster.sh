@@ -50,6 +50,14 @@
 #   ghost        - In roster but directory doesn't exist — prune from registry
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 # Allow override for testing
 REGISTRY="${REGISTRY:-$HOME/.claude/.worktree-roster.tsv}"
@@ -87,7 +95,7 @@ clean_worktree_state() {
 
     # Compute the project hash for this worktree path
     local phash
-    phash=$(echo "$worktree_path" | shasum -a 256 | cut -c1-8 2>/dev/null || echo "")
+    phash=$(echo "$worktree_path" | $_SHA256_CMD | cut -c1-8 2>/dev/null || echo "")
 
     # Remove scoped breadcrumb: .active-worktree-path-{phash}
     if [[ -n "$phash" ]]; then

@@ -11,6 +11,14 @@
 # errors, concurrency, and edge cases.
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="${SCRIPT_DIR}/../hooks"
@@ -196,7 +204,7 @@ test_corrupt_index_jsonl() {
     # get_prior_sessions reads from ~/.claude/sessions/<hash>/index.jsonl
     # We need to set up the project hash directory
     local project_hash
-    project_hash=$(echo "$proj" | shasum -a 256 2>/dev/null | cut -c1-12 || echo "testhash123")
+    project_hash=$(echo "$proj" | $_SHA256_CMD 2>/dev/null | cut -c1-12 || echo "testhash123")
     local index_dir="$HOME/.claude/sessions/${project_hash}"
     mkdir -p "$index_dir"
     local index_file="$index_dir/index.jsonl"
@@ -723,7 +731,7 @@ test_exactly_3_sessions_minimum() {
 
     # get_prior_sessions requires >=3 sessions
     local project_hash
-    project_hash=$(echo "$proj" | shasum -a 256 2>/dev/null | cut -c1-12 || echo "edge123")
+    project_hash=$(echo "$proj" | $_SHA256_CMD 2>/dev/null | cut -c1-12 || echo "edge123")
     local index_dir="$HOME/.claude/sessions/${project_hash}"
     mkdir -p "$index_dir"
     local index_file="$index_dir/index.jsonl"

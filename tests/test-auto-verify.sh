@@ -12,6 +12,14 @@
 #   auto-verify because they cannot be tested in a headless CLI context).
 
 set -euo pipefail
+# Portable SHA-256 (macOS: shasum, Ubuntu: sha256sum)
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
 
 TEST_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
@@ -800,7 +808,7 @@ MANIFEST_EOF
 # detect_active_trace() tier-1 checks the scoped marker (.active-tester-{session}-{phash});
 # tier-2 checks the old-format marker and validates manifest.project.
 # Creating both ensures the test works whether tier-1 or tier-2 succeeds first.
-_T15_PHASH=$(echo "$T15_PROJECT_ROOT" | shasum -a 256 | cut -c1-8)
+_T15_PHASH=$(echo "$T15_PROJECT_ROOT" | $_SHA256_CMD | cut -c1-8)
 ACTIVE_MARKER="${TRACE_STORE_PATH}/.active-tester-${SESSION_ID_FOR_TEST}"
 SCOPED_MARKER="${TRACE_STORE_PATH}/.active-tester-${SESSION_ID_FOR_TEST}-${_T15_PHASH}"
 echo "$FAKE_TRACE_ID" > "$ACTIVE_MARKER"

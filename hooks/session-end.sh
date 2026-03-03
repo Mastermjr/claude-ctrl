@@ -88,7 +88,7 @@ fi
 SESSION_EVENT_FILE="${CLAUDE_DIR}/.session-events.jsonl"
 if [[ -f "$SESSION_EVENT_FILE" && -s "$SESSION_EVENT_FILE" ]]; then
     # Create project-specific archive directory
-    PROJECT_HASH=$(echo "$PROJECT_ROOT" | shasum -a 256 2>/dev/null | cut -c1-12)
+    PROJECT_HASH=$(echo "$PROJECT_ROOT" | ${_SHA256_CMD:-shasum -a 256} 2>/dev/null | cut -c1-12)
     ARCHIVE_DIR="$HOME/.claude/sessions/${PROJECT_HASH}"
     mkdir -p "$ARCHIVE_DIR"
 
