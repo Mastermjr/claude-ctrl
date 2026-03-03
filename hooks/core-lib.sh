@@ -392,56 +392,40 @@ cache_project_context() {
     fi
 }
 
-# --- Portable flock helper ---
-# @decision DEC-FLOCK-COMPAT-001
-# @title Portable flock helper with macOS fallback
+# --- Platform-native file descriptor locking ---
+# @decision DEC-LOCK-NATIVE-001
+# @title OS-native file locking via uname detection
 # @status accepted
-# @rationale flock(1) is a Linux utility not in PATH on macOS. Homebrew's util-linux
-#   is keg-only, so flock lives in /opt/homebrew/Cellar/util-linux/*/bin/ but is never
-#   symlinked. The helper searches PATH → homebrew ARM → homebrew Intel → graceful
-#   degradation. In single-user Claude Code, the atomic tmp+mv + lattice enforcement
-#   provide sufficient protection without flock; the lock is defense-in-depth.
+# @rationale macOS ships lockf(1), Linux ships flock(1). Platform detection via
+#   uname -s eliminates homebrew dependency and cellar glob fragility. Same
+#   FD+timeout semantics, zero external deps. In single-user Claude Code, the
+#   atomic tmp+mv + lattice enforcement provide sufficient protection without
+#   locking; the lock is defense-in-depth.
 #
-# _portable_flock TIMEOUT FD
-#   Drop-in replacement for flock(1) that works on macOS without flock in PATH.
-#   Uses flock if available (any location), falls back to graceful no-op.
-#   Result: 0 = lock acquired (or no flock available), non-zero = lock timeout.
+# _lock_fd TIMEOUT FD
+#   Platform-native file descriptor locking.
+#   Linux: flock -w TIMEOUT FD
+#   macOS: lockf -s -t TIMEOUT FD
+#   Neither: proceed unlocked (defense-in-depth: atomic tmp+mv + lattice)
 #
 # Usage (mirrors flock -w TIMEOUT FD):
-#   ( _portable_flock 5 9 || { handle_failure; return 1; }
+#   ( _lock_fd 5 9 || { handle_failure; return 1; }
 #     ... critical section ...
 #   ) 9>"$lockfile"
-_portable_flock() {
+_lock_fd() {
     local timeout="$1" fd="$2"
-
-    # Cache flock binary discovery (per-process, resets on subshell)
-    if [[ -z "${_FLOCK_BIN+set}" ]]; then
-        _FLOCK_BIN=$(command -v flock 2>/dev/null || true)
-        if [[ -z "$_FLOCK_BIN" ]]; then
-            # Homebrew keg-only (Apple Silicon)
-            for f in /opt/homebrew/Cellar/util-linux/*/bin/flock; do
-                [[ -x "$f" ]] && _FLOCK_BIN="$f" && break
-            done
-        fi
-        if [[ -z "$_FLOCK_BIN" ]]; then
-            # Homebrew keg-only (Intel Mac)
-            for f in /usr/local/Cellar/util-linux/*/bin/flock; do
-                [[ -x "$f" ]] && _FLOCK_BIN="$f" && break
-            done
-        fi
-        [[ -z "$_FLOCK_BIN" ]] && _FLOCK_BIN="__none__"
+    if [[ -z "${_LOCK_CMD+set}" ]]; then
+        case "$(uname -s)" in
+            Darwin) _LOCK_CMD="lockf"  ;;
+            Linux)  _LOCK_CMD="flock"  ;;
+            *)      _LOCK_CMD="__none__" ;;
+        esac
     fi
-
-    if [[ "$_FLOCK_BIN" != "__none__" ]]; then
-        "$_FLOCK_BIN" -w "$timeout" "$fd"
-    else
-        # No flock available — degrade gracefully.
-        # In single-user Claude Code, concurrent writes are rare.
-        # The atomic tmp+mv pattern in write_proof_status already prevents
-        # truncation. The flock was defense-in-depth; without it, the
-        # lattice enforcement still protects against regressions.
-        return 0
-    fi
+    case "$_LOCK_CMD" in
+        lockf)  lockf -s -t "$timeout" "$fd" ;;
+        flock)  flock -w "$timeout" "$fd" ;;
+        *)      return 0 ;;
+    esac
 }
 
 # Export core utilities for subshells
@@ -449,4 +433,4 @@ export SOURCE_EXTENSIONS DECISION_LINE_THRESHOLD TEST_STALENESS_THRESHOLD SESSIO
 export -f project_hash is_source_file is_skippable_path is_test_file is_claude_meta_repo
 export -f read_test_status validate_state_file atomic_write safe_cleanup append_audit _log_deny
 export -f declare_gate emit_deny emit_advisory emit_flush enable_fail_closed _hook_crash_deny
-export -f cache_project_context _portable_flock
+export -f cache_project_context _lock_fd

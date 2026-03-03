@@ -217,12 +217,14 @@ cas_proof_status() {
 
     local _cas_result=1
     (
-        # Use _portable_flock if available, fall back to bare flock, then proceed unlocked
+        # Use _lock_fd if available, fall back to bare flock, then proceed unlocked
         local _lock_ok=true
-        if type _portable_flock &>/dev/null; then
-            _portable_flock 5 9 || _lock_ok=false
+        if type _lock_fd &>/dev/null; then
+            _lock_fd 5 9 || _lock_ok=false
         elif command -v flock &>/dev/null; then
             flock -w 5 9 || _lock_ok=false
+        elif command -v lockf &>/dev/null; then
+            lockf -s -t 5 9 || _lock_ok=false
         fi
         if [[ "$_lock_ok" == "false" ]]; then return 2; fi
 
