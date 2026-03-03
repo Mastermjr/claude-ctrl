@@ -1,33 +1,36 @@
 #!/usr/bin/env bash
-# statusline.sh — Claude Code single-line status bar with ANSI-aware truncation.
+# statusline.sh — Claude Code 3-line status bar with per-line ANSI-aware truncation.
 #
 # Purpose: Reads JSON from stdin (model, workspace, cost, context window, tokens),
 # reads .statusline-cache for git/agent state, reads .todo-count for todos,
-# and outputs a single ANSI-formatted status line, truncated to terminal width.
+# and outputs 2-3 ANSI-formatted lines, each independently truncated to terminal width.
 #
 # @decision DEC-CACHE-002
-# @title Three-line status bar: initiative banner (Line 0) + project context + metrics
-# @status superseded by DEC-STATUSLINE-004
+# @title Three-line status bar: metrics (Line 1) + project context (Line 2) + initiative banner (Line 3)
+# @status accepted
 # @rationale Single-line statuslines on wide monitors are hard to scan because
 # project context and session metrics compete for the same horizontal space.
-# Splitting into lines gives each domain its own visual lane: Line 0 (conditional)
-# shows the active initiative with full name and phase context; Line 1 is "where am
-# I / what's happening" (model, workspace, git, agents, todos); Line 2 is "how much
-# have I spent / is the context getting full". Line 0 is omitted when no active
-# initiative exists so the display stays 2 lines for idle/non-plan sessions.
+# Splitting into lines gives each domain its own visual lane:
+#   Line 1 (metrics): model, context bar, tokens, cost, duration, lines, cache %
+#   Line 2 (project): workspace, git state, agents, todos
+#   Line 3 (initiative highlight bar, conditional): bold cyan banner at the bottom
+# Line 3 is omitted when no active initiative exists so the display stays 2 lines
+# for idle/non-plan sessions. Each line independently truncates with "..." at
+# terminal width — no single-line compromise needed.
 # Removed: time (HH:MM:SS), plan phase inline segment, test status, community
 # segment, version, worktree-roster stale detection (PID-based).
 # Added: context window bar, cost (~$X.XX), duration (ms to human), lines
-# changed, cache %, token count (tokens: Nk), initiative banner (Line 0).
+# changed, cache %, token count (tokens: Nk), initiative highlight bar (bottom).
 #
 # @decision DEC-STATUSLINE-001
-# @title Domain clustering for line 1 segments
+# @title Domain clustering for project-context line (Line 2) segments
 # @status accepted
 # @rationale Grouping related segments with explicit labels reduces cognitive
-# load when scanning the statusline. Line 1 clusters: model+workspace ("where
-# am I"), git state with dirty:/wt: labels ("repo state"), agents: with type
-# list ("what work is active"), todos: count ("pending work"). Labels make
-# numeric values unambiguous — "8 dirty" is less clear than "dirty: 8".
+# load when scanning the statusline. Line 2 clusters: workspace ("where am I"),
+# git state with dirty:/wt: labels ("repo state"), agents: with type list
+# ("what work is active"), todos: count ("pending work"). Labels make numeric
+# values unambiguous — "8 dirty" is less clear than "dirty: 8". Model display
+# name moved to Line 1 (metrics line) so the project line stays workspace-focused.
 #
 # @decision DEC-STATUSLINE-002
 # @title Token count segment with K/M notation and usage-based color
@@ -40,11 +43,12 @@
 #
 # Input (stdin): JSON with .model.display_name, .workspace.current_dir,
 #   .cost.*, .context_window.*
-# Output (stdout): Single ANSI-formatted line, truncated to terminal width with ...
+# Output (stdout): 2-3 ANSI-formatted lines, each truncated to terminal width with ...
 #
-# Segment order (left to right, separated by │):
-#   initiative (Phase N/M: Title) │ model+workspace │ git │ agents │ todos │
-#   context bar │ tokens: Nk │ ~$cost │ duration │ +lines/-lines │ cache %
+# Line layout (top to bottom):
+#   Line 1 (metrics):  model │ [context bar] │ tks: Nk │ ~$cost │ duration │ +lines/-lines │ cache %
+#   Line 2 (project):  workspace │ dirty: N  wt: N │ agents: N (types) │ todos: Np Ng
+#   Line 3 (highlight bar, conditional): Initiative Name (Phase N/M): Phase Title  ← bold cyan, bottom
 #
 # @decision DEC-STATUSLINE-DEPS-001
 # @title Statusline configuration dependency chain
@@ -218,11 +222,13 @@ format_tokens() {
 
 # truncate_ansi str max_width — truncate ANSI string to fit terminal width
 # @decision DEC-STATUSLINE-004
-# @title ANSI-aware truncation for single-line status bar
+# @title Per-line ANSI-aware truncation for 3-line status bar
 # @status accepted
-# @rationale Truncation must skip escape sequences when counting visible characters
-# to avoid breaking ANSI codes or misreporting width. awk is used for the slow path
-# to avoid O(n²) bash string concatenation on wide terminals with many segments.
+# @rationale Each of the 3 output lines is independently truncated to terminal width
+# using this function. Truncation must skip escape sequences when counting visible
+# characters to avoid breaking ANSI codes or misreporting width. awk is used for
+# the slow path to avoid O(n²) bash string concatenation on wide terminals with
+# many segments. Supersedes the single-line truncation approach (DEC-CACHE-002 v1).
 truncate_ansi() {
   local str="$1" max_w="$2"
   # Fast path: strip ANSI, check if it fits
@@ -268,17 +274,20 @@ if (( total_input > 0 && cache_read > 0 )); then
 fi
 
 # ---------------------------------------------------------------------------
-# LINE 0: Initiative banner (conditional — only when active initiative exists)
+# LINE 3 (bottom): Initiative highlight bar (conditional — only when active initiative exists)
 # @decision DEC-STATUSLINE-003
-# @title Full initiative banner on dedicated Line 0 above project context
+# @title Full initiative banner as bottom highlight bar (Line 3)
 # @status accepted
 # @rationale The former inline Cluster A.5 segment showed a cryptic "Robust+1:P0"
-# label that required mental decoding. Moving initiative context to a dedicated
-# top line (Line 0) allows the full initiative name and phase title to be shown
-# without truncation pressure. Format: "Initiative Name (Phase N/M): Phase Title"
-# where N/M is the current/total phase count and the title uses em dashes for
-# readability (-- in MASTER_PLAN.md → — in display). When no active initiative
-# exists, Line 0 is omitted and output stays 2 lines (backward compatible).
+# label that required mental decoding. Rendering the initiative as a dedicated
+# bottom highlight bar (Line 3) lets the full initiative name and phase title
+# be shown without truncation pressure from other segments. It anchors visually
+# at the bottom of the status display — the eye naturally reads top-to-bottom,
+# so "metrics → project → what I'm working on" follows a logical information
+# hierarchy. Format: "Initiative Name (Phase N/M): Phase Title" where N/M is
+# the current/total phase count and the title uses em dashes for readability
+# (-- in MASTER_PLAN.md → — in display). When no active initiative exists,
+# Line 3 is omitted and output stays 2 lines (backward compatible).
 # When multiple initiatives are active, "(+N more)" suffix is appended.
 # Color: bold cyan — visually prominent but not alarming.
 # ---------------------------------------------------------------------------
@@ -311,11 +320,12 @@ if [[ -n "$cache_initiative" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# LINE 1: Project context — domain-clustered with labels
+# LINE 2 (project): Workspace + git + agents + todos
+# (model has moved to the metrics line — see LINE 1 below)
 # ---------------------------------------------------------------------------
 
-# Cluster A: Model + workspace
-line1=$(printf '\033[2m%s\033[0m \033[1;36m%s\033[0m' "$model" "$workspace")
+# Cluster A: Workspace only (model moved to metrics line)
+line1=$(printf '\033[1;36m%s\033[0m' "$workspace")
 
 # Cluster B: Git state — dirty: N  wt: N (combined segment, only if either > 0)
 if (( cache_dirty > 0 || cache_wt > 0 )); then
@@ -371,11 +381,14 @@ elif (( todo_count > 0 )); then
 fi
 
 # ---------------------------------------------------------------------------
-# LINE 2: Session metrics
+# LINE 1 (metrics): Model + context bar + tokens + cost + duration + lines + cache
 # ---------------------------------------------------------------------------
 
+# Start metrics line with model display name (moved here from project line)
+line2=$(printf '\033[2m%s\033[0m' "$model")
+
 # Context bar (always shown)
-line2=$(build_context_bar "$ctx_pct")
+line2=$(printf '%s %b %s' "$line2" "$sep" "$(build_context_bar "$ctx_pct")")
 
 # Token count segment with subagent breakdown and project lifetime
 # @decision DEC-LIFETIME-TOKENS-001
@@ -473,21 +486,31 @@ if (( cache_efficiency >= 0 )); then
 fi
 
 # ---------------------------------------------------------------------------
-# Output: Single line, truncated to terminal width with ...
-# @decision DEC-STATUSLINE-004
-# @title Single-line status bar replacing multi-line layout
+# Output: 3-line layout — each line independently truncated to terminal width.
+#   Line 1 (top):    metrics   — model, context bar, tokens, cost, duration, lines, cache %
+#   Line 2 (middle): project   — workspace, git, agents, todos
+#   Line 3 (bottom): highlight — initiative banner (conditional, bold cyan)
+# @decision DEC-STATUSLINE-004 (output section — see truncate_ansi above for function annotation)
+# @title Three-line status bar with per-line ANSI-aware truncation
 # @status accepted
-# @rationale Multi-line statusline was visually messy and wasted vertical space.
-# Single line with left-to-right priority and ANSI-aware ... truncation at
-# terminal width keeps all data present while fitting in one clean bar.
-# Supersedes DEC-CACHE-002 (three-line layout).
+# @rationale Each domain gets its own line and its own truncation boundary.
+# Line 1 (metrics) truncates independently so a long model name does not push
+# the context bar off screen. Line 2 (project) truncates independently so
+# many agents/todos don't crowd workspace context. Line 3 (initiative highlight)
+# renders at the bottom as a visual anchor — bold cyan so it reads as a banner,
+# not inline noise. When no active initiative exists, only lines 1+2 are emitted.
 # ---------------------------------------------------------------------------
 term_w="${COLUMNS:-$(tput cols 2>/dev/null || echo 120)}"
 
-if [[ -n "$line0" ]]; then
-  full_line=$(printf '%s %b %s %b %s' "$line0" "$sep" "$line1" "$sep" "$line2")
-else
-  full_line=$(printf '%s %b %s' "$line1" "$sep" "$line2")
-fi
+# Line 1: metrics (model + context bar + tokens + cost + duration + lines + cache)
+truncate_ansi "$line2" "$term_w"
+printf '\n'
 
-truncate_ansi "$full_line" "$term_w"
+# Line 2: project context (workspace + git + agents + todos)
+truncate_ansi "$line1" "$term_w"
+
+# Line 3: initiative highlight bar (conditional — only when active initiative exists)
+if [[ -n "$line0" ]]; then
+  printf '\n'
+  truncate_ansi "$line0" "$term_w"
+fi
