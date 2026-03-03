@@ -289,7 +289,17 @@ write_proof_status() {
 
     local _result=0
     (
-        flock -w 5 9 || { log_info "write_proof_status" "lock timeout for '${proof_status}' — status transition rejected" 2>/dev/null || true; exit 1; }
+        # Use _portable_flock if available (sourced via source-lib.sh → core-lib.sh),
+        # fall back to bare flock, then proceed unlocked (tests source log.sh directly).
+        local _lock_ok=true
+        if type _portable_flock &>/dev/null; then
+            _portable_flock 5 9 || _lock_ok=false
+        elif command -v flock &>/dev/null; then
+            flock -w 5 9 || _lock_ok=false
+        fi
+        if [[ "$_lock_ok" == "false" ]]; then
+            log_info "write_proof_status" "lock timeout for '${proof_status}' — status transition rejected" 2>/dev/null || true; exit 1
+        fi
 
         local timestamp
         timestamp=$(date +%s)
@@ -297,7 +307,19 @@ write_proof_status() {
 
         # --- Monotonic lattice enforcement ---
         # Ordinal map: none < needs-verification < pending < verified < committed
-        declare -A STATUS_ORDINAL=([none]=0 [needs-verification]=1 [pending]=2 [verified]=3 [committed]=4)
+        # Use case statement instead of declare -A for bash 3 (macOS) compatibility.
+        # declare -A fails on bash 3.2 (macOS default), causing the subshell to exit
+        # under set -e before writing the status file. The case-based helper avoids this.
+        _proof_ordinal() {
+            case "$1" in
+                none)                 echo 0 ;;
+                needs-verification)   echo 1 ;;
+                pending)              echo 2 ;;
+                verified)             echo 3 ;;
+                committed)            echo 4 ;;
+                *)                    echo 0 ;;
+            esac
+        }
         local scoped_proof="${claude_dir}/.proof-status-${phash}"
         local legacy_proof="${claude_dir}/.proof-status"
 
@@ -310,8 +332,10 @@ write_proof_status() {
         fi
         [[ -z "$current" ]] && current="none"
 
-        local current_ord=${STATUS_ORDINAL[$current]:-0}
-        local new_ord=${STATUS_ORDINAL[$proof_status]:-0}
+        local current_ord
+        current_ord=$(_proof_ordinal "$current")
+        local new_ord
+        new_ord=$(_proof_ordinal "$proof_status")
 
         if (( new_ord < current_ord )); then
             # Check for epoch reset: .proof-epoch newer than .proof-status
