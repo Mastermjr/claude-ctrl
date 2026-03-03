@@ -57,6 +57,34 @@ run_statusline() {
     printf '%s' "$result"
 }
 
+
+# Run statusline with custom COLUMNS + HOME. Captures full output first to avoid SIGPIPE.
+run_sl_columns() {
+    local json="$1" columns="$2" home_dir="${3:-}"
+    local tmpdir=""
+    if [[ -z "$home_dir" ]]; then
+        tmpdir=$(mktemp -d)
+        home_dir="$tmpdir"
+    fi
+    local result
+    result=$(printf '%s' "$json" | COLUMNS="$columns" HOME="$home_dir" bash "$STATUSLINE" 2>/dev/null)
+    [[ -n "$tmpdir" ]] && rm -rf "$tmpdir"
+    printf '%s' "$result"
+}
+
+# Extract line N (1-indexed) from multiline string without pipes (avoids SIGPIPE)
+# Uses [[ ]] comparison to avoid (( )) returning exit 1 when condition is false (set -e safe)
+extract_line() {
+    local str="$1" n="$2" i=0
+    while IFS= read -r _el_line; do
+        i=$(( i + 1 ))
+        if [[ "$i" -eq "$n" ]]; then
+            printf '%s' "$_el_line"
+            return 0
+        fi
+    done <<< "$str"
+}
+
 # ============================================================================
 # Test group 1: Two-line structure
 # ============================================================================
@@ -94,7 +122,9 @@ test_line1_contains_workspace() {
     run_test
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"/Users/turla/myproject"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(run_statusline "$json" | head -1 | strip_ansi)
+    local _rsl_out
+    _rsl_out=$(run_statusline "$json")
+    line1=$(extract_line "$_rsl_out" 1 | strip_ansi)
 
     if [[ "$line1" == *"myproject"* ]]; then
         pass_test "Line 1 contains workspace basename"
@@ -284,7 +314,9 @@ test_dirty_absent_when_zero() {
     # No cache file → cache_dirty defaults to 0
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"/tmp/cleanws"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(run_statusline "$json" | head -1 | strip_ansi)
+    local _rsl_out
+    _rsl_out=$(run_statusline "$json")
+    line1=$(extract_line "$_rsl_out" 1 | strip_ansi)
 
     # Check that "dirty:" label is absent
     if ! printf '%s' "$line1" | grep -qE 'dirty:'; then
@@ -325,7 +357,9 @@ test_todos_absent_when_zero() {
     # HOME points to temp dir → .todo-count absent → todo_count=0
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"/tmp/p"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(run_statusline "$json" | head -1 | strip_ansi)
+    local _rsl_out
+    _rsl_out=$(run_statusline "$json")
+    line1=$(extract_line "$_rsl_out" 1 | strip_ansi)
 
     if [[ "$line1" != *"todos:"* ]]; then
         pass_test "Todos segment absent when no .todo-count file"
@@ -345,7 +379,9 @@ test_todos_present_from_file() {
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"/tmp/p"},"cost":{},"context_window":{}}'
     local line1
     # HOME must be set on the bash invocation (right side of pipe)
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" == *"todos: 7"* ]]; then
@@ -472,7 +508,9 @@ test_dirty_label_format() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" == *"dirty: 8"* ]]; then
@@ -492,7 +530,9 @@ test_wt_label_format() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" == *"wt: 2"* ]]; then
@@ -512,7 +552,9 @@ test_agents_label_format() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" == *"agents: 3 (impl,test)"* ]]; then
@@ -531,7 +573,9 @@ test_todos_label_format() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"/tmp/p"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" == *"todos: 10"* ]]; then
@@ -543,7 +587,8 @@ test_todos_label_format() {
 
 test_domain_clustering_order() {
     run_test
-    # Line 1 should have: model+workspace BEFORE dirty: BEFORE agents: BEFORE todos:
+    # Line 1 should have: workspace BEFORE dirty: BEFORE agents: BEFORE todos:
+    # (Model is on line 2, not line 1)
     local tmpdir
     tmpdir=$(mktemp -d)
     mkdir -p "$tmpdir/.claude"
@@ -553,24 +598,25 @@ test_domain_clustering_order() {
 
     local json='{"model":{"display_name":"Opus 4.6"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
-    # Extract positions
-    local pos_model pos_dirty pos_agents pos_todos
-    pos_model=$(printf '%s' "$line1" | grep -bo 'Opus 4.6' | head -1 | cut -d: -f1)
-    pos_dirty=$(printf '%s' "$line1" | grep -bo 'dirty:' | head -1 | cut -d: -f1)
-    pos_agents=$(printf '%s' "$line1" | grep -bo 'agents:' | head -1 | cut -d: -f1)
-    pos_todos=$(printf '%s' "$line1" | grep -bo 'todos:' | head -1 | cut -d: -f1)
+    # Extract positions of domain clusters on line 1
+    # workspace (tmpdir basename) comes first, then dirty:, agents:, todos:
+    local pos_dirty pos_agents pos_todos
+    pos_dirty=$(printf '%s' "$line1" | grep -bo 'dirty:' | { head -1; cat > /dev/null; } | cut -d: -f1)
+    pos_agents=$(printf '%s' "$line1" | grep -bo 'agents:' | { head -1; cat > /dev/null; } | cut -d: -f1)
+    pos_todos=$(printf '%s' "$line1" | grep -bo 'todos:' | { head -1; cat > /dev/null; } | cut -d: -f1)
 
-    if [[ -n "$pos_model" && -n "$pos_dirty" && -n "$pos_agents" && -n "$pos_todos" ]] \
-        && (( pos_model < pos_dirty )) \
+    if [[ -n "$pos_dirty" && -n "$pos_agents" && -n "$pos_todos" ]] \
         && (( pos_dirty < pos_agents )) \
         && (( pos_agents < pos_todos )); then
-        pass_test "Domain clustering order: model < dirty < agents < todos"
+        pass_test "Domain clustering order: dirty < agents < todos on line 1"
     else
         fail_test "Domain clustering order wrong" \
-            "line1=$line1 | positions: model=$pos_model dirty=$pos_dirty agents=$pos_agents todos=$pos_todos"
+            "line1=$line1 | positions: dirty=$pos_dirty agents=$pos_agents todos=$pos_todos"
     fi
 }
 
@@ -671,9 +717,9 @@ test_tokens_segment_position() {
     line2=$(run_statusline "$json" | tail -1 | strip_ansi)
 
     local pos_bar pos_tokens pos_cost
-    pos_bar=$(printf '%s' "$line2" | grep -bo '\[' | head -1 | cut -d: -f1)
-    pos_tokens=$(printf '%s' "$line2" | grep -bo 'tks:' | head -1 | cut -d: -f1)
-    pos_cost=$(printf '%s' "$line2" | grep -bo '~\$' | head -1 | cut -d: -f1)
+    pos_bar=$(printf '%s' "$line2" | { grep -bo '\[' || true; } | head -1 | cut -d: -f1)
+    pos_tokens=$(printf '%s' "$line2" | { grep -bo 'tks:' || true; } | head -1 | cut -d: -f1)
+    pos_cost=$(printf '%s' "$line2" | { grep -bo '~\$' || true; } | head -1 | cut -d: -f1)
 
     if [[ -n "$pos_bar" && -n "$pos_tokens" && -n "$pos_cost" ]] \
         && (( pos_bar < pos_tokens )) \
@@ -705,7 +751,9 @@ test_todo_split_both_nonzero() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" == *"todos: 3p"* && "$line1" == *"7g"* ]]; then
@@ -723,7 +771,9 @@ test_todo_split_project_only() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" == *"todos: 5p"* ]] && [[ "$line1" != *"g"*"todos"* || "$line1" == *"5p"* ]]; then
@@ -748,7 +798,9 @@ test_todo_split_global_only() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" == *"todos: 9g"* ]]; then
@@ -766,7 +818,9 @@ test_todo_split_both_zero_no_segment() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" != *"todos:"* ]]; then
@@ -788,7 +842,9 @@ test_todo_split_backward_compat_no_cache_fields() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" == *"todos: 12"* ]]; then
@@ -808,7 +864,9 @@ test_todo_split_p_suffix_present() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line1
-    line1=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line1" == *"4p"* && "$line1" == *"2g"* ]]; then
@@ -833,7 +891,9 @@ test_lifetime_cost_absent_when_zero() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{"total_cost_usd":0.25},"context_window":{}}'
     local line2
-    line2=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line2=$(printf '%s' "$output" | tail -1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line2" != *"Σ"* ]]; then
@@ -853,7 +913,9 @@ test_lifetime_cost_shown_when_nonzero() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{"total_cost_usd":0.53},"context_window":{}}'
     local line2
-    line2=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line2=$(printf '%s' "$output" | tail -1 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line2" == *"Σ~\$12.40"* || "$line2" == *"Σ~\$12"* ]]; then
@@ -916,7 +978,9 @@ test_banner_shows_full_initiative_and_phase() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line0
-    line0=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line0=$(extract_line "$output" 3 | strip_ansi)
     rm -rf "$tmpdir"
 
     # Line 0 should have: initiative name + "(Phase 0/6)" + phase title + em dash
@@ -939,7 +1003,9 @@ test_banner_shows_initiative_without_phase() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line0
-    line0=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line0=$(extract_line "$output" 3 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line0" == *"Backlog Auto-Capture"* ]] && [[ "$line0" != *"(Phase"* ]]; then
@@ -958,7 +1024,9 @@ test_banner_shows_phase_count() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line0
-    line0=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line0=$(extract_line "$output" 3 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line0" == *"(Phase 2/5)"* ]]; then
@@ -977,7 +1045,9 @@ test_banner_shows_multi_initiative_suffix() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
     local line0
-    line0=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | head -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line0=$(extract_line "$output" 3 | strip_ansi)
     rm -rf "$tmpdir"
 
     if [[ "$line0" == *"(+2 more)"* ]]; then
@@ -987,7 +1057,7 @@ test_banner_shows_multi_initiative_suffix() {
     fi
 }
 
-test_banner_is_first_line() {
+test_banner_is_last_line() {
     run_test
     local tmpdir
     tmpdir=$(mktemp -d)
@@ -997,15 +1067,15 @@ test_banner_is_first_line() {
     local output
     output=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null)
     local line0 line1
-    line0=$(printf '%s' "$output" | head -1 | strip_ansi)
-    line1=$(printf '%s' "$output" | sed -n '2p' | strip_ansi)
+    line0=$(extract_line "$output" 3 | strip_ansi)
+    line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
 
-    # Line 0 has the initiative; Line 1 (model line) has "Claude"
-    if [[ "$line0" == *"Statusline Banner"* ]] && [[ "$line1" == *"Claude"* ]]; then
-        pass_test "Banner is Line 0; model appears on Line 1"
+    # Line 3 (last) has the initiative; Line 1 has project context (not model)
+    if [[ "$line0" == *"Statusline Banner"* ]] && [[ -n "$line1" ]]; then
+        pass_test "Banner is last line (Line 3); project context present on Line 1"
     else
-        fail_test "Banner/model line order wrong" "line0=$line0 | line1=$line1"
+        fail_test "Banner is not last line or project context missing" "line0=$line0 | line1=$line1"
     fi
 }
 
@@ -1030,7 +1100,9 @@ test_lifetime_tokens_absent_when_zero_history_no_subagent() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
     local line2
-    line2=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line2=$(printf '%s' "$output" | tail -1 | strip_ansi)
     rm -rf "$tmpdir"
 
     # tks: 145k should be present, Σ should NOT be present
@@ -1050,7 +1122,9 @@ test_lifetime_tokens_shown_with_past_sessions() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
     local line2
-    line2=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line2=$(printf '%s' "$output" | tail -1 | strip_ansi)
     rm -rf "$tmpdir"
 
     # Should show "tks: 145k │ Σ1.1M" — 1000000 past + 145000 current
@@ -1071,7 +1145,9 @@ test_lifetime_tokens_includes_subagent() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
     local line2
-    line2=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line2=$(printf '%s' "$output" | tail -1 | strip_ansi)
     rm -rf "$tmpdir"
 
     # 0 past + 145k main + 95k subagent = tks: 145k(+95k), no Σ segment
@@ -1091,7 +1167,9 @@ test_lifetime_tokens_grand_total_all_sources() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
     local line2
-    line2=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1 | strip_ansi)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line2=$(printf '%s' "$output" | tail -1 | strip_ansi)
     rm -rf "$tmpdir"
 
     # 500000 + 145000 + 55000 = 700000 → 700k; subagent shown as (+55k)
@@ -1125,7 +1203,9 @@ test_lifetime_tokens_dim_rendering() {
 
     local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"total_input_tokens":100000,"total_output_tokens":45000}}'
     local line2_raw
-    line2_raw=$(printf '%s' "$json" | HOME="$tmpdir" bash "$STATUSLINE" 2>/dev/null | tail -1)
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    line2_raw=$(printf '%s' "$output" | tail -1)
     rm -rf "$tmpdir"
 
     # Dim annotation pattern: ESC[2mΣNk (Σ is now a standalone dim segment)
@@ -1133,6 +1213,113 @@ test_lifetime_tokens_dim_rendering() {
         pass_test "Lifetime tokens: Σ segment rendered dim (ESC[2m)"
     else
         fail_test "Lifetime tokens: Σ segment not dim-rendered" "raw: $(printf '%s' "$line2_raw" | cat -v)"
+    fi
+}
+
+# ============================================================================
+# Test group 14: Responsive layout (DEC-RESPONSIVE-001)
+# ============================================================================
+
+test_responsive_all_segments_wide() {
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    printf '{"dirty":5,"worktrees":2,"agents_active":3,"agents_types":"impl,test","todo_project":4,"todo_global":7,"lifetime_cost":10,"lifetime_tokens":500000,"subagent_tokens":50000}' \
+        > "$tmpdir/.claude/.statusline-cache"
+    local json='{"model":{"display_name":"Opus 4.6"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{"total_cost_usd":1.53,"total_duration_ms":180000,"total_lines_added":42,"total_lines_removed":7},"context_window":{"used_percentage":35,"current_usage":{"cache_read_input_tokens":50000,"input_tokens":10000,"cache_creation_input_tokens":5000},"total_input_tokens":150000,"total_output_tokens":50000}}'
+    local output
+    output=$(run_sl_columns "$json" 200 "$tmpdir")
+    local stripped
+    stripped=$(printf '%s' "$output" | strip_ansi)
+    rm -rf "$tmpdir"
+    local ok=true
+    [[ "$stripped" != *"dirty: 5"* ]] && ok=false
+    [[ "$stripped" != *"wt: 2"* ]] && ok=false
+    [[ "$stripped" != *"agents: 3"* ]] && ok=false
+    [[ "$stripped" != *"4p"* ]] && ok=false
+    [[ "$stripped" != *"Opus 4.6"* ]] && ok=false
+    [[ "$stripped" != *"tks:"* ]] && ok=false
+    if $ok; then
+        pass_test "Responsive: COLUMNS=200 shows all segments"
+    else
+        fail_test "Responsive: missing segments at COLUMNS=200" "stripped=$stripped"
+    fi
+}
+
+test_responsive_line1_narrow_drops_todos() {
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    printf '{"dirty":5,"worktrees":2,"agents_active":3,"agents_types":"impl,test","todo_project":4,"todo_global":7,"lifetime_cost":0}' \
+        > "$tmpdir/.claude/.statusline-cache"
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
+    local output
+    output=$(run_sl_columns "$json" 55 "$tmpdir")
+    local line1
+    line1=$(extract_line "$output" 1 | strip_ansi)
+    rm -rf "$tmpdir"
+    if [[ "$line1" != *"todos:"* ]] && [[ -n "$line1" ]]; then
+        pass_test "Responsive: COLUMNS=55 drops todos from project line"
+    else
+        fail_test "Responsive: todos not dropped at COLUMNS=55" "line1=$line1"
+    fi
+}
+
+test_responsive_line1_very_narrow_keeps_workspace() {
+    run_test
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"/Users/turla/myproj"},"cost":{},"context_window":{}}'
+    local output
+    output=$(run_sl_columns "$json" 30)
+    local line1
+    line1=$(extract_line "$output" 1 | strip_ansi)
+    if [[ "$line1" == *"myproj"* ]]; then
+        pass_test "Responsive: COLUMNS=30 preserves workspace name"
+    else
+        fail_test "Responsive: workspace lost at COLUMNS=30" "line1=$line1"
+    fi
+}
+
+test_responsive_line2_narrow_drops_lines_changed() {
+    run_test
+    local json='{"model":{"display_name":"Opus 4.6"},"workspace":{"current_dir":"/Users/turla/proj"},"cost":{"total_cost_usd":0.53,"total_duration_ms":60000,"total_lines_added":42,"total_lines_removed":7},"context_window":{"used_percentage":35,"current_usage":{"cache_read_input_tokens":50000,"input_tokens":10000,"cache_creation_input_tokens":5000},"total_input_tokens":150000,"total_output_tokens":50000}}'
+    local output
+    output=$(run_sl_columns "$json" 75)
+    local line2
+    line2=$(extract_line "$output" 2 | strip_ansi)
+    if [[ "$line2" != *"+42"* ]] && [[ "$line2" == *"tks:"* ]]; then
+        pass_test "Responsive: COLUMNS=75 drops +N/-N lines but keeps tks:"
+    else
+        fail_test "Responsive: line2 drop priority wrong at COLUMNS=75" "line2=$line2"
+    fi
+}
+
+test_responsive_line2_very_narrow_keeps_context_bar() {
+    run_test
+    local json='{"model":{"display_name":"Opus 4.6"},"workspace":{"current_dir":"/Users/turla/proj"},"cost":{"total_cost_usd":0.53,"total_duration_ms":60000},"context_window":{"used_percentage":35,"total_input_tokens":150000,"total_output_tokens":50000}}'
+    local output
+    output=$(run_sl_columns "$json" 25)
+    local line2
+    line2=$(extract_line "$output" 2 | strip_ansi)
+    if [[ "$line2" == *"35%"* ]] || [[ "$line2" == *"\u2591"* ]]; then
+        pass_test "Responsive: COLUMNS=25 preserves context bar"
+    else
+        fail_test "Responsive: context bar lost at COLUMNS=25" "line2=$line2"
+    fi
+}
+
+test_responsive_no_truncation_at_wide() {
+    run_test
+    local json='{"model":{"display_name":"Opus 4.6"},"workspace":{"current_dir":"/Users/turla/proj"},"cost":{"total_cost_usd":0.53,"total_duration_ms":60000,"total_lines_added":10,"total_lines_removed":3},"context_window":{"used_percentage":35,"current_usage":{"cache_read_input_tokens":50000,"input_tokens":10000,"cache_creation_input_tokens":5000},"total_input_tokens":150000,"total_output_tokens":50000}}'
+    local output
+    output=$(run_sl_columns "$json" 200)
+    local stripped
+    stripped=$(printf '%s' "$output" | strip_ansi)
+    if [[ "$stripped" != *"..."* ]]; then
+        pass_test "Responsive: COLUMNS=200 produces no '...' truncation"
+    else
+        fail_test "Responsive: unexpected '...' at COLUMNS=200" "stripped=$stripped"
     fi
 }
 
@@ -1230,7 +1417,7 @@ test_banner_shows_full_initiative_and_phase
 test_banner_shows_initiative_without_phase
 test_banner_shows_phase_count
 test_banner_shows_multi_initiative_suffix
-test_banner_is_first_line
+test_banner_is_last_line
 
 echo ""
 echo "--- Lifetime token display (DEC-LIFETIME-TOKENS-001) ---"
@@ -1242,6 +1429,15 @@ test_lifetime_tokens_absent_when_cache_absent
 test_lifetime_tokens_dim_rendering
 
 echo ""
+
+echo ""
+echo "--- Responsive layout (DEC-RESPONSIVE-001) ---"
+test_responsive_all_segments_wide
+test_responsive_line1_narrow_drops_todos
+test_responsive_line1_very_narrow_keeps_workspace
+test_responsive_line2_narrow_drops_lines_changed
+test_responsive_line2_very_narrow_keeps_context_bar
+test_responsive_no_truncation_at_wide
 echo "========================================="
 echo "Test Results:"
 echo "  Total:  $TESTS_RUN"

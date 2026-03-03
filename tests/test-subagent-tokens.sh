@@ -327,15 +327,15 @@ run_statusline_with_cache() {
 test_statusline_plain_tokens_no_subagent() {
     run_test
     # statusline reads total_tokens from: total_input_tokens + total_output_tokens
-    # Use 8000+2000=10000 total tokens for "tokens: 10k" display
+    # Use 8000+2000=10000 total tokens for "tks: 10k" display (label is "tks:", not "tokens:")
     local cache='{"dirty":0,"worktrees":0,"updated":0,"agents_active":0,"subagent_tokens":0,"lifetime_cost":0}'
 
     local line2
     line2=$(run_statusline_with_cache "$cache" 8000 2000 | tail -1 | strip_ansi)
 
-    # Should show "tokens: 10k" without Σ annotation
-    if [[ "$line2" == *"tokens: 10k"* && "$line2" != *"Σ"* ]]; then
-        pass_test "T08: statusline shows plain 'tokens: Nk' when subagent_tokens=0"
+    # Should show "tks: 10k" without (+Sk) annotation
+    if [[ "$line2" == *"tks: 10k"* && "$line2" != *"(+"* ]]; then
+        pass_test "T08: statusline shows plain 'tks: Nk' when subagent_tokens=0"
     else
         fail_test "T08: statusline token display wrong for zero subagent_tokens" \
             "line2=$line2"
@@ -344,33 +344,95 @@ test_statusline_plain_tokens_no_subagent() {
 
 test_statusline_sigma_display_with_subagent() {
     run_test
-    # 80k+20k=100k session tokens + 50k subagent = 150k grand total
+    # 80k+20k=100k session tokens + 50k subagent
+    # Subagent tokens show as (+Sk) suffix: "tks: 100k(+50k)"
     local cache='{"dirty":0,"worktrees":0,"updated":0,"agents_active":0,"subagent_tokens":50000,"lifetime_cost":0}'
 
     local line2
     line2=$(run_statusline_with_cache "$cache" 80000 20000 | tail -1 | strip_ansi)
 
-    # Should show Σ annotation
-    if [[ "$line2" == *"Σ"* ]]; then
-        pass_test "T09: statusline shows Σ annotation when subagent_tokens > 0"
+    # Should show (+50k) subagent annotation inline with tks:
+    if [[ "$line2" == *"tks: 100k(+50k)"* ]]; then
+        pass_test "T09: statusline shows (+Sk) inline annotation when subagent_tokens > 0"
     else
-        fail_test "T09: statusline missing Σ annotation" "line2=$line2"
+        fail_test "T09: statusline missing (+Sk) annotation" "line2=$line2"
     fi
 }
 
 test_statusline_grand_total_correct() {
     run_test
-    # 160k+40k=200k session tokens + 145k subagent = 345k grand total
-    local cache='{"dirty":0,"worktrees":0,"updated":0,"agents_active":0,"subagent_tokens":145000,"lifetime_cost":0}'
+    # 160k+40k=200k session tokens + 145k subagent + 200k lifetime past sessions = Σ545k
+    # Σ segment only shows when past-session lifetime_tokens > 0
+    local cache='{"dirty":0,"worktrees":0,"updated":0,"agents_active":0,"subagent_tokens":145000,"lifetime_cost":0,"lifetime_tokens":200000}'
 
     local line2
     line2=$(run_statusline_with_cache "$cache" 160000 40000 | tail -1 | strip_ansi)
 
-    # 200k session + 145k subagent = 345k grand total
-    if [[ "$line2" == *"Σ345k"* ]]; then
-        pass_test "T10: statusline grand total correct (200k + 145k = Σ345k)"
+    # 200k session + 145k subagent + 200k lifetime = 545k grand total
+    if [[ "$line2" == *"Σ545k"* ]]; then
+        pass_test "T10: statusline grand total correct (200k + 145k + 200k = Σ545k)"
     else
-        fail_test "T10: statusline grand total wrong" "line2=$line2 (expected Σ345k)"
+        fail_test "T10: statusline grand total wrong" "line2=$line2 (expected Σ545k)"
+    fi
+}
+
+# ============================================================================
+# T11: Cold start full-schema cache creation
+# ============================================================================
+
+test_cold_start_full_schema_cache() {
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    local transcript="$tmpdir/transcript.jsonl"
+
+    cat > "$transcript" <<'JSONL'
+{"type":"assistant","message":{"usage":{"input_tokens":2000,"output_tokens":500,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+JSONL
+
+    local session_id="test-schema-$$"
+    mkdir -p "$tmpdir/.claude"
+    # NO existing .statusline-cache — cold start
+
+    local payload
+    payload=$(printf '{"agent_type":"planner","agent_transcript_path":"%s"}' "$transcript")
+
+    bash -c "
+        export CLAUDE_SESSION_ID='$session_id'
+        export PROJECT_ROOT='$tmpdir'
+        printf '%s' '$payload' | bash '$HOOK_DIR/track-agent-tokens.sh'
+    " 2>/dev/null || true
+
+    local cache_file="$tmpdir/.claude/.statusline-cache"
+    local ok=true
+    if [[ ! -f "$cache_file" ]]; then
+        rm -rf "$tmpdir"
+        fail_test "T11: cold start cache not created" "file does not exist"
+        return
+    fi
+
+    # Verify all 14 fields are present
+    local fields=("dirty" "worktrees" "agents_active" "agents_types"
+                  "todo_project" "todo_global" "lifetime_cost" "lifetime_tokens"
+                  "subagent_tokens" "initiative" "phase"
+                  "active_initiatives" "total_phases" "updated")
+    local missing=""
+    for f in "${fields[@]}"; do
+        if ! jq -e "has(\"$f\")" "$cache_file" >/dev/null 2>&1; then
+            missing+=" $f"
+            ok=false
+        fi
+    done
+
+    local st
+    st=$(jq -r '.subagent_tokens // 0' "$cache_file" 2>/dev/null)
+
+    rm -rf "$tmpdir"
+
+    if $ok && [[ "$st" -eq 2500 ]]; then
+        pass_test "T11: cold start creates full-schema cache (all 14 fields, subagent_tokens=2500)"
+    else
+        fail_test "T11: cold start cache schema incomplete" "missing=[$missing] subagent_tokens=$st (want 2500)"
     fi
 }
 
@@ -395,6 +457,9 @@ echo ""
 test_statusline_plain_tokens_no_subagent
 test_statusline_sigma_display_with_subagent
 test_statusline_grand_total_correct
+
+echo ""
+test_cold_start_full_schema_cache
 
 echo ""
 echo "=== Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed ==="

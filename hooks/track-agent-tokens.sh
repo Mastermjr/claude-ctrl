@@ -111,16 +111,21 @@ fi
 # Merge subagent_tokens into existing cache (create cache if missing)
 if [[ -f "$CACHE_FILE" ]]; then
     TMP_CACHE="${CACHE_FILE}.tmp.$$"
-    if jq --argjson st "$CUMULATIVE_TOTAL" '. + {subagent_tokens: $st}' "$CACHE_FILE" \
+    if jq --argjson st "$CUMULATIVE_TOTAL" --arg ts "$(date +%s)" \
+        '. + {subagent_tokens: $st, updated: ($ts | tonumber)}' "$CACHE_FILE" \
         > "$TMP_CACHE" 2>/dev/null; then
         mv "$TMP_CACHE" "$CACHE_FILE"
     else
         rm -f "$TMP_CACHE"
     fi
 else
-    # No existing cache — write minimal object so statusline.sh can read it
-    jq -n --argjson st "$CUMULATIVE_TOTAL" '{subagent_tokens: $st}' \
-        > "$CACHE_FILE" 2>/dev/null || true
+    # No existing cache — write full schema so statusline.sh has all fields
+    jq -n --argjson st "$CUMULATIVE_TOTAL" --arg ts "$(date +%s)" '{
+      dirty: 0, worktrees: 0, agents_active: 0, agents_types: "",
+      todo_project: 0, todo_global: 0, lifetime_cost: 0, lifetime_tokens: 0,
+      subagent_tokens: $st, initiative: "", phase: "",
+      active_initiatives: 0, total_phases: 0, updated: ($ts | tonumber)
+    }' > "$CACHE_FILE" 2>/dev/null || true
 fi
 
 # --- Emit informational output ---

@@ -250,6 +250,33 @@ truncate_ansi() {
   }'
 }
 
+# ansi_visible_width str — count visible characters, skipping ANSI escape sequences.
+# @decision DEC-RESPONSIVE-001
+# @title Pure-bash ANSI width counter for responsive segment dropping
+# @status accepted
+# @rationale Responsive layout needs per-segment width to decide which segments to drop.
+# A sed-subshell per segment adds ~5ms each; with 8 segments on Line 2 that's 40ms.
+# Pure-bash character loop adds ~0ms. The function sets the result in the global
+# _AVW (ansi_visible_width result) to avoid a subshell. Caller must read _AVW
+# immediately after calling ansi_visible_width because it is overwritten on next call.
+# Bash 3.2 compatible: no associative arrays, no namerefs.
+_AVW=0
+ansi_visible_width() {
+  local s="$1"
+  local n=${#s} i in_esc=0 w=0 c
+  for (( i=0; i<n; i++ )); do
+    c="${s:$i:1}"
+    if (( in_esc )); then
+      [[ "$c" == "m" ]] && in_esc=0
+    elif [[ "$c" == $'\033' ]]; then
+      in_esc=1
+    else
+      (( w++ )) || true
+    fi
+  done
+  _AVW=$w
+}
+
 # ---------------------------------------------------------------------------
 # Cache efficiency: cache_read / (input + cache_read + cache_create) * 100
 # @decision DEC-CACHE-RESEARCH-001
@@ -319,42 +346,59 @@ if [[ -n "$cache_initiative" ]]; then
   line0=$(printf '\033[1;36m%s\033[0m' "$_banner")
 fi
 
+# Terminal width — must be resolved before the responsive layout sections below.
+term_w="${COLUMNS:-250}"
+
 # ---------------------------------------------------------------------------
 # LINE 2 (project): Workspace + git + agents + todos
-# (model has moved to the metrics line — see LINE 1 below)
+# Responsive layout: build segments as parallel arrays, drop lowest priority
+# segments first when total width exceeds terminal width.
+#
+# Priority table (lower number = higher priority, dropped last):
+#   1 = workspace (always shown)
+#   2 = dirty: N
+#   3 = wt: N
+#   4 = agents: N (types)
+#   5 = todos: Np Ng  (drops first)
 # ---------------------------------------------------------------------------
 
-# Cluster A: Workspace only (model moved to metrics line)
-line1=$(printf '\033[1;36m%s\033[0m' "$workspace")
+# Build project line segments into parallel arrays (bash 3.2 compat, no namerefs)
+_p1_count=0
 
-# Cluster B: Git state — dirty: N  wt: N (combined segment, only if either > 0)
-if (( cache_dirty > 0 || cache_wt > 0 )); then
-  git_parts=""
-  if (( cache_dirty > 0 )); then
-    git_parts=$(printf '\033[31mdirty: %d\033[0m' "$cache_dirty")
-  fi
-  if (( cache_wt > 0 )); then
-    wt_str=$(printf '\033[36mwt: %d\033[0m' "$cache_wt")
-    if [[ -n "$git_parts" ]]; then
-      git_parts=$(printf '%s  %s' "$git_parts" "$wt_str")
-    else
-      git_parts="$wt_str"
-    fi
-  fi
-  line1=$(printf '%s %b %s' "$line1" "$sep" "$git_parts")
+# --- Segment P1.1: workspace (priority 1) ---
+_s=$(printf '\033[1;36m%s\033[0m' "$workspace")
+ansi_visible_width "$_s"; _p1_w_0=$_AVW; _p1_t_0="$_s"; _p1_p_0=1
+_p1_count=1
+
+# --- Segment P1.2: dirty (priority 2, conditional) ---
+_p1_t_1=""; _p1_w_1=0; _p1_p_1=2
+if (( cache_dirty > 0 )); then
+  _s=$(printf '\033[31mdirty: %d\033[0m' "$cache_dirty")
+  ansi_visible_width "$_s"; _p1_w_1=$_AVW; _p1_t_1="$_s"
 fi
+_p1_count=2
 
-# Cluster C: Agents — agents: N (type1,type2), only if active > 0
+# --- Segment P1.3: wt (priority 3, conditional) ---
+_p1_t_2=""; _p1_w_2=0; _p1_p_2=3
+if (( cache_wt > 0 )); then
+  _s=$(printf '\033[36mwt: %d\033[0m' "$cache_wt")
+  ansi_visible_width "$_s"; _p1_w_2=$_AVW; _p1_t_2="$_s"
+fi
+_p1_count=3
+
+# --- Segment P1.4: agents (priority 4, conditional) ---
+_p1_t_3=""; _p1_w_3=0; _p1_p_3=4
 if (( cache_agents > 0 )); then
   if [[ -n "$cache_agents_types" ]]; then
-    line1=$(printf '%s %b \033[33magents: %d (%s)\033[0m' \
-      "$line1" "$sep" "$cache_agents" "$cache_agents_types")
+    _s=$(printf '\033[33magents: %d (%s)\033[0m' "$cache_agents" "$cache_agents_types")
   else
-    line1=$(printf '%s %b \033[33magents: %d\033[0m' "$line1" "$sep" "$cache_agents")
+    _s=$(printf '\033[33magents: %d\033[0m' "$cache_agents")
   fi
+  ansi_visible_width "$_s"; _p1_w_3=$_AVW; _p1_t_3="$_s"
 fi
+_p1_count=4
 
-# Cluster D: Todos — split display or legacy fallback
+# --- Segment P1.5: todos (priority 5, drops first) ---
 # @decision DEC-TODO-SPLIT-003
 # @title Todo segment: split project/global display with legacy fallback
 # @status accepted
@@ -362,33 +406,86 @@ fi
 # "todos: 3p 7g" (both), "todos: 3p" (project only), "todos: 7g" (global only).
 # 'p' and 'g' suffixes are dim; counts are magenta. When cache fields are absent
 # (-1 sentinel), fall back to legacy .todo-count single number.
+_p1_t_4=""; _p1_w_4=0; _p1_p_4=5
 if (( cache_todo_project >= 0 || cache_todo_global >= 0 )); then
-  # New split mode — use cache fields
   _tp=$(( cache_todo_project > 0 ? cache_todo_project : 0 ))
   _tg=$(( cache_todo_global > 0 ? cache_todo_global : 0 ))
   if (( _tp > 0 && _tg > 0 )); then
-    line1=$(printf '%s %b \033[35mtodos: %d\033[2mp\033[0m\033[35m %d\033[2mg\033[0m' \
-      "$line1" "$sep" "$_tp" "$_tg")
+    _s=$(printf '\033[35mtodos: %d\033[2mp\033[0m\033[35m %d\033[2mg\033[0m' "$_tp" "$_tg")
+    ansi_visible_width "$_s"; _p1_w_4=$_AVW; _p1_t_4="$_s"
   elif (( _tp > 0 )); then
-    line1=$(printf '%s %b \033[35mtodos: %d\033[2mp\033[0m' "$line1" "$sep" "$_tp")
+    _s=$(printf '\033[35mtodos: %d\033[2mp\033[0m' "$_tp")
+    ansi_visible_width "$_s"; _p1_w_4=$_AVW; _p1_t_4="$_s"
   elif (( _tg > 0 )); then
-    line1=$(printf '%s %b \033[35mtodos: %d\033[2mg\033[0m' "$line1" "$sep" "$_tg")
+    _s=$(printf '\033[35mtodos: %d\033[2mg\033[0m' "$_tg")
+    ansi_visible_width "$_s"; _p1_w_4=$_AVW; _p1_t_4="$_s"
   fi
-  # Both 0: no segment shown
 elif (( todo_count > 0 )); then
-  # Legacy fallback: single count from .todo-count
-  line1=$(printf '%s %b \033[35mtodos: %d\033[0m' "$line1" "$sep" "$todo_count")
+  _s=$(printf '\033[35mtodos: %d\033[0m' "$todo_count")
+  ansi_visible_width "$_s"; _p1_w_4=$_AVW; _p1_t_4="$_s"
 fi
+_p1_count=5
+
+# --- Responsive drop loop for Line 2 ---
+# Count visible segments (non-empty text), compute total width with separators.
+# Separator " │ " = 3 visible chars. Drop from priority 5 down until it fits.
+_p1_drop_0=0; _p1_drop_1=0; _p1_drop_2=0; _p1_drop_3=0; _p1_drop_4=0
+
+_compute_p1_width() {
+  local total=0 seg_count=0
+  [[ $_p1_drop_0 -eq 0 && -n "$_p1_t_0" ]] && total=$(( total + _p1_w_0 )) && (( seg_count++ )) || true
+  [[ $_p1_drop_1 -eq 0 && -n "$_p1_t_1" ]] && total=$(( total + _p1_w_1 )) && (( seg_count++ )) || true
+  [[ $_p1_drop_2 -eq 0 && -n "$_p1_t_2" ]] && total=$(( total + _p1_w_2 )) && (( seg_count++ )) || true
+  [[ $_p1_drop_3 -eq 0 && -n "$_p1_t_3" ]] && total=$(( total + _p1_w_3 )) && (( seg_count++ )) || true
+  [[ $_p1_drop_4 -eq 0 && -n "$_p1_t_4" ]] && total=$(( total + _p1_w_4 )) && (( seg_count++ )) || true
+  # Each separator between adjacent segments is 3 chars
+  (( seg_count > 1 )) && total=$(( total + (seg_count - 1) * 3 )) || true
+  _P1_TOTAL=$total
+}
+
+_P1_TOTAL=0
+_compute_p1_width
+# Drop from max priority (5) down to 2; never drop workspace (priority 1)
+# Use [[ ]] for string non-empty check, (( )) for numeric comparison
+if (( _P1_TOTAL > term_w )) && [[ -n "$_p1_t_4" ]]; then _p1_drop_4=1; _compute_p1_width; fi
+if (( _P1_TOTAL > term_w )) && [[ -n "$_p1_t_3" ]]; then _p1_drop_3=1; _compute_p1_width; fi
+if (( _P1_TOTAL > term_w )) && [[ -n "$_p1_t_2" ]]; then _p1_drop_2=1; _compute_p1_width; fi
+if (( _P1_TOTAL > term_w )) && [[ -n "$_p1_t_1" ]]; then _p1_drop_1=1; _compute_p1_width; fi
+
+# Assemble Line 2 from remaining segments
+line1=""
+_p1_first=1
+_append_p1_seg() {
+  local txt="$1"
+  [[ -z "$txt" ]] && return
+  if (( _p1_first )); then
+    line1="$txt"
+    _p1_first=0
+  else
+    line1=$(printf '%s %b %s' "$line1" "$sep" "$txt")
+  fi
+}
+[[ $_p1_drop_0 -eq 0 ]] && _append_p1_seg "$_p1_t_0"
+[[ $_p1_drop_1 -eq 0 ]] && _append_p1_seg "$_p1_t_1"
+[[ $_p1_drop_2 -eq 0 ]] && _append_p1_seg "$_p1_t_2"
+[[ $_p1_drop_3 -eq 0 ]] && _append_p1_seg "$_p1_t_3"
+[[ $_p1_drop_4 -eq 0 ]] && _append_p1_seg "$_p1_t_4"
 
 # ---------------------------------------------------------------------------
 # LINE 1 (metrics): Model + context bar + tokens + cost + duration + lines + cache
+# Responsive layout: build segments as parallel arrays, drop lowest priority
+# segments first when total width exceeds terminal width.
+#
+# Priority table (lower number = higher priority, dropped last):
+#   1 = [context bar] N%     (drives user behavior)
+#   2 = tks: Nk(+Sk)        (token consumption)
+#   3 = ~$cost (Σ~$total)   (cost with lifetime)
+#   4 = ΣNk lifetime tokens  (cumulative across sessions)
+#   5 = model name           (usually known, nice-to-have)
+#   6 = cache N%             (efficiency metric)
+#   7 = duration             (session time)
+#   8 = +N/-N lines          (drops first)
 # ---------------------------------------------------------------------------
-
-# Start metrics line with model display name (moved here from project line)
-line2=$(printf '\033[2m%s\033[0m' "$model")
-
-# Context bar (always shown)
-line2=$(printf '%s %b %s' "$line2" "$sep" "$(build_context_bar "$ctx_pct")")
 
 # Token count segment with subagent breakdown and project lifetime
 # @decision DEC-LIFETIME-TOKENS-001
@@ -414,6 +511,11 @@ cache_subagent_tokens_int=$(( ${cache_subagent_tokens_int:-0} ))
 cache_lifetime_tokens_int="${cache_lifetime_tokens%.*}"
 cache_lifetime_tokens_int=$(( ${cache_lifetime_tokens_int:-0} ))
 
+# Persist main session token count for session-end.sh to read as fallback.
+if [[ -n "${CACHE_FILE:-}" ]]; then
+  printf '%d' "$total_tokens_int" > "${CACHE_FILE%/*}/.session-main-tokens" 2>/dev/null || true
+fi
+
 # Build token display: tks: Nk  or  tks: Nk(+Sk)
 if (( cache_subagent_tokens_int > 0 )); then
   subagent_str=$(format_tokens "$cache_subagent_tokens_int")
@@ -421,69 +523,137 @@ if (( cache_subagent_tokens_int > 0 )); then
 else
   tokens_display=$(printf '\033[%smtks: %s\033[0m' "$tokens_color" "$tokens_str")
 fi
-line2=$(printf '%s %b %s' "$line2" "$sep" "$tokens_display")
 
-# Project lifetime total as separate segment: Σ750k
-# Only shown when there are past sessions (grand total > current session total).
+# Compute lifetime token grand total segment
 _token_grand_total=$(( cache_lifetime_tokens_int + total_tokens_int + cache_subagent_tokens_int ))
+grand_total_display=""
 if (( _token_grand_total > total_tokens_int + cache_subagent_tokens_int && _token_grand_total > 0 )); then
   grand_total_str=$(format_tokens "$_token_grand_total")
-  line2=$(printf '%s %b \033[2mΣ%s\033[0m' "$line2" "$sep" "$grand_total_str")
+  grand_total_display=$(printf '\033[2mΣ%s\033[0m' "$grand_total_str")
 fi
 
-# Persist main session token count for session-end.sh to read as fallback.
-# .session-main-tokens lets session-end capture the most recent token count even
-# when the session-end JSON doesn't include context_window token fields.
-# Written to the same .claude dir as the cache file, cleaned up by session-end.sh.
-if [[ -n "${CACHE_FILE:-}" ]]; then
-  printf '%d' "$total_tokens_int" > "${CACHE_FILE%/*}/.session-main-tokens" 2>/dev/null || true
-fi
-
-# Cost (always shown, ~$X.XX, green <$1, yellow $1-5, red >$5)
-# If lifetime_cost > 0, show as: ~$0.53 (Σ~$12.40)
+# Build cost display
 # @decision DEC-LIFETIME-COST-002
 # @title Display lifetime cost as Σ annotation next to session cost
 # @status accepted
 # @rationale Appending lifetime cost as "(Σ~$N.NN)" after the session cost keeps the
 # display compact and contextual — the user sees session cost at a glance and can
 # recognize the running total from the Σ symbol. Dim rendering avoids visual noise.
-# Σ = past sessions (cache_lifetime_cost) + current session (cost_usd), so the grand
-# total is always accurate and never lower than the session cost shown beside it.
-cost_int=${cost_usd%.*}  # integer part for threshold comparison
+cost_int=${cost_usd%.*}
 if   (( cost_int >= 5 )); then cost_color="31"
 elif (( cost_int >= 1 )); then cost_color="33"
 else                           cost_color="32"
 fi
 cost_display=$(printf '\033[%sm~$%.2f\033[0m' "$cost_color" "$cost_usd")
-# Append lifetime sum if > 0: Σ = past sessions + current session
 _lifetime_int="${cache_lifetime_cost%.*}"
 _lifetime_int="${_lifetime_int:-0}"
 if (( _lifetime_int > 0 )) 2>/dev/null; then
   _grand_cost=$(awk "BEGIN {printf \"%.2f\", $cache_lifetime_cost + $cost_usd}")
   cost_display=$(printf '%s \033[2m(Σ~$%s)\033[0m' "$cost_display" "$_grand_cost")
 fi
-line2=$(printf '%s %b %s' "$line2" "$sep" "$cost_display")
 
-# Duration (always shown, dim)
-duration_display=$(format_duration "$duration_ms")
-line2=$(printf '%s %b \033[2m%s\033[0m' "$line2" "$sep" "$duration_display")
-
-# Lines changed (conditional: only if added + removed > 0)
-total_lines=$(( lines_add + lines_rm ))
-if (( total_lines > 0 )); then
-  lines_display=$(printf '\033[32m+%d\033[0m/\033[31m-%d\033[0m' "$lines_add" "$lines_rm")
-  line2=$(printf '%s %b %s' "$line2" "$sep" "$lines_display")
-fi
-
-# Cache efficiency (conditional: only if cache tokens > 0)
+# Cache efficiency display
+cache_display=""
 if (( cache_efficiency >= 0 )); then
   if   (( cache_efficiency >= 60 )); then cache_color="32"
   elif (( cache_efficiency >= 30 )); then cache_color="33"
   else                                    cache_color="2"
   fi
-  line2=$(printf '%s %b \033[%smcache %d%%\033[0m' \
-    "$line2" "$sep" "$cache_color" "$cache_efficiency")
+  cache_display=$(printf '\033[%smcache %d%%\033[0m' "$cache_color" "$cache_efficiency")
 fi
+
+# Lines changed display
+lines_display=""
+total_lines=$(( lines_add + lines_rm ))
+if (( total_lines > 0 )); then
+  lines_display=$(printf '\033[32m+%d\033[0m/\033[31m-%d\033[0m' "$lines_add" "$lines_rm")
+fi
+
+# Duration display
+duration_display=$(printf '\033[2m%s\033[0m' "$(format_duration "$duration_ms")")
+
+# Build metrics line segments (priorities 1-8)
+# P2.0: context bar (priority 1)
+_m0=$(build_context_bar "$ctx_pct")
+ansi_visible_width "$_m0"; _mw0=$_AVW; _mp0=1
+
+# P2.1: model name (priority 5)
+_m1=$(printf '\033[2m%s\033[0m' "$model")
+ansi_visible_width "$_m1"; _mw1=$_AVW; _mp1=5
+
+# P2.2: tks: Nk(+Sk) (priority 2)
+_m2="$tokens_display"
+ansi_visible_width "$_m2"; _mw2=$_AVW; _mp2=2
+
+# P2.3: ~$cost (Σ~$total) (priority 3)
+_m3="$cost_display"
+ansi_visible_width "$_m3"; _mw3=$_AVW; _mp3=3
+
+# P2.4: ΣNk lifetime tokens (priority 4, conditional)
+_m4="$grand_total_display"
+ansi_visible_width "$_m4"; _mw4=$_AVW; _mp4=4
+
+# P2.5: cache N% (priority 6, conditional)
+_m5="$cache_display"
+ansi_visible_width "$_m5"; _mw5=$_AVW; _mp5=6
+
+# P2.6: duration (priority 7)
+_m6="$duration_display"
+ansi_visible_width "$_m6"; _mw6=$_AVW; _mp6=7
+
+# P2.7: +N/-N lines (priority 8, drops first, conditional)
+_m7="$lines_display"
+ansi_visible_width "$_m7"; _mw7=$_AVW; _mp7=8
+
+# Responsive drop loop for Line 1 (metrics)
+_md0=0; _md1=0; _md2=0; _md3=0; _md4=0; _md5=0; _md6=0; _md7=0
+
+_compute_m_width() {
+  local total=0 seg_count=0
+  [[ $_md0 -eq 0 && -n "$_m0" ]] && total=$(( total + _mw0 )) && (( seg_count++ )) || true
+  [[ $_md1 -eq 0 && -n "$_m1" ]] && total=$(( total + _mw1 )) && (( seg_count++ )) || true
+  [[ $_md2 -eq 0 && -n "$_m2" ]] && total=$(( total + _mw2 )) && (( seg_count++ )) || true
+  [[ $_md3 -eq 0 && -n "$_m3" ]] && total=$(( total + _mw3 )) && (( seg_count++ )) || true
+  [[ $_md4 -eq 0 && -n "$_m4" ]] && total=$(( total + _mw4 )) && (( seg_count++ )) || true
+  [[ $_md5 -eq 0 && -n "$_m5" ]] && total=$(( total + _mw5 )) && (( seg_count++ )) || true
+  [[ $_md6 -eq 0 && -n "$_m6" ]] && total=$(( total + _mw6 )) && (( seg_count++ )) || true
+  [[ $_md7 -eq 0 && -n "$_m7" ]] && total=$(( total + _mw7 )) && (( seg_count++ )) || true
+  (( seg_count > 1 )) && total=$(( total + (seg_count - 1) * 3 )) || true
+  _M_TOTAL=$total
+}
+
+_M_TOTAL=0
+_compute_m_width
+# Drop from priority 8 down to 1 (context bar always stays)
+if (( _M_TOTAL > term_w && _mw7 > 0 )); then _md7=1; _compute_m_width; fi
+if (( _M_TOTAL > term_w && _mw6 > 0 )); then _md6=1; _compute_m_width; fi
+if (( _M_TOTAL > term_w && _mw5 > 0 )); then _md5=1; _compute_m_width; fi
+if (( _M_TOTAL > term_w && _mw4 > 0 )); then _md4=1; _compute_m_width; fi
+if (( _M_TOTAL > term_w && _mw1 > 0 )); then _md1=1; _compute_m_width; fi
+if (( _M_TOTAL > term_w && _mw3 > 0 )); then _md3=1; _compute_m_width; fi
+if (( _M_TOTAL > term_w && _mw2 > 0 )); then _md2=1; _compute_m_width; fi
+
+# Assemble Line 1 from remaining segments (display order: context bar, tks, cost, Σ, model, cache, duration, lines)
+line2=""
+_m_first=1
+_append_m_seg() {
+  local txt="$1"
+  [[ -z "$txt" ]] && return
+  if (( _m_first )); then
+    line2="$txt"
+    _m_first=0
+  else
+    line2=$(printf '%s %b %s' "$line2" "$sep" "$txt")
+  fi
+}
+[[ $_md0 -eq 0 ]] && _append_m_seg "$_m0"
+[[ $_md2 -eq 0 ]] && _append_m_seg "$_m2"
+[[ $_md3 -eq 0 ]] && _append_m_seg "$_m3"
+[[ $_md4 -eq 0 ]] && _append_m_seg "$_m4"
+[[ $_md1 -eq 0 ]] && _append_m_seg "$_m1"
+[[ $_md5 -eq 0 ]] && _append_m_seg "$_m5"
+[[ $_md6 -eq 0 ]] && _append_m_seg "$_m6"
+[[ $_md7 -eq 0 ]] && _append_m_seg "$_m7"
 
 # ---------------------------------------------------------------------------
 # Output: 3-line layout — each line independently truncated to terminal width.
@@ -500,7 +670,6 @@ fi
 # renders at the bottom as a visual anchor — bold cyan so it reads as a banner,
 # not inline noise. When no active initiative exists, only lines 1+2 are emitted.
 # ---------------------------------------------------------------------------
-term_w="${COLUMNS:-250}"
 
 # Line 1: project context (workspace + git + agents + todos)
 truncate_ansi "$line1" "$term_w"
