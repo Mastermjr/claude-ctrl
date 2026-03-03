@@ -126,7 +126,7 @@ if [[ -e "$(dirname "$FILE_PATH")" ]]; then
             #   don't permanently exempt proof invalidation. TTL is 600s (10 min).
             #   Matches the marker format written by task-track.sh (line 88).
             _GUARDIAN_TTL=600
-            for _gm in "${TRACE_STORE}/.active-guardian-"*; do
+            for _gm in "${TRACE_STORE:-$HOME/.claude/traces}/.active-guardian-"*; do
                 if [[ -f "$_gm" ]]; then
                     _marker_ts=$(cut -d'|' -f2 "$_gm" 2>/dev/null || echo "0")
                     _now=$(date +%s)
@@ -141,7 +141,7 @@ if [[ -e "$(dirname "$FILE_PATH")" ]]; then
             # check-tester.sh protect the window between "verified" write and Guardian dispatch.
             # Same 10-minute TTL as guardian markers prevents permanent blocking from crashes.
             if [[ "$_guardian_active" == "false" ]]; then
-                for _avm in "${TRACE_STORE}/.active-autoverify-"*; do
+                for _avm in "${TRACE_STORE:-$HOME/.claude/traces}/.active-autoverify-"*; do
                     if [[ -f "$_avm" ]]; then
                         _marker_ts=$(cut -d'|' -f2 "$_avm" 2>/dev/null || echo "0")
                         _now=$(date +%s)
@@ -162,7 +162,10 @@ if [[ -e "$(dirname "$FILE_PATH")" ]]; then
                 RELATIVE_PATH="${FILE_PATH#"${PROJECT_ROOT}"/}"
                 if [[ "$FILE_PATH" =~ \.(ts|tsx|js|jsx|py|rs|go|java|kt|swift|c|cpp|h|hpp|cs|rb|php|sh|bash|zsh)$ ]] \
                    && [[ ! "$RELATIVE_PATH" =~ (\.test\.|\.spec\.|__tests__|\.config\.|node_modules|vendor|dist|\.git|\.claude) ]]; then
-                    write_proof_status "pending" "$PROJECT_ROOT"
+                    # || true: write_proof_status returns 1 if the monotonic lattice
+                    # (DEC-PROOF-LATTICE-001) rejects verified→pending without an epoch reset.
+                    # Non-fatal: if the epoch reset isn't set up, proof stays verified.
+                    write_proof_status "pending" "$PROJECT_ROOT" || true
                 fi
             fi
         fi

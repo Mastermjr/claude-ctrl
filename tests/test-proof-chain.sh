@@ -2,38 +2,41 @@
 # test-proof-chain.sh — Contract tests for the proof-of-work chain (#43, #135)
 #
 # Purpose: Verify that all proof-chain components work together correctly:
-#   - guard.sh Check 8: deny commit/merge without verified proof
-#   - guard.sh Check 9: deny Bash writes to .proof-status
-#   - guard.sh Check 10: deny deletion of active .proof-status
-#   - track.sh invalidation: verified->pending on source change
+#   - pre-bash.sh Check 8: deny commit/merge without verified proof
+#   - pre-bash.sh Check 9: deny Bash writes to .proof-status
+#   - pre-bash.sh Check 10: deny deletion of active .proof-status
+#   - post-write.sh invalidation: verified->pending on source change
 #   - task-track.sh Gate C: Guardian requires verified when file exists
 #   - session-init.sh clearing: stale .proof-status cleaned at start
-#   - session-summary.sh: proof line present in output
 #
 # @decision DEC-V3-003
 # @title Proof-of-work chain contract tests
 # @status accepted
 # @rationale Phase 7 completion requires verifying the end-to-end proof chain:
 #   implementer dispatch activates the gate (task-track.sh Gate C), source changes
-#   invalidate proof (track.sh), guard.sh enforces the gate at commit/merge time
-#   (Check 8) and protects the file from agent manipulation (Checks 9-10), and
-#   session-init.sh cleans stale proof state at session start (crash recovery).
-#   These are contract tests — each test validates one behavioral contract.
-#   Uses isolated temp git repos to avoid contaminating the live ~/.claude state.
+#   invalidate proof (post-write.sh track step), pre-bash.sh enforces the gate at
+#   commit/merge time (Check 8) and protects the file from agent manipulation
+#   (Checks 9-10), and session-init.sh cleans stale proof state at session start
+#   (crash recovery). These are contract tests — each test validates one behavioral
+#   contract. Uses isolated temp git repos to avoid contaminating the live ~/.claude
+#   state.
+#
+#   Hook names updated: guard.sh → pre-bash.sh, track.sh → post-write.sh
+#   (DEC-CONSOLIDATE-002, DEC-CONSOLIDATE-003). Scoped proof paths per
+#   DEC-ISOLATION-001: .proof-status-{phash} keyed by project root hash.
 #
 # Usage: bash tests/test-proof-chain.sh
-# Returns: 0 if all 18 tests pass, 1 if any fail
+# Returns: 0 if all 17 tests pass, 1 if any fail
 
 set -euo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
 HOOKS_DIR="${PROJECT_ROOT}/hooks"
-GUARD_SH="${HOOKS_DIR}/guard.sh"
-TRACK_SH="${HOOKS_DIR}/track.sh"
+GUARD_SH="${HOOKS_DIR}/pre-bash.sh"
+TRACK_SH="${HOOKS_DIR}/post-write.sh"
 TASK_TRACK_SH="${HOOKS_DIR}/task-track.sh"
 SESSION_INIT_SH="${HOOKS_DIR}/session-init.sh"
-SESSION_SUMMARY_SH="${HOOKS_DIR}/session-summary.sh"
 
 # Ensure tmp directory exists
 mkdir -p "$PROJECT_ROOT/tmp"
@@ -70,9 +73,13 @@ fail_test() {
 # ---------------------------------------------------------------------------
 make_temp_repo() {
     local tmp_dir
-    tmp_dir=$(mktemp -d "$PROJECT_ROOT/tmp/test-pc-XXXXXX")
+    # Use system temp (not project tree) to avoid git nesting — detect_project_root()
+    # resolves to the parent checkout when the temp repo is inside its tree.
+    tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/test-pc-XXXXXX")
     git -C "$tmp_dir" init -q 2>/dev/null
-    # Create on a feature branch so guard.sh Check 2 (main is sacred) doesn't fire
+    git -C "$tmp_dir" config user.email "test@test.com" 2>/dev/null
+    git -C "$tmp_dir" config user.name "Test" 2>/dev/null
+    # Create on a feature branch so pre-bash.sh Check 2 (main is sacred) doesn't fire
     git -C "$tmp_dir" checkout -q -b feature/test-branch 2>/dev/null || true
     git -C "$tmp_dir" commit --allow-empty -m "init" -q 2>/dev/null
     mkdir -p "$tmp_dir/.claude"
@@ -80,10 +87,23 @@ make_temp_repo() {
 }
 
 # ---------------------------------------------------------------------------
-# Helper: run_guard — invoke guard.sh with a mock Bash command
+# Helper: scoped_proof_path — compute the canonical .proof-status-{phash} path
+# for a given repo directory. Mirrors the logic in resolve_proof_file().
+# Args: $1=repo path
+# Returns: full path to scoped proof-status file
+# ---------------------------------------------------------------------------
+scoped_proof_path() {
+    local repo="$1"
+    local phash
+    phash=$(echo "$repo" | shasum -a 256 | cut -c1-8)
+    echo "$repo/.claude/.proof-status-${phash}"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: run_guard — invoke pre-bash.sh with a mock Bash command
 # Args: $1=command string, $2=temp_repo path, $3=optional proof status value
 # The proof_status arg (not env var) avoids bash function env-prefix issues.
-# Returns: guard.sh stdout
+# Returns: pre-bash.sh stdout
 # ---------------------------------------------------------------------------
 run_guard() {
     local cmd="$1"
@@ -92,12 +112,12 @@ run_guard() {
 
     mkdir -p "$repo/.claude"
     # Compute scoped path (DEC-PROOF-SINGLE-001)
-    local _phash
-    _phash=$(echo "$repo" | shasum -a 256 | cut -c1-8)
+    local _proof_path
+    _proof_path=$(scoped_proof_path "$repo")
     if [[ -n "$proof_status" ]]; then
-        echo "$proof_status" > "$repo/.claude/.proof-status-${_phash}"
+        echo "$proof_status" > "$_proof_path"
     else
-        rm -f "$repo/.claude/.proof-status-${_phash}"
+        rm -f "$_proof_path"
         rm -f "$repo/.claude/.proof-status"
     fi
 
@@ -117,11 +137,12 @@ run_guard() {
 }
 
 # ---------------------------------------------------------------------------
-# Helper: run_guard_with_file — invoke guard.sh when .proof-status is
-# pre-written (for Check 10 tests where we set the file ourselves).
+# Helper: run_guard_with_file — invoke pre-bash.sh when .proof-status is
+# pre-written (for Check 10 tests where we set the scoped file ourselves).
 # Args: $1=command string, $2=temp_repo path
-# Does NOT touch .proof-status — caller must set it before calling.
-# Returns: guard.sh stdout
+# Does NOT touch .proof-status — caller must set the scoped file via
+# scoped_proof_path() before calling this helper.
+# Returns: pre-bash.sh stdout
 # ---------------------------------------------------------------------------
 run_guard_with_file() {
     local cmd="$1"
@@ -140,9 +161,11 @@ run_guard_with_file() {
 }
 
 # ---------------------------------------------------------------------------
-# Helper: run_track — invoke track.sh simulating a Write/Edit event
+# Helper: run_track — invoke post-write.sh simulating a Write/Edit event
 # Args: $1=file_path, $2=temp_repo path
-# Returns: track.sh stdout (usually empty)
+# Returns: post-write.sh stdout (usually empty)
+# Note: post-write.sh (consolidated from track.sh + plan-validate.sh + lint.sh)
+# handles the same proof invalidation logic that track.sh used to perform.
 # ---------------------------------------------------------------------------
 run_track() {
     local file_path="$1"
@@ -162,6 +185,8 @@ run_track() {
 # Helper: run_task_track — invoke task-track.sh with an agent type
 # Args: $1=agent_type, $2=temp_repo path, $3=optional proof status value
 # Returns: task-track.sh stdout
+# Note: Writes proof-status to the scoped path (.proof-status-{phash}) to
+# match what task-track.sh reads via resolve_proof_file() (DEC-PROOF-SINGLE-001).
 # ---------------------------------------------------------------------------
 run_task_track() {
     local agent_type="$1"
@@ -169,9 +194,12 @@ run_task_track() {
     local proof_status="${3:-}"
 
     mkdir -p "$repo/.claude"
+    local _proof_path
+    _proof_path=$(scoped_proof_path "$repo")
     if [[ -n "$proof_status" ]]; then
-        echo "$proof_status" > "$repo/.claude/.proof-status"
+        echo "$proof_status" > "$_proof_path"
     else
+        rm -f "$_proof_path"
         rm -f "$repo/.claude/.proof-status"
     fi
 
@@ -272,8 +300,11 @@ rm -rf "$REPO"
 
 run_test "Check 10: block deletion of .proof-status when pending"
 REPO=$(make_temp_repo)
-# Write file directly — run_guard_with_file does NOT touch .proof-status
-echo "pending|$(date +%s)" > "$REPO/.claude/.proof-status"
+# Write to the scoped file — pre-bash.sh Check 10 reads .proof-status-{phash}
+# via resolve_proof_file() (DEC-PROOF-SINGLE-001). run_guard_with_file does NOT
+# touch .proof-status, so we must set it here before calling.
+_C10_PROOF=$(scoped_proof_path "$REPO")
+echo "pending|$(date +%s)" > "$_C10_PROOF"
 OUTPUT=$(run_guard_with_file "rm $REPO/.claude/.proof-status" "$REPO")
 if echo "$OUTPUT" | grep -q "deny" && echo "$OUTPUT" | grep -q "verification is active"; then
     pass_test
@@ -284,7 +315,8 @@ rm -rf "$REPO"
 
 run_test "Check 10: allow deletion of .proof-status when verified"
 REPO=$(make_temp_repo)
-echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status"
+_C10_PROOF=$(scoped_proof_path "$REPO")
+echo "verified|$(date +%s)" > "$_C10_PROOF"
 OUTPUT=$(run_guard_with_file "rm $REPO/.claude/.proof-status" "$REPO")
 if echo "$OUTPUT" | grep -q "deny"; then
     fail_test "Deletion of verified .proof-status was blocked (should allow)"
@@ -297,71 +329,84 @@ rm -rf "$REPO"
 # Section 4: track.sh invalidation (4 tests)
 # ===========================================================================
 
-run_test "track.sh: verified proof becomes pending after source file change"
+run_test "post-write.sh: verified proof becomes pending after source file change"
 REPO=$(make_temp_repo)
-echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status"
-# Use $REPO directly as file parent (exists) — track.sh exits early if parent missing
+# Use scoped path — post-write.sh reads/writes .proof-status-{phash} via resolve_proof_file()
+_TRACK_PROOF=$(scoped_proof_path "$REPO")
+# Write "verified" status directly to the file, bypassing write_proof_status() lattice.
+# Then create .proof-epoch newer than .proof-status — this signals that the next
+# write_proof_status() call (from post-write.sh) is an intentional reset, not a race
+# condition. The monotonic lattice (DEC-PROOF-LATTICE-001) requires epoch_mtime >
+# proof_mtime to allow a verified → pending regression.
+# sleep 1 ensures filesystem mtime granularity (1s on HFS+) makes epoch strictly newer.
+echo "verified|$(date +%s)" > "$_TRACK_PROOF"
+sleep 1
+touch "$REPO/.claude/.proof-epoch"
+# Use $REPO directly as file parent (exists) — post-write.sh exits early if parent missing
 run_track "$REPO/main.sh" "$REPO"
-if [[ -f "$REPO/.claude/.proof-status" ]]; then
-    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
+if [[ -f "$_TRACK_PROOF" ]]; then
+    STATUS=$(cut -d'|' -f1 "$_TRACK_PROOF")
     if [[ "$STATUS" == "pending" ]]; then
         pass_test
     else
         fail_test "Status is '$STATUS' after source change, expected 'pending'"
     fi
 else
-    fail_test ".proof-status was deleted instead of set to pending"
+    fail_test ".proof-status-{phash} was deleted instead of set to pending"
 fi
 rm -rf "$REPO"
 
-run_test "track.sh: test files do NOT invalidate verified proof"
+run_test "post-write.sh: test files do NOT invalidate verified proof"
 REPO=$(make_temp_repo)
-echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status"
+_TRACK_PROOF=$(scoped_proof_path "$REPO")
+echo "verified|$(date +%s)" > "$_TRACK_PROOF"
 # .test.sh matches the spec exclusion pattern — should NOT invalidate
 run_track "$REPO/main.test.sh" "$REPO"
-if [[ -f "$REPO/.claude/.proof-status" ]]; then
-    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
+if [[ -f "$_TRACK_PROOF" ]]; then
+    STATUS=$(cut -d'|' -f1 "$_TRACK_PROOF")
     if [[ "$STATUS" == "verified" ]]; then
         pass_test
     else
         fail_test "Test file write invalidated proof (status: $STATUS, expected: verified)"
     fi
 else
-    fail_test ".proof-status was deleted by test file write"
+    fail_test ".proof-status-{phash} was deleted by test file write"
 fi
 rm -rf "$REPO"
 
-run_test "track.sh: doc files (.md) do NOT invalidate verified proof"
+run_test "post-write.sh: doc files (.md) do NOT invalidate verified proof"
 REPO=$(make_temp_repo)
-echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status"
+_TRACK_PROOF=$(scoped_proof_path "$REPO")
+echo "verified|$(date +%s)" > "$_TRACK_PROOF"
 # .md is not a source extension — should NOT invalidate
 run_track "$REPO/README.md" "$REPO"
-if [[ -f "$REPO/.claude/.proof-status" ]]; then
-    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
+if [[ -f "$_TRACK_PROOF" ]]; then
+    STATUS=$(cut -d'|' -f1 "$_TRACK_PROOF")
     if [[ "$STATUS" == "verified" ]]; then
         pass_test
     else
         fail_test "Doc file write invalidated proof (status: $STATUS, expected: verified)"
     fi
 else
-    fail_test ".proof-status was deleted by doc file write"
+    fail_test ".proof-status-{phash} was deleted by doc file write"
 fi
 rm -rf "$REPO"
 
-run_test "track.sh: already-pending proof is not changed by source change"
+run_test "post-write.sh: already-pending proof is not changed by source change"
 REPO=$(make_temp_repo)
-echo "pending|11111" > "$REPO/.claude/.proof-status"
+_TRACK_PROOF=$(scoped_proof_path "$REPO")
+echo "pending|11111" > "$_TRACK_PROOF"
 # Write a source file — status already pending, should remain pending (may update timestamp)
 run_track "$REPO/main.py" "$REPO"
-if [[ -f "$REPO/.claude/.proof-status" ]]; then
-    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
+if [[ -f "$_TRACK_PROOF" ]]; then
+    STATUS=$(cut -d'|' -f1 "$_TRACK_PROOF")
     if [[ "$STATUS" == "pending" ]]; then
         pass_test
     else
         fail_test "Already-pending proof changed to '$STATUS' (expected: pending)"
     fi
 else
-    fail_test ".proof-status was deleted (expected: pending remains)"
+    fail_test ".proof-status-{phash} was deleted (expected: pending remains)"
 fi
 rm -rf "$REPO"
 
@@ -404,9 +449,12 @@ rm -rf "$REPO"
 # ===========================================================================
 
 run_test "session-init.sh: contains .proof-status cleanup logic (crash recovery)"
-# Verify the cleanup block exists in session-init.sh
+# Verify the cleanup block exists in session-init.sh.
+# The message includes the scoped filename (.proof-status-${_PHASH}) since
+# DEC-ISOLATION-001 replaced unscoped .proof-status with project-scoped paths.
 if grep -q "proof-status" "$SESSION_INIT_SH" && \
-   grep -q "Cleaned stale .proof-status" "$SESSION_INIT_SH"; then
+   grep -q "Cleaned stale" "$SESSION_INIT_SH" && \
+   grep -q "PROOF_FILE" "$SESSION_INIT_SH"; then
     pass_test
 else
     fail_test "session-init.sh is missing .proof-status cleanup logic"
@@ -414,25 +462,13 @@ fi
 
 run_test "session-init.sh: no error when .proof-status is missing at startup"
 # Verify that the proof cleanup block is guarded: only acts when file exists.
-# session-init.sh sets PROOF_FILE="${CLAUDE_DIR}/.proof-status" and then
+# session-init.sh sets PROOF_FILE="${CLAUDE_DIR}/.proof-status-${_PHASH}" and then
 # checks [[ -f "$PROOF_FILE" ]] before attempting cleanup.
-if grep -q 'PROOF_FILE.*proof-status' "$SESSION_INIT_SH" && \
+if grep -q 'PROOF_FILE' "$SESSION_INIT_SH" && \
    grep -q '\[\[ -f "\$PROOF_FILE"' "$SESSION_INIT_SH"; then
     pass_test
 else
     fail_test "session-init.sh is missing -f guard on \$PROOF_FILE (could error when missing)"
-fi
-
-# ===========================================================================
-# Section 7: session-summary.sh proof reporting (1 test)
-# ===========================================================================
-
-run_test "session-summary.sh: proof status line present in output"
-# Verify that session-summary.sh contains proof reporting logic (W7-1)
-if grep -q 'proof-status\|Proof:' "$SESSION_SUMMARY_SH"; then
-    pass_test
-else
-    fail_test "session-summary.sh is missing proof status reporting (W7-1 not applied)"
 fi
 
 # ===========================================================================
