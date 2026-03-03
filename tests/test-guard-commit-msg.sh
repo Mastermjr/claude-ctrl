@@ -56,7 +56,7 @@ make_input() {
 assert_deny() {
     local output="$1"
     local label="$2"
-    if echo "$output" | grep -q '"permissionDecision": "deny"'; then
+    if echo "$output" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
         if echo "$output" | grep -q "SAFETY: guard.sh crashed"; then
             fail_test "$label: deny-on-crash triggered (guard.sh crashed). Output: $output"
         else
@@ -72,7 +72,7 @@ assert_deny() {
 assert_allow() {
     local output="$1"
     local label="$2"
-    if echo "$output" | grep -q '"permissionDecision": "deny"'; then
+    if echo "$output" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then
         # Extract the reason for a useful failure message
         local reason
         reason=$(echo "$output" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["hookSpecificOutput"]["permissionDecisionReason"])' 2>/dev/null || echo "(could not parse reason)")

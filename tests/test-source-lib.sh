@@ -10,7 +10,7 @@
 # @title Tests for direct hook library sourcing
 # @status accepted
 # @rationale Tests prove three properties: (1) source-lib.sh has valid syntax,
-#   (2) sourcing it makes log and context functions available, (3) all 29 hooks
+#   (2) sourcing it makes log and context functions available, (3) all 34 hooks
 #   pass syntax validation. These replace the cache-based tests after the
 #   caching mechanism was removed due to its single-point-of-failure risk.
 
@@ -157,14 +157,15 @@ test_all_hooks_syntax() {
     local hooks_dir="${SCRIPT_DIR}/../hooks"
 
     local all_hooks=(
-        "prompt-submit.sh" "compact-preserve.sh" "mock-gate.sh" "track.sh"
-        "check-tester.sh" "session-end.sh" "checkpoint.sh" "check-implementer.sh"
-        "session-init.sh" "code-review.sh" "session-summary.sh" "test-runner.sh"
-        "branch-guard.sh" "plan-check.sh" "guard.sh" "task-track.sh"
-        "check-planner.sh" "subagent-start.sh" "check-guardian.sh" "test-gate.sh"
-        "lint.sh" "doc-gate.sh" "surface.sh"
-        "notify.sh" "plan-validate.sh" "auto-review.sh" "skill-result.sh"
-        "forward-motion.sh" "playwright-cleanup.sh"
+        "check-explore.sh" "check-general-purpose.sh" "check-guardian.sh" "check-implementer.sh"
+        "check-planner.sh" "check-tester.sh" "ci-lib.sh" "compact-preserve.sh"
+        "context-lib.sh" "core-lib.sh" "doc-lib.sh" "git-lib.sh"
+        "log.sh" "notify.sh" "plan-lib.sh" "playwright-cleanup.sh"
+        "post-task.sh" "post-write.sh" "pre-bash.sh" "pre-write.sh"
+        "prompt-submit.sh" "session-end.sh" "session-init.sh" "session-lib.sh"
+        "skill-result.sh" "source-lib.sh" "state-lib.sh" "stop.sh"
+        "subagent-start.sh" "task-track.sh" "test-runner.sh" "trace-lib.sh"
+        "track-agent-tokens.sh" "webfetch-fallback.sh"
     )
 
     for hook in "${all_hooks[@]}"; do
@@ -179,7 +180,7 @@ test_all_hooks_syntax() {
     done
 
     if [[ ${#failed_hooks[@]} -eq 0 ]]; then
-        pass_test "All 29 hooks pass bash -n syntax check"
+        pass_test "All 34 hooks pass bash -n syntax check"
     else
         fail_test "Some hooks failed syntax check" "${failed_hooks[*]}"
     fi
