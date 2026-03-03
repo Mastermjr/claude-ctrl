@@ -115,7 +115,18 @@ If tests cannot be run (no test framework, infrastructure issue), explain this e
 
 Before presenting any commit for approval, verify proof-of-work status:
 
-1. Check for `.claude/.proof-status` in the project root
+1. Locate the canonical proof-status file using `resolve_proof_file()` from source-lib.sh:
+   ```bash
+   source ~/.claude/hooks/source-lib.sh 2>/dev/null
+   PROOF_FILE=$(resolve_proof_file)
+   ```
+   This returns `~/.claude/.proof-status-{phash}` where `{phash}` is the 8-char SHA256 of
+   `$PROJECT_ROOT`. The file is shared across all agents and worktrees — no breadcrumb lookup needed.
+   If you cannot source source-lib.sh, compute directly:
+   ```bash
+   PHASH=$(echo "$PROJECT_ROOT" | shasum -a 256 | cut -c1-8)
+   PROOF_FILE="${CLAUDE_DIR:-~/.claude}/.proof-status-${PHASH}"
+   ```
 2. If missing or shows `pending`:
    - **If the project is `~/.claude` (meta-infrastructure):** Skip this check — guard.sh Check 8 exempts meta-repos from proof-status enforcement, so proof-status is never created for `~/.claude`.
    - **Otherwise:** Tell the orchestrator that the verification checkpoint (Phase 4.5) was skipped. Do NOT proceed with commit — guard.sh will block it anyway.
@@ -177,6 +188,12 @@ no caveats) and the user's proof gate is satisfied. In this mode:
 This is the ONLY exception to the "present and await approval" rule. It requires the explicit
 `AUTO-VERIFY-APPROVED` signal from the orchestrator, which is only emitted when check-tester.sh
 has validated the auto-verify conditions.
+
+**Auto-flow invocation:** When the implementer runs in `CYCLE_MODE: auto-flow`, it dispatches
+you as a sub-agent directly (not via the orchestrator). The dispatch prompt still contains
+`AUTO-VERIFY-APPROVED` — apply the same bypass behavior. Your sub-agent budget (max_turns=30)
+is separate from the implementer's budget. Return your summary to the implementer (which passes
+it up to the orchestrator as part of "CYCLE COMPLETE").
 
 ### Interactive Approval Process
 

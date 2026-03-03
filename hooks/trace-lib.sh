@@ -342,13 +342,12 @@ finalize_trace() {
     fi
 
     # Check proof status from project
-    # Prefer the local .claude/.proof-status; fall back to get_claude_dir() to
-    # handle the ~/.claude meta-repo case (avoids double-nesting ~/.claude/.claude/).
+    # Use the canonical scoped proof-status path via resolve_proof_file().
+    # This is always accessible from all agents regardless of worktree because
+    # CLAUDE_DIR (~/.claude) is shared. No fallback needed — scoped file IS canonical truth.
     local proof_status="unknown"
-    local proof_file="${project_root}/.claude/.proof-status"
-    if [[ ! -f "$proof_file" ]]; then
-        proof_file="$(get_claude_dir)/.proof-status"
-    fi
+    local proof_file
+    proof_file=$(resolve_proof_file)
     if [[ -f "$proof_file" ]]; then
         local ps
         ps=$(cut -d'|' -f1 "$proof_file")

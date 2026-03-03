@@ -3,8 +3,8 @@
 #
 # Purpose: Deterministic post-guardian validation. Checks MASTER_PLAN.md recency,
 # git cleanliness, test status, and approval-loop state after each guardian run.
-# Cleans up .proof-status after a successful commit to reset the verification cycle.
-# Advisory only (exit 0 always). Reports findings via additionalContext.
+# Cleans up the canonical .proof-status-{phash} after a successful commit to reset
+# the verification cycle. Advisory only (exit 0 always). Reports findings via additionalContext.
 #
 # Hook type: SubagentStop
 # Trigger: After any Task tool invocation that ran the guardian agent
@@ -303,31 +303,17 @@ fi
 # Check 7: CWD staleness advisory + canary write after worktree cleanup
 # When Guardian removes a worktree, the orchestrator's Bash CWD may now point to
 # a deleted directory. guard.sh Check 0.5 auto-recovers on the next command.
-# We also write a canary so Path B recovery triggers even when .cwd is absent
-# from the hook input (which is the common case — framework CWD is always valid).
+# We write a canary based on the hook's .cwd field when the worktree is detected
+# as removed (breadcrumb system removed by DEC-PROOF-BREADCRUMB-001).
 if [[ -n "$RESPONSE_TEXT" ]]; then
     HAS_WORKTREE_CLEANUP=$(echo "$RESPONSE_TEXT" | grep -iE 'worktree.*remov|removed worktree|git worktree remove|cleaned up worktree' || echo "")
     if [[ -n "$HAS_WORKTREE_CLEANUP" ]]; then
         ISSUES+=("Guardian removed a worktree. CWD recovery canary written if path confirmed deleted.")
-        # Read .active-worktree-path breadcrumb written by task-track.sh at implementer dispatch.
-        # If that path is now gone, write the canary for Check 0.5 Path B.
-        # Check session-scoped breadcrumb first (highest priority), then project-scoped, then legacy.
-        _CK7_PHASH=$(project_hash "$PROJECT_ROOT")
-        _CK7_SESSION="${CLAUDE_SESSION_ID:-}"
-        BREADCRUMB=""
-        if [[ -n "$_CK7_SESSION" && -f "${CLAUDE_DIR}/.active-worktree-path-${_CK7_SESSION}-${_CK7_PHASH}" ]]; then
-            BREADCRUMB="${CLAUDE_DIR}/.active-worktree-path-${_CK7_SESSION}-${_CK7_PHASH}"
-        elif [[ -f "${CLAUDE_DIR}/.active-worktree-path-${_CK7_PHASH}" ]]; then
-            BREADCRUMB="${CLAUDE_DIR}/.active-worktree-path-${_CK7_PHASH}"
-        elif [[ -f "${CLAUDE_DIR}/.active-worktree-path" ]]; then
-            BREADCRUMB="${CLAUDE_DIR}/.active-worktree-path"
-        fi
-        if [[ -f "$BREADCRUMB" ]]; then
-            DELETED_WT=$(head -1 "$BREADCRUMB" 2>/dev/null | tr -d '[:space:]' || echo "")
-            if [[ -n "$DELETED_WT" && ! -d "$DELETED_WT" ]]; then
-                echo "$DELETED_WT" > "$HOME/.claude/.cwd-recovery-needed" 2>/dev/null || true
-                log_info "CHECK-GUARDIAN" "CWD canary written for deleted worktree: $DELETED_WT"
-            fi
+        # Check if the hook's CWD (.cwd from hook input) no longer exists — if so, write the canary.
+        _HOOK_CWD=$(echo "$AGENT_RESPONSE" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+        if [[ -n "$_HOOK_CWD" && ! -d "$_HOOK_CWD" ]]; then
+            echo "$_HOOK_CWD" > "$HOME/.claude/.cwd-recovery-needed" 2>/dev/null || true
+            log_info "CHECK-GUARDIAN" "CWD canary written for deleted path: $_HOOK_CWD"
         fi
     fi
 fi
@@ -357,102 +343,59 @@ fi
 
 # --- Post-commit .proof-status cleanup ---
 # When Guardian successfully committed, the verification cycle is complete.
-# Clean .proof-status so it doesn't interfere with the next implementation cycle.
-# This prevents stale "verified" state from bypassing the proof gate on the next task.
-#
-# Worktree cleanup: also remove the worktree's .proof-status and the
-# .active-worktree-path breadcrumb so future implementer dispatches start clean.
+# Clean the canonical .proof-status-{phash} so it doesn't interfere with the
+# next implementation cycle. Prevents stale "verified" from bypassing the proof gate.
 if [[ -n "$RESPONSE_TEXT" ]]; then
     HAS_COMMIT=$(echo "$RESPONSE_TEXT" | grep -iE 'committed|commit.*successful|pushed|merge.*complete' || echo "")
     if [[ -n "$HAS_COMMIT" ]]; then
-        # Clean both scoped and legacy proof-status files after successful commit.
+        # Clean the canonical scoped proof-status file after successful commit.
         # @decision DEC-ISOLATION-006
-        # @title check-guardian cleans both scoped and legacy proof-status files
+        # @title check-guardian cleans the canonical scoped proof-status file
         # @status accepted
-        # @rationale The scoped file (.proof-status-{phash}) is the primary write target
-        #   since DEC-ISOLATION-001. The legacy file (.proof-status) may exist from
-        #   pre-migration sessions or dual-writes. Cleaning both ensures the gate is
-        #   fully reset for the next implementation cycle regardless of file format.
+        # @rationale Supersedes the dual scoped+legacy cleanup from DEC-ISOLATION-001.
+        #   Only the canonical .proof-status-{phash} needs cleanup since write_proof_status()
+        #   no longer writes legacy or worktree copies (DEC-PROOF-SINGLE-001).
         _PHASH=$(project_hash "$PROJECT_ROOT")
         SCOPED_PROOF="${CLAUDE_DIR}/.proof-status-${_PHASH}"
-        LEGACY_PROOF="${CLAUDE_DIR}/.proof-status"
-        for PROOF_FILE in "$SCOPED_PROOF" "$LEGACY_PROOF"; do
-            if [[ -f "$PROOF_FILE" ]]; then
-                if validate_state_file "$PROOF_FILE" 2; then
-                    PROOF_VAL=$(cut -d'|' -f1 "$PROOF_FILE" 2>/dev/null || echo "")
-                else
-                    PROOF_VAL=""  # corrupt — skip cleanup (leave for manual review)
-                fi
-                if [[ "$PROOF_VAL" == "verified" ]]; then
-                    rm -f "$PROOF_FILE"
-                    log_info "CHECK-GUARDIAN" "Cleaned $(basename "$PROOF_FILE") after successful commit"
-                fi
+        if [[ -f "$SCOPED_PROOF" ]]; then
+            if validate_state_file "$SCOPED_PROOF" 2; then
+                PROOF_VAL=$(cut -d'|' -f1 "$SCOPED_PROOF" 2>/dev/null || echo "")
+            else
+                PROOF_VAL=""  # corrupt — skip cleanup (leave for manual review)
             fi
-        done
-
-        # Clean .proof-epoch to prevent stale epoch from allowing lattice bypass in next cycle.
-        # .proof-epoch is created by write_proof_status() (log.sh) but never cleaned up,
-        # which could allow status regression on subsequent implementations.
-        rm -f "${CLAUDE_DIR}/.proof-epoch"* 2>/dev/null || true
-
-        # Check 7b: Post-merge worktree directory verification
-        # If the breadcrumb exists AND directory still exists after merge, attempt cleanup.
-        # This runs BEFORE the breadcrumb cleanup below so the breadcrumb is still readable.
-        # Check session-scoped breadcrumb first, then project-scoped, then legacy.
-        _CK7B_SESSION="${CLAUDE_SESSION_ID:-}"
-        BREADCRUMB_7B=""
-        if [[ -n "$_CK7B_SESSION" && -f "${CLAUDE_DIR}/.active-worktree-path-${_CK7B_SESSION}-${_PHASH}" ]]; then
-            BREADCRUMB_7B="${CLAUDE_DIR}/.active-worktree-path-${_CK7B_SESSION}-${_PHASH}"
-        elif [[ -f "${CLAUDE_DIR}/.active-worktree-path-${_PHASH}" ]]; then
-            BREADCRUMB_7B="${CLAUDE_DIR}/.active-worktree-path-${_PHASH}"
-        elif [[ -f "${CLAUDE_DIR}/.active-worktree-path" ]]; then
-            BREADCRUMB_7B="${CLAUDE_DIR}/.active-worktree-path"
+            if [[ "$PROOF_VAL" == "verified" ]]; then
+                rm -f "$SCOPED_PROOF"
+                log_info "CHECK-GUARDIAN" "Cleaned proof-status after successful commit"
+            fi
         fi
-        if [[ -f "$BREADCRUMB_7B" ]]; then
-            WT_PATH_7B=$(cat "$BREADCRUMB_7B" 2>/dev/null | tr -d '[:space:]')
-            if [[ -n "$WT_PATH_7B" && -d "$WT_PATH_7B" ]]; then
-                # Check for uncommitted changes before attempting cleanup
-                WT_DIRTY=$(git -C "$WT_PATH_7B" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-                if [[ "$WT_DIRTY" -gt 0 ]]; then
-                    ISSUES+=("WARN: Worktree $WT_PATH_7B still exists with $WT_DIRTY uncommitted change(s) — manual cleanup needed")
-                else
-                    # Safe to auto-clean husks via sweep --auto
-                    ROSTER_SCRIPT="$HOME/.claude/scripts/worktree-roster.sh"
-                    if [[ -x "$ROSTER_SCRIPT" ]]; then
-                        SWEEP_OUTPUT=$(WORKTREE_DIR="$(dirname "$WT_PATH_7B")" "$ROSTER_SCRIPT" sweep --auto 2>&1 || true)
-                        if [[ -n "$SWEEP_OUTPUT" ]]; then
-                            ISSUES+=("Post-merge cleanup: $SWEEP_OUTPUT")
+
+        # Check 7b: Post-merge worktree directory verification.
+        # If linked worktrees exist after merge, check for uncommitted changes and
+        # attempt cleanup via worktree-roster sweep. Uses git worktree list directly
+        # (no breadcrumb needed — breadcrumb system removed by DEC-PROOF-BREADCRUMB-001).
+        GIT_WT_COUNT=$(git -C "$PROJECT_ROOT" worktree list --porcelain 2>/dev/null \
+            | grep -c '^worktree ' || echo "0")
+        if [[ "$GIT_WT_COUNT" -gt 1 ]]; then
+            MAIN_WT=$(git -C "$PROJECT_ROOT" worktree list --porcelain 2>/dev/null \
+                | awk '/^worktree /{print $2; exit}') || MAIN_WT=""
+            while IFS= read -r _wt_path; do
+                if [[ -d "$_wt_path" ]]; then
+                    WT_DIRTY=$(git -C "$_wt_path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+                    if [[ "$WT_DIRTY" -gt 0 ]]; then
+                        ISSUES+=("WARN: Worktree $_wt_path still exists with $WT_DIRTY uncommitted change(s) — manual cleanup needed")
+                    else
+                        ROSTER_SCRIPT="$HOME/.claude/scripts/worktree-roster.sh"
+                        if [[ -x "$ROSTER_SCRIPT" ]]; then
+                            SWEEP_OUTPUT=$(WORKTREE_DIR="$(dirname "$_wt_path")" "$ROSTER_SCRIPT" sweep --auto 2>&1 || true)
+                            if [[ -n "$SWEEP_OUTPUT" ]]; then
+                                ISSUES+=("Post-merge cleanup: $SWEEP_OUTPUT")
+                            fi
                         fi
                     fi
                 fi
-            fi
+            done < <(git -C "$PROJECT_ROOT" worktree list --porcelain 2>/dev/null \
+                | awk -v main="$MAIN_WT" '/^worktree /{path=$2} path && path != main {print path}')
         fi
-
-        # Clean up all breadcrumb variants (session-scoped, project-scoped, and legacy)
-        # and their worktree .proof-status files.
-        # Session-scoped breadcrumbs use the format: .active-worktree-path-{SESSION}-{PHASH}
-        # The glob pattern below matches all session-scoped variants for this project.
-        _CK_CLEANUP_SESSION="${CLAUDE_SESSION_ID:-}"
-        _BC_LIST=()
-        # Add session-scoped breadcrumb for current session (if applicable)
-        [[ -n "$_CK_CLEANUP_SESSION" ]] && _BC_LIST+=("${CLAUDE_DIR}/.active-worktree-path-${_CK_CLEANUP_SESSION}-${_PHASH}")
-        # Add project-scoped and legacy breadcrumbs
-        _BC_LIST+=("${CLAUDE_DIR}/.active-worktree-path-${_PHASH}" "${CLAUDE_DIR}/.active-worktree-path")
-        # Also glob for any other session-scoped breadcrumbs for this phash (other sessions)
-        for _BC_GLOB in "${CLAUDE_DIR}"/.active-worktree-path-*-"${_PHASH}"; do
-            [[ -f "$_BC_GLOB" ]] || continue
-            _BC_LIST+=("$_BC_GLOB")
-        done
-        for BREADCRUMB in "${_BC_LIST[@]}"; do
-            [[ -f "$BREADCRUMB" ]] || continue
-            WORKTREE_PATH=$(cat "$BREADCRUMB" 2>/dev/null | tr -d '[:space:]')
-            if [[ -n "$WORKTREE_PATH" && -d "$WORKTREE_PATH" ]]; then
-                rm -f "${WORKTREE_PATH}/.claude/.proof-status"
-                log_info "CHECK-GUARDIAN" "Cleaned worktree .proof-status at $WORKTREE_PATH"
-            fi
-            rm -f "$BREADCRUMB"
-            log_info "CHECK-GUARDIAN" "Cleaned breadcrumb: $(basename "$BREADCRUMB")"
-        done
     fi
 fi
 

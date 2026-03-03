@@ -4,10 +4,9 @@
 # Fires before every Task tool dispatch. Extracts subagent_type
 # from tool_input and updates .subagent-tracker + .statusline-cache.
 #
-# Gate C also writes .active-worktree-path breadcrumb at implementer dispatch
-# so resolve_proof_file() (log.sh) can locate the active .proof-status in
-# worktree scenarios where tester writes its status to a different directory
-# than the orchestrator's CLAUDE_DIR.
+# Gate C activates the proof gate at implementer dispatch by writing
+# .proof-status-{phash} = needs-verification. The canonical proof-status
+# file in CLAUDE_DIR is shared across all worktrees — no breadcrumb needed.
 #
 # @decision DEC-CACHE-003
 # @title Use PreToolUse:Task as SubagentStart replacement
@@ -148,8 +147,26 @@ fi
 
 # --- Gate B: Tester requires implementer trace (advisory) ---
 # Prevents premature tester dispatch before implementer has returned.
+# Exception: CYCLE_MODE: auto-flow allows the implementer to dispatch the tester
+# as a sub-agent while the implementer trace is still active (nested dispatch pattern).
+#
+# @decision DEC-GATE-B-AUTOFLOW-001
+# @title Gate B allows tester dispatch in auto-flow (nested dispatch pattern)
+# @status accepted
+# @rationale When CYCLE_MODE: auto-flow is set, the implementer dispatches the tester
+#   as a sub-agent after its tests pass. At that moment, the implementer trace is still
+#   active — Gate B would deny the tester dispatch without this bypass. The bypass is
+#   scoped to the dispatch prompt: only tester dispatches that carry the auto-flow flag
+#   are allowed through while an implementer trace is active. All other tester dispatches
+#   remain subject to the normal Gate B enforcement (implementer must have returned first).
 declare_gate "tester-impl-gate" "Tester requires implementer to have returned" "advisory"
 if [[ "$AGENT_TYPE" == "tester" ]]; then
+    # Gate B bypass: auto-flow allows implementer to dispatch tester as sub-agent
+    _PROMPT_TEXT=$(get_field '.tool_input.prompt' 2>/dev/null || echo "")
+    if echo "$_PROMPT_TEXT" | grep -q 'CYCLE_MODE: auto-flow'; then
+        log_info "GATE-B" "auto-flow bypass: allowing tester dispatch from active implementer (nested dispatch)"
+        # Fall through — don't check implementer trace, allow dispatch
+    else
     _PHASH=$(project_hash "$PROJECT_ROOT")
     IMPL_TRACE=$(detect_active_trace "$PROJECT_ROOT" "implementer" 2>/dev/null || echo "")
     if [[ -n "$IMPL_TRACE" ]]; then
@@ -217,6 +234,8 @@ if [[ "$AGENT_TYPE" == "tester" ]]; then
         fi
     fi
 
+    fi  # end: else branch of auto-flow bypass
+
     # NOTE: tester trace initialization removed (DEC-AV-DUAL-002).
     # SubagentStart fires reliably for testers and creates the authoritative trace.
     # task-track.sh's init_trace created a competing trace with the orchestrator's
@@ -244,13 +263,12 @@ if [[ "$AGENT_TYPE" == "tester" ]]; then
 fi
 
 # --- Gate C: Implementer dispatch activates proof gate ---
-# Creates .proof-status = needs-verification when implementer is dispatched.
+# Creates .proof-status-{phash} = needs-verification when implementer is dispatched.
 # This activates Gate A — Guardian will be blocked until verification completes.
 #
-# Also writes .active-worktree-path breadcrumb when a linked worktree exists.
-# The tester agent runs inside the worktree and writes its proof-status there.
-# The breadcrumb lets resolve_proof_file() (in log.sh) find the correct path
-# so prompt-submit.sh, check-tester.sh, and guard.sh all operate on the same file.
+# The canonical proof-status file lives in CLAUDE_DIR which is shared across all
+# worktrees, so prompt-submit.sh, check-tester.sh, and guard.sh all read/write
+# the same file regardless of which worktree the agent runs in.
 #
 # Gate C.1: Implementer must run in a linked worktree, not the main checkout.
 # @decision DEC-TASK-GATE-001
@@ -304,30 +322,6 @@ if [[ "$AGENT_TYPE" == "implementer" ]]; then
     if [[ ! -f "$PROOF_FILE" ]]; then
         mkdir -p "$(dirname "$PROOF_FILE")"
         echo "needs-verification|$(date +%s)" > "$PROOF_FILE"
-    fi
-
-    # Write breadcrumb: detect the most recent worktree (excluding main).
-    # Dual-writes session-scoped AND project-scoped breadcrumbs:
-    #   session-scoped: .active-worktree-path-{SESSION}-{PHASH}  (prevents cross-session contamination)
-    #   project-scoped: .active-worktree-path-{PHASH}            (backward compat with older hooks)
-    # Atomic write via tmp+rename prevents partial reads under concurrent hooks.
-    # Session ID from CLAUDE_SESSION_ID (fallback to $$).
-    # See DEC-SESSION-BREADCRUMB-001 in log.sh for full rationale. Issue #98.
-    #
-    # git worktree list --porcelain outputs blocks separated by blank lines;
-    # the first block is always the main worktree. We capture the last
-    # non-main worktree path seen in the output.
-    ACTIVE_WORKTREE=$(git -C "$PROJECT_ROOT" worktree list --porcelain 2>/dev/null \
-        | awk -v main="$PROJECT_ROOT" '/^worktree /{path=$2} path && path != main {last=path} END{print last}' \
-        || echo "")
-    if [[ -n "$ACTIVE_WORKTREE" && -d "$ACTIVE_WORKTREE" ]]; then
-        _SESSION="${CLAUDE_SESSION_ID:-$$}"
-        _SESSION_BC="${CLAUDE_DIR}/.active-worktree-path-${_SESSION}-${_PHASH}"
-        _SCOPED_BC="${CLAUDE_DIR}/.active-worktree-path-${_PHASH}"
-        # Atomic write: write to tmp then rename for both files
-        printf '%s\n' "$ACTIVE_WORKTREE" > "${_SESSION_BC}.tmp" && mv "${_SESSION_BC}.tmp" "$_SESSION_BC"
-        printf '%s\n' "$ACTIVE_WORKTREE" > "${_SCOPED_BC}.tmp" && mv "${_SCOPED_BC}.tmp" "$_SCOPED_BC"
-        log_info "TASK-TRACK" "Breadcrumb written (session+scoped): active worktree is $ACTIVE_WORKTREE [session=${_SESSION}]"
     fi
 fi
 

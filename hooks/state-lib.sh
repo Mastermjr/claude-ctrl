@@ -56,14 +56,12 @@ state_update() {
     # Wrap critical section in flock to prevent concurrent read-modify-write races.
     # fd 9 is used as the lock descriptor; subshell ensures the lock is released on exit.
     (
-        # Use _lock_fd if available, fall back to bare flock, then proceed unlocked
+        # Use _portable_flock if available, fall back to bare flock, then proceed unlocked
         local _lock_ok=true
-        if type _lock_fd &>/dev/null; then
-            _lock_fd 5 9 || _lock_ok=false
+        if type _portable_flock &>/dev/null; then
+            _portable_flock 5 9 || _lock_ok=false
         elif command -v flock &>/dev/null; then
             flock -w 5 9 || _lock_ok=false
-        elif command -v lockf &>/dev/null; then
-            lockf -s -t 5 9 || _lock_ok=false
         fi
         if [[ "$_lock_ok" == "false" ]]; then
             log_info "STATE" "lock timeout for ${key}, skipping update" 2>/dev/null || true; return 0

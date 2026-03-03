@@ -229,8 +229,8 @@ fi
 declare_gate "proof-status-delete" "Block deletion of .proof-status when active" "deny"
 if echo "$_stripped_cmd" | grep -qE 'rm\s+(-[a-zA-Z]*\s+)*\S*proof-status'; then
     _ps_phash=$(project_hash "$(detect_project_root)")
-    _ps_file=$(resolve_proof_file)
-    [[ ! -f "$_ps_file" ]] && _ps_file=""
+    _ps_dir=$(get_claude_dir)
+    _ps_file="${_ps_dir}/.proof-status-${_ps_phash}"
     if [[ -f "$_ps_file" ]]; then
         _ps_val=$(cut -d'|' -f1 "$_ps_file")
         if [[ "$_ps_val" == "pending" || "$_ps_val" == "needs-verification" ]]; then

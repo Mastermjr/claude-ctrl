@@ -190,21 +190,22 @@ if [[ "$QUICK_MODE" != "true" ]]; then
     fi
 fi
 
-# .proof-status
-proof_file="${CLAUDE_DIR}/.proof-status"
+# .proof-status-{phash} (canonical scoped path via resolve_proof_file)
+_proof_phash=$(project_hash "$PROJECT_ROOT")
+proof_file=$(resolve_proof_file)
 if [[ ! -f "$proof_file" ]]; then
-    warn ".proof-status not found — no active verification gate (bootstrap state is OK)"
+    warn ".proof-status-${_proof_phash} not found — no active verification gate (bootstrap state is OK)"
 else
     proof_content=$(cat "$proof_file" 2>/dev/null || echo "")
     # Valid formats: "verified|EPOCH", "needs-verification", "pending"
     if echo "$proof_content" | grep -qE '^verified\|[0-9]+$'; then
-        pass ".proof-status: verified"
+        pass ".proof-status-${_proof_phash}: verified"
     elif echo "$proof_content" | grep -qE '^needs-verification$'; then
-        pass ".proof-status: needs-verification"
+        pass ".proof-status-${_proof_phash}: needs-verification"
     elif echo "$proof_content" | grep -qE '^pending$'; then
-        pass ".proof-status: pending"
+        pass ".proof-status-${_proof_phash}: pending"
     else
-        fail ".proof-status has unexpected format: '${proof_content}' (expected: verified|EPOCH, needs-verification, or pending)"
+        fail ".proof-status-${_proof_phash} has unexpected format: '${proof_content}' (expected: verified|EPOCH, needs-verification, or pending)"
     fi
 fi
 

@@ -151,7 +151,15 @@ case "$AGENT_TYPE" in
         if [[ "$RESEARCH_EXISTS" == "true" ]]; then
             CONTEXT_PARTS+=("Research log: $RESEARCH_ENTRY_COUNT entries. Check .claude/research-log.md before researching APIs or libraries.")
         fi
-        CONTEXT_PARTS+=("After tests pass, return to orchestrator. The tester agent handles live verification — you do NOT demo or write .proof-status.")
+        # Surface CYCLE_MODE from dispatch prompt if present
+        _IMPL_PROMPT=$(echo "$HOOK_INPUT" | jq -r '.prompt // empty' 2>/dev/null || echo "")
+        if echo "$_IMPL_PROMPT" | grep -q 'CYCLE_MODE: auto-flow'; then
+            CONTEXT_PARTS+=("CYCLE_MODE: auto-flow — After tests pass, proceed to Phase 3.5: dispatch tester sub-agent, then guardian if AUTOVERIFY: CLEAN. Return 'CYCLE COMPLETE' to orchestrator. See agents/implementer.md Phase 3.5.")
+        elif echo "$_IMPL_PROMPT" | grep -q 'CYCLE_MODE: phase-boundary'; then
+            CONTEXT_PARTS+=("CYCLE_MODE: phase-boundary — After tests pass, return to orchestrator. The tester agent handles live verification — you do NOT demo or write .proof-status.")
+        else
+            CONTEXT_PARTS+=("After tests pass, return to orchestrator. The tester agent handles live verification — you do NOT demo or write .proof-status.")
+        fi
         # Inject current proof status with contextual guidance (W7-2: #42 residual, #134)
         # Use resolve_proof_file() for worktree-aware resolution (replaces inline project_hash).
         _PROOF_FILE=$(resolve_proof_file)
@@ -254,7 +262,7 @@ case "$AGENT_TYPE" in
         if is_claude_meta_repo "$PROJECT_ROOT" 2>/dev/null; then
             CONTEXT_PARTS+=("Project type: Claude Code meta-infrastructure (hooks/scripts). Verify by running hooks with test input and checking output.")
         fi
-        CONTEXT_PARTS+=("VERIFICATION PROTOCOL: 1. Run the feature live. 2. Paste actual output. 3. Produce Verification Assessment (methodology, coverage, confidence, gaps). 4. Write pending to .proof-status. 5. If all auto-verify criteria met, include AUTOVERIFY: CLEAN signal. 6. Present the full report — let user approve naturally (or auto-verify handles it).")
+        CONTEXT_PARTS+=("VERIFICATION PROTOCOL: 1. Run the feature live. 2. Paste actual output. 3. Produce Verification Assessment (methodology, coverage, confidence, gaps). 4. Write pending status via write_proof_status() (writes to canonical scoped .proof-status-{phash}). 5. If all auto-verify criteria met, include AUTOVERIFY: CLEAN signal. 6. Present the full report — let user approve naturally (or auto-verify handles it).")
         if [[ -n "$TRACE_DIR" ]]; then
             CONTEXT_PARTS+=("TRACE_DIR=$TRACE_DIR — Write verbose output to TRACE_DIR/artifacts/ (verification-output.txt, verification-strategy.txt). Write TRACE_DIR/summary.md before returning. Keep return message under 1500 tokens.")
         fi
