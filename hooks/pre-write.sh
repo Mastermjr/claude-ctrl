@@ -95,7 +95,7 @@ fi
 #   Similarly, doc-gate's @decision enforcement is advisory noise during rapid
 #   iteration. Branch-guard, test-gate, and mock-gate still fire (safety-critical).
 _IN_WORKTREE=false
-if [[ "${_FORCE_WORKTREE_CHECK:-}" != "0" && "$FILE_PATH" == *"/.worktrees/"* ]]; then
+if [[ "${_FORCE_WORKTREE_CHECK:-}" != "0" && ( "$FILE_PATH" == *"/.worktrees/"* || "$FILE_PATH" == *"/.claude/worktrees/"* ) ]]; then
     _IN_WORKTREE=true
 fi
 
@@ -185,7 +185,7 @@ else
                 #   implementers working in proper isolated worktrees are unaffected.
                 #   "HEAD" is excluded: unborn branches (no commits yet) report "HEAD" and
                 #   should not be blocked during initial project setup.
-                if [[ "$FILE_PATH" != *"/.worktrees/"* ]]; then
+                if [[ "$FILE_PATH" != *"/.worktrees/"* && "$FILE_PATH" != *"/.claude/worktrees/"* ]]; then
                     GIT_DIR=$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo "")
                     if [[ -z "$GIT_DIR" || ! -f "$GIT_DIR/MERGE_HEAD" ]]; then
                         emit_deny "BLOCKED: Cannot write source on '$CURRENT_BRANCH' outside a worktree. Sacred Practice #2: All implementation work must happen in isolated worktrees.\n\nAction: git worktree add .worktrees/<name> -b feature/<name>, then dispatch Implementer to the worktree."

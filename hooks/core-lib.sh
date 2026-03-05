@@ -341,7 +341,7 @@ declare_gate() {
 #
 # State — set by enable_fail_closed(), read by emit_deny().
 _HOOK_COMPLETED=false
-_HOOK_NAME=""
+_HOOK_NAME="${_HOOK_NAME:-}"
 _HOOK_ADVISORIES=()
 
 # emit_deny REASON [CONTEXT]

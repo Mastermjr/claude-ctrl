@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `feature/fix-prompt-submit-104`: Fix prompt-submit.sh verification gate silent failure — fast path checks approval keywords immediately (<500ms) before library loading; deferred require_*() calls to point of first use; CAS lock timeout 5s to 2s with stale lock cleanup and signal trap; breadcrumb notification (.proof-gate-pending) warns on interrupted verification; fix _HOOK_NAME initialization clobbering in core-lib.sh; hook timeout 5s to 10s; pre-write.sh recognizes /.claude/worktrees/ paths; 4 new proof lifecycle tests T12-T15 (DEC-PROMPT-FAST-001, DEC-PROMPT-BREADCRUMB-001)
+
 ### Added
 - `feature/dispatch-gate`: Gate 0 (dispatch-confirmation-deny) in pre-ask.sh — mechanically blocks orchestrator dispatch-confirmation questions ("Want me to dispatch Guardian?") enforcing CLAUDE.md auto-dispatch rules; fires before orchestrator bypass so it catches this specific anti-pattern while allowing legitimate questions through; 3 new test fixtures + 3 new test cases (DEC-ASK-GATE-001 updated)
 - `feature/production-reliability`: Production Reliability Phase 4+5 — macOS CI matrix (ubuntu-latest + macos-latest) with 10min timeout, shellcheck extended to tests/ and scripts/; README.md and ARCHITECTURE.md updated from old individual hook names to consolidated entry points (pre-bash.sh, pre-write.sh, post-write.sh, stop.sh)

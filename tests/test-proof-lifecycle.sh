@@ -359,6 +359,109 @@ fi
 rm -rf "$T11_REPO"
 
 # ---------------------------------------------------------------------------
+# T12: Fast path — approval keyword with pending proof completes quickly
+# ---------------------------------------------------------------------------
+run_test "T12: Fast path — approval keyword with pending proof emits DISPATCH GUARDIAN NOW"
+
+T12_REPO=$(make_temp_repo)
+T12_PHASH=$(echo "$T12_REPO" | $_SHA256_CMD | cut -c1-8)
+echo "pending|$(date +%s)" > "$T12_REPO/.claude/.proof-status-${T12_PHASH}"
+_CLEANUP_DIRS+=("$T12_REPO")
+
+T12_INPUT="{\"prompt\":\"lgtm\",\"cwd\":\"${T12_REPO}\"}"
+
+T12_START=$(date +%s)
+T12_OUT=$(
+    export CLAUDE_PROJECT_DIR="$T12_REPO"
+    export CLAUDE_SESSION_ID="test12-$$"
+    printf '%s' "$T12_INPUT" | timeout 5 bash "${HOOKS_DIR}/prompt-submit.sh" 2>/dev/null || true
+)
+T12_END=$(date +%s)
+T12_ELAPSED=$(( T12_END - T12_START ))
+
+if echo "$T12_OUT" | grep -q "DISPATCH GUARDIAN NOW" && [[ "$T12_ELAPSED" -le 2 ]]; then
+    pass_test
+else
+    fail_test "expected DISPATCH GUARDIAN NOW in <=2s; elapsed=${T12_ELAPSED}s, out=$(echo "$T12_OUT" | head -3)"
+fi
+
+# ---------------------------------------------------------------------------
+# T13: Timeout recovery — orphaned .proof-gate-pending triggers warning
+# ---------------------------------------------------------------------------
+run_test "T13: Timeout recovery — orphaned breadcrumb triggers warning"
+
+T13_REPO=$(make_temp_repo)
+_CLEANUP_DIRS+=("$T13_REPO")
+
+# Create orphaned breadcrumb (>3s old)
+echo "$(( $(date +%s) - 10 ))" > "$T13_REPO/.claude/.proof-gate-pending"
+
+T13_INPUT="{\"prompt\":\"hello world\",\"cwd\":\"${T13_REPO}\"}"
+
+T13_OUT=$(
+    export CLAUDE_PROJECT_DIR="$T13_REPO"
+    export CLAUDE_SESSION_ID="test13-$$"
+    printf '%s' "$T13_INPUT" | timeout 10 bash "${HOOKS_DIR}/prompt-submit.sh" 2>/dev/null || true
+)
+
+if echo "$T13_OUT" | grep -q "previous verification attempt was interrupted"; then
+    pass_test
+else
+    fail_test "expected interrupted warning; got: $(echo "$T13_OUT" | head -3)"
+fi
+
+# ---------------------------------------------------------------------------
+# T14: Stale lock cleanup — CAS succeeds after removing stale lock
+# ---------------------------------------------------------------------------
+run_test "T14: Stale lock cleanup — CAS succeeds after removing stale lock"
+
+T14_REPO=$(make_temp_repo)
+T14_PHASH=$(echo "$T14_REPO" | $_SHA256_CMD | cut -c1-8)
+echo "pending|$(date +%s)" > "$T14_REPO/.claude/.proof-status-${T14_PHASH}"
+_CLEANUP_DIRS+=("$T14_REPO")
+
+# Create stale lock file (backdate by 30 seconds)
+touch "$T14_REPO/.claude/.proof-status.lock"
+python3 -c "import os,time; os.utime('$T14_REPO/.claude/.proof-status.lock', (time.time()-30, time.time()-30))" 2>/dev/null || true
+
+T14_INPUT="{\"prompt\":\"approved\",\"cwd\":\"${T14_REPO}\"}"
+
+T14_OUT=$(
+    export CLAUDE_PROJECT_DIR="$T14_REPO"
+    export CLAUDE_SESSION_ID="test14-$$"
+    printf '%s' "$T14_INPUT" | timeout 10 bash "${HOOKS_DIR}/prompt-submit.sh" 2>/dev/null || true
+)
+
+if echo "$T14_OUT" | grep -q "DISPATCH GUARDIAN NOW"; then
+    pass_test
+else
+    fail_test "expected DISPATCH GUARDIAN NOW after stale lock; got: $(echo "$T14_OUT" | head -3)"
+fi
+
+# ---------------------------------------------------------------------------
+# T15: Hook name — prompt-submit appears in timing log
+# ---------------------------------------------------------------------------
+run_test "T15: Hook name — timing log contains prompt-submit"
+
+T15_REPO=$(make_temp_repo)
+_CLEANUP_DIRS+=("$T15_REPO")
+
+T15_INPUT="{\"prompt\":\"\",\"cwd\":\"${T15_REPO}\"}"
+
+(
+    export CLAUDE_PROJECT_DIR="$T15_REPO"
+    export CLAUDE_DIR="$T15_REPO/.claude"
+    export CLAUDE_SESSION_ID="test15-$$"
+    printf '%s' "$T15_INPUT" | bash "${HOOKS_DIR}/prompt-submit.sh" 2>/dev/null || true
+)
+
+if [[ -f "$T15_REPO/.claude/.hook-timing.log" ]] && grep -q "prompt-submit" "$T15_REPO/.claude/.hook-timing.log"; then
+    pass_test
+else
+    fail_test "prompt-submit not found in .hook-timing.log"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

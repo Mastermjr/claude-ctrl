@@ -17,16 +17,148 @@
 
 set -euo pipefail
 
+_HOOK_NAME="prompt-submit"
 source "$(dirname "$0")/source-lib.sh"
-
-require_session
-require_git
-require_plan
-require_ci
-require_state
 
 HOOK_INPUT=$(read_input)
 PROMPT=$(get_field '.prompt')
+
+# --- Verification fast path ---
+# @decision DEC-PROMPT-FAST-001
+# @title Early-exit fast path for approval keywords
+# @status accepted
+# @rationale The verification gate at its original position (line 280) ran after
+#   5 require_*() calls parsing ~1,600 lines of domain libraries. With a 5s timeout,
+#   the hook was frequently killed before reaching the gate. The fast path checks
+#   approval keywords immediately after reading input, loads only require_state
+#   (~200 lines), and completes CAS in <500ms. Fixes #104.
+if [[ -n "$PROMPT" ]] && echo "$PROMPT" | grep -qiE '\bverified\b|\bapproved?\b|\blgtm\b|\blooks\s+good\b|\bship\s+it\b|\bapprove\s+for\s+commit\b'; then
+    require_state
+    PROJECT_ROOT=$(detect_project_root)
+    CLAUDE_DIR=$(get_claude_dir)
+
+    # --- cas_proof_status (hoisted for fast path access) ---
+    # cas_proof_status EXPECTED NEW_STATUS
+    #   Attempt to transition proof-status from EXPECTED to NEW_STATUS atomically.
+    #   Returns 0 on success, 1 if current status doesn't match EXPECTED, 2 on lock failure.
+    #
+    #   @decision DEC-PROOF-CAS-ATOMIC-001
+    #   @title cas_proof_status() holds single lock across check-and-write (true atomic CAS)
+    #   @status accepted
+    #   @rationale Uses a single subshell that holds fd 9 across the entire check-and-write
+    #     operation. The write is done directly (not via write_proof_status) because calling
+    #     it would deadlock on the same lock file. Lock timeout reduced from 5s to 2s to
+    #     avoid consuming the entire hook budget. Stale lock cleanup added for locks >10s old.
+    cas_proof_status() {
+        local expected="$1"
+        local new_val="$2"
+        local lockfile="${CLAUDE_DIR}/.proof-status.lock"
+        local proof_file
+        proof_file=$(resolve_proof_file)
+
+        mkdir -p "$(dirname "$lockfile")" 2>/dev/null || return 2
+
+        # Stale lock cleanup: if lock mtime > 10s, remove it
+        if [[ -f "$lockfile" ]]; then
+            local lock_age=0
+            local lock_mtime now_epoch
+            lock_mtime=$(stat -f %m "$lockfile" 2>/dev/null || stat -c %Y "$lockfile" 2>/dev/null || echo "0")
+            now_epoch=$(date +%s)
+            lock_age=$(( now_epoch - lock_mtime ))
+            if [[ "$lock_age" -gt 10 ]]; then
+                rm -f "$lockfile" 2>/dev/null || true
+                log_info "cas_proof_status" "removed stale lock (age=${lock_age}s)" 2>/dev/null || true
+            fi
+        fi
+
+        # Pre-check (unlocked fast path — avoids lock contention)
+        local current="none"
+        if [[ -f "$proof_file" ]]; then
+            validate_state_file "$proof_file" 2 2>/dev/null || return 1
+            current=$(cut -d'|' -f1 "$proof_file" 2>/dev/null || echo "none")
+        fi
+        [[ "$current" != "$expected" ]] && return 1
+
+        # Atomic CAS: hold lock across re-check AND write
+        local _result=0
+        (
+            trap 'exit 2' TERM INT HUP
+            if ! _lock_fd 2 9; then
+                log_info "cas_proof_status" "lock timeout" 2>/dev/null || true
+                exit 2
+            fi
+            # Re-read under lock (the actual CAS check)
+            local locked_current="none"
+            if [[ -f "$proof_file" ]]; then
+                locked_current=$(cut -d'|' -f1 "$proof_file" 2>/dev/null || echo "none")
+            fi
+            if [[ "$locked_current" != "$expected" ]]; then
+                log_info "cas_proof_status" "CAS failed under lock: expected=${expected} actual=${locked_current}" 2>/dev/null || true
+                exit 1
+            fi
+            # Write directly — we hold the lock that write_proof_status would acquire
+            local timestamp; timestamp=$(date +%s)
+            printf '%s\n' "${new_val}|${timestamp}" > "${proof_file}.tmp" && mv "${proof_file}.tmp" "$proof_file"
+            # Pre-create guardian marker (same as write_proof_status)
+            if [[ "$new_val" == "verified" ]]; then
+                local trace_store="${TRACE_STORE:-$HOME/.claude/traces}"
+                local session="${CLAUDE_SESSION_ID:-$$}"
+                local phash; phash=$(project_hash "$PROJECT_ROOT")
+                echo "pre-verified|${timestamp}" > "${trace_store}/.active-guardian-${session}-${phash}" 2>/dev/null || true
+            fi
+            log_info "cas_proof_status" "CAS succeeded: ${expected} → ${new_val}" 2>/dev/null || true
+            # Dual-write to state.json
+            type state_update &>/dev/null && state_update ".proof.status" "$new_val" "cas_proof_status" || true
+            exit 0
+        ) 9>"$lockfile"
+        _result=$?
+        return $_result
+    }
+
+    # Check for .proof-gate-pending breadcrumb from interrupted previous attempt
+    _GATE_PENDING="${CLAUDE_DIR}/.proof-gate-pending"
+    if [[ -f "$_GATE_PENDING" ]]; then
+        _GATE_TS=$(cat "$_GATE_PENDING" 2>/dev/null || echo "0")
+        [[ "$_GATE_TS" =~ ^[0-9]+$ ]] || _GATE_TS=0
+        _NOW=$(date +%s)
+        _GATE_AGE=$(( _NOW - _GATE_TS ))
+        if [[ "$_GATE_AGE" -gt 3 ]]; then
+            # Previous verification was interrupted — clean up, user is retrying
+            rm -f "$_GATE_PENDING" 2>/dev/null || true
+        fi
+    fi
+
+    PROOF_FILE=$(resolve_proof_file)
+    if [[ -f "$PROOF_FILE" ]]; then
+        if validate_state_file "$PROOF_FILE" 2; then
+            CURRENT_STATUS=$(cut -d'|' -f1 "$PROOF_FILE" 2>/dev/null)
+        else
+            CURRENT_STATUS=""  # corrupt — skip approval transition
+        fi
+        if [[ "$CURRENT_STATUS" == "pending" || "$CURRENT_STATUS" == "needs-verification" ]]; then
+            # Write breadcrumb before CAS attempt
+            date +%s > "${CLAUDE_DIR}/.proof-gate-pending" 2>/dev/null || true
+
+            if cas_proof_status "$CURRENT_STATUS" "verified"; then
+                # Success — remove breadcrumb and emit dispatch
+                rm -f "${CLAUDE_DIR}/.proof-gate-pending" 2>/dev/null || true
+                cat <<EOFVERIFY
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "DISPATCH GUARDIAN NOW: User verified proof-of-work. proof-status=verified. Auto-dispatch Guardian per CLAUDE.md. Do NOT ask 'should I commit?' — Guardian owns the approval cycle."
+  }
+}
+EOFVERIFY
+                exit 0
+            else
+                # CAS failed — remove breadcrumb and fall through
+                rm -f "${CLAUDE_DIR}/.proof-gate-pending" 2>/dev/null || true
+            fi
+        fi
+    fi
+    # No proof file or wrong status — fall through to normal flow
+fi
 
 # Handle empty prompt (Enter-only submit).
 # @decision DEC-PROMPT-002
@@ -66,13 +198,36 @@ EOFEMPTY
     exit 0
 fi
 
-PROJECT_ROOT=$(detect_project_root)
+PROJECT_ROOT="${PROJECT_ROOT:-$(detect_project_root)}"
+CLAUDE_DIR="${CLAUDE_DIR:-$(get_claude_dir)}"
 CONTEXT_PARTS=()
 
+# --- Check for orphaned .proof-gate-pending breadcrumb from interrupted verification ---
+# @decision DEC-PROMPT-BREADCRUMB-001
+# @title Breadcrumb-based retroactive notification for interrupted verifications
+# @status accepted
+# @rationale When the hook is killed mid-verification (timeout), the user gets no
+#   feedback. The breadcrumb (.proof-gate-pending) is written before CAS and removed
+#   after success or fall-through. If it persists >3s, the next hook invocation warns
+#   the user to retry. Fixes the silent-failure symptom of #104.
+_GATE_PENDING_CHECK="${CLAUDE_DIR}/.proof-gate-pending"
+if [[ -f "$_GATE_PENDING_CHECK" ]]; then
+    _GATE_TS_CHECK=$(cat "$_GATE_PENDING_CHECK" 2>/dev/null || echo "0")
+    [[ "$_GATE_TS_CHECK" =~ ^[0-9]+$ ]] || _GATE_TS_CHECK=0
+    _NOW_CHECK=$(date +%s)
+    _GATE_AGE_CHECK=$(( _NOW_CHECK - _GATE_TS_CHECK ))
+    if [[ "$_GATE_AGE_CHECK" -gt 3 ]]; then
+        CONTEXT_PARTS+=("WARNING: A previous verification attempt was interrupted. Please type 'approved' again.")
+        rm -f "$_GATE_PENDING_CHECK" 2>/dev/null || true
+    fi
+fi
+
 # --- First-prompt mitigation for session-init bug (Issue #10373) ---
-CLAUDE_DIR=$(get_claude_dir)
 PROMPT_COUNT_FILE="${CLAUDE_DIR}/.prompt-count-${CLAUDE_SESSION_ID:-$$}"
 if [[ ! -f "$PROMPT_COUNT_FILE" ]]; then
+    require_session
+    require_git
+    require_plan
     mkdir -p "${CLAUDE_DIR}"
     echo "1" > "$PROMPT_COUNT_FILE"
     date +%s > "${CLAUDE_DIR}/.session-start-epoch"
@@ -184,114 +339,6 @@ if [[ -f "$TRACKER_FILE" ]]; then
     fi
 fi
 
-# --- User verification gate ---
-# When user says "verified" and a proof flow is active (.proof-status = pending
-# or needs-verification), write verified|<timestamp>. This is the ONLY path to
-# verified status. No agent can write "verified" directly — guard.sh blocks it.
-#
-# Uses resolve_proof_file() to handle worktree scenarios where the tester writes
-# .proof-status to the worktree's .claude/ directory rather than CLAUDE_DIR.
-# After writing "verified", dual-writes to the orchestrator's CLAUDE_DIR so
-# guard.sh can find the status regardless of which path it checks.
-#
-# @decision DEC-PROOF-CAS-001
-# @title CAS (compare-and-swap) wrapper for proof-status verification in prompt-submit.sh
-# @status accepted
-# @rationale The original code read .proof-status (CURRENT_STATUS) and then called
-#   write_proof_status() without re-checking — a classic TOCTOU race. If two concurrent
-#   hook invocations both read "pending" and both called write_proof_status("verified"),
-#   the second write would now be rejected by the monotonic lattice (verified→verified
-#   is a no-op at the ordinal level). But the CAS pattern here makes the intent explicit:
-#   check expected state under the lock, only write if it matches. The lock in
-#   write_proof_status() (DEC-PROOF-LOCK-001) provides the mutual exclusion. This
-#   function adds the compare step as a safety net before calling into write_proof_status.
-
-# cas_proof_status EXPECTED NEW_STATUS
-#   Attempt to transition proof-status from EXPECTED to NEW_STATUS atomically.
-#   Returns 0 on success, 1 if current status doesn't match EXPECTED, 2 on lock failure.
-#
-#   @decision DEC-PROOF-CAS-ATOMIC-001
-#   @title cas_proof_status() holds single lock across check-and-write (true atomic CAS)
-#   @status accepted
-#   @rationale The prior implementation (DEC-PROOF-CAS-REFACTOR-001) had a race window:
-#     it called state_write_locked() to acquire and immediately release the lock (for a
-#     sentinel write), then called write_proof_status() which acquired the same lock
-#     again. Between those two lock acquisitions a concurrent prompt-submit.sh invocation
-#     could slip in, read the same "pending" state, pass the pre-check, and both would
-#     succeed the CAS. The fix: use a single subshell that holds fd 9 across the entire
-#     check-and-write operation. The write is done directly (not via write_proof_status)
-#     because calling it would deadlock on the same lock file. Guardian marker and
-#     state_update dual-write are inlined to replicate write_proof_status() behavior
-#     within the held lock. The pre-check (unlocked fast path) is kept to avoid
-#     unnecessary lock contention when the state clearly doesn't match.
-cas_proof_status() {
-    local expected="$1"
-    local new_val="$2"
-    local lockfile="${CLAUDE_DIR}/.proof-status.lock"
-    local proof_file
-    proof_file=$(resolve_proof_file)
-
-    mkdir -p "$(dirname "$lockfile")" 2>/dev/null || return 2
-
-    # Pre-check (unlocked fast path — avoids lock contention)
-    local current="none"
-    if [[ -f "$proof_file" ]]; then
-        validate_state_file "$proof_file" 2 2>/dev/null || return 1
-        current=$(cut -d'|' -f1 "$proof_file" 2>/dev/null || echo "none")
-    fi
-    [[ "$current" != "$expected" ]] && return 1
-
-    # Atomic CAS: hold lock across re-check AND write
-    local _result=0
-    (
-        if ! _lock_fd 5 9; then
-            log_info "cas_proof_status" "lock timeout" 2>/dev/null || true
-            exit 2
-        fi
-        # Re-read under lock (the actual CAS check)
-        local locked_current="none"
-        if [[ -f "$proof_file" ]]; then
-            locked_current=$(cut -d'|' -f1 "$proof_file" 2>/dev/null || echo "none")
-        fi
-        if [[ "$locked_current" != "$expected" ]]; then
-            log_info "cas_proof_status" "CAS failed under lock: expected=${expected} actual=${locked_current}" 2>/dev/null || true
-            exit 1
-        fi
-        # Write directly — we hold the lock that write_proof_status would acquire
-        local timestamp; timestamp=$(date +%s)
-        printf '%s\n' "${new_val}|${timestamp}" > "${proof_file}.tmp" && mv "${proof_file}.tmp" "$proof_file"
-        # Pre-create guardian marker (same as write_proof_status)
-        if [[ "$new_val" == "verified" ]]; then
-            local trace_store="${TRACE_STORE:-$HOME/.claude/traces}"
-            local session="${CLAUDE_SESSION_ID:-$$}"
-            local phash; phash=$(project_hash "$PROJECT_ROOT")
-            echo "pre-verified|${timestamp}" > "${trace_store}/.active-guardian-${session}-${phash}" 2>/dev/null || true
-        fi
-        log_info "cas_proof_status" "CAS succeeded: ${expected} → ${new_val}" 2>/dev/null || true
-        # Dual-write to state.json
-        type state_update &>/dev/null && state_update ".proof.status" "$new_val" "cas_proof_status" || true
-        exit 0
-    ) 9>"$lockfile"
-    _result=$?
-    return $_result
-}
-
-PROOF_FILE=$(resolve_proof_file)
-if echo "$PROMPT" | grep -qiE '\bverified\b|\bapproved?\b|\blgtm\b|\blooks\s+good\b|\bship\s+it\b|\bapprove\s+for\s+commit\b'; then
-    if [[ -f "$PROOF_FILE" ]]; then
-        if validate_state_file "$PROOF_FILE" 2; then
-            CURRENT_STATUS=$(cut -d'|' -f1 "$PROOF_FILE" 2>/dev/null)
-        else
-            CURRENT_STATUS=""  # corrupt — skip approval transition
-        fi
-        if [[ "$CURRENT_STATUS" == "pending" || "$CURRENT_STATUS" == "needs-verification" ]]; then
-            if cas_proof_status "$CURRENT_STATUS" "verified"; then
-                CONTEXT_PARTS+=("DISPATCH GUARDIAN NOW: User verified proof-of-work. proof-status=verified. Auto-dispatch Guardian per CLAUDE.md. Do NOT ask 'should I commit?' — Guardian owns the approval cycle.")
-            fi
-        fi
-    fi
-fi
-
 # --- Inject agent findings from previous subagent runs ---
 FINDINGS_FILE="${CLAUDE_DIR}/.agent-findings"
 if [[ -f "$FINDINGS_FILE" && -s "$FINDINGS_FILE" ]]; then
@@ -357,6 +404,7 @@ fi
 
 # --- Check for plan/implement/status keywords ---
 if echo "$PROMPT" | grep -qiE '\bplan\b|\bimplement\b|\bphase\b|\bmaster.plan\b|\bstatus\b|\bprogress\b|\bdemo\b'; then
+    require_plan
     get_plan_status "$PROJECT_ROOT"
 
     if [[ "$PLAN_EXISTS" == "true" ]]; then
@@ -368,6 +416,7 @@ if echo "$PROMPT" | grep -qiE '\bplan\b|\bimplement\b|\bphase\b|\bmaster.plan\b|
             PLAN_LINE="Plan: ${PLAN_ACTIVE_INITIATIVES} active initiative(s)"
             [[ "$PLAN_TOTAL_PHASES" -gt 0 ]] && PLAN_LINE="$PLAN_LINE | ${PLAN_COMPLETED_PHASES}/${PLAN_TOTAL_PHASES} phases done"
             [[ "$PLAN_AGE_DAYS" -gt 0 ]] && PLAN_LINE="$PLAN_LINE | age: ${PLAN_AGE_DAYS}d"
+            require_session
             get_session_changes "$PROJECT_ROOT"
             [[ "$SESSION_CHANGED_COUNT" -gt 0 ]] && PLAN_LINE="$PLAN_LINE | $SESSION_CHANGED_COUNT files changed"
             CONTEXT_PARTS+=("$PLAN_LINE")
@@ -377,6 +426,7 @@ if echo "$PROMPT" | grep -qiE '\bplan\b|\bimplement\b|\bphase\b|\bmaster.plan\b|
             [[ "$PLAN_TOTAL_PHASES" -gt 0 ]] && PLAN_LINE="$PLAN_LINE $PLAN_COMPLETED_PHASES/$PLAN_TOTAL_PHASES phases done"
             [[ -n "$PLAN_PHASE" ]] && PLAN_LINE="$PLAN_LINE | active: $PLAN_PHASE"
             [[ "$PLAN_AGE_DAYS" -gt 0 ]] && PLAN_LINE="$PLAN_LINE | age: ${PLAN_AGE_DAYS}d"
+            require_session
             get_session_changes "$PROJECT_ROOT"
             [[ "$SESSION_CHANGED_COUNT" -gt 0 ]] && PLAN_LINE="$PLAN_LINE | $SESSION_CHANGED_COUNT files changed"
             CONTEXT_PARTS+=("$PLAN_LINE")
@@ -388,6 +438,7 @@ fi
 
 # --- Check for merge/commit keywords ---
 if echo "$PROMPT" | grep -qiE '\bmerge\b|\bcommit\b|\bpush\b|\bPR\b|\bpull.request\b'; then
+    require_git
     get_git_state "$PROJECT_ROOT"
 
     if [[ -n "$GIT_BRANCH" ]]; then
@@ -401,6 +452,7 @@ fi
 
 # --- Research-worthy prompt detection ---
 if echo "$PROMPT" | grep -qiE '\bresearch\b|\bcompare\b|\bwhat.*(people|community|reddit)\b|\brecent\b|\btrending\b|\bdeep dive\b|\bwhich is better\b|\bpros and cons\b'; then
+    require_session
     get_research_status "$PROJECT_ROOT"
     if [[ "$RESEARCH_EXISTS" == "true" ]]; then
         CONTEXT_PARTS+=("Research log: $RESEARCH_ENTRY_COUNT entries. Check .claude/research-log.md before invoking /deep-research or /last30days.")
