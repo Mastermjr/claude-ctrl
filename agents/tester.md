@@ -65,6 +65,8 @@ Your startup context includes:
 
 ## Phase 2: Execute Verification
 
+Before running any component-level verification, confirm the new code is reachable from the system's actual entry points. If it's not reachable, that's a verification failure — not something to note and move on from.
+
 Choose the right strategy based on project type:
 
 | Project Type | Verification Strategy |
@@ -72,12 +74,15 @@ Choose the right strategy based on project type:
 | Web app | Start dev server → provide URL → use Playwright if available → describe what you see |
 | CLI tool | Run with real arguments → paste actual terminal output |
 | API | curl the endpoint → show request + response |
-| Hook/script (has `tests/test-*.sh`) | Run the dedicated test suite → paste actual output |
+| Hook/script (has tests) | 1. Verify wiring: confirm hook appears in settings.json (or equivalent registry) |
+|                         | 2. Trigger from entry point: simulate the event that fires the hook |
+|                         | 3. Run test suite for coverage beyond the entry-point path |
+|                         | If step 1 fails → report NOT WIRED, do not proceed to step 3 |
 | Hook/script (simple, no test suite) | Run with test input → show what it produces |
 | Library | Run example code → show output |
 | Config/meta | Run test suite → paste actual output |
 
-**Hook testing rule:** If a dedicated test file exists in `tests/` for the hook being verified (e.g., `test-guard-*.sh` for `guard.sh`), always use it. Never manually construct JSON and pipe it to a hook — the test framework provides fixtures, assertions, and proper path resolution. For meta-infrastructure hooks, the test suite IS the feature verification.
+**Hook testing rule:** If a dedicated test file exists in `tests/` for the hook being verified (e.g., `test-guard-*.sh` for `guard.sh`), always use it as part of step 3. Never manually construct JSON and pipe it to a hook — the test framework provides fixtures, assertions, and proper path resolution. For meta-infrastructure, the test suite provides comprehensive coverage, but the feature must still be wired into the system (settings.json, CLAUDE.md, etc.) for verification to pass.
 
 **Worktree path safety:** Never use bare `cd .worktrees/<name>` — this bricks the shell if the worktree is later deleted. Instead:
 - Git commands: `git -C .worktrees/<name> <command>`
@@ -85,7 +90,7 @@ Choose the right strategy based on project type:
 - If guard.sh denies your command, follow the corrected command in the deny reason.
 
 **Critical rules:**
-- Run the ACTUAL feature, not just tests. Exception: for meta-infrastructure hooks with dedicated test suites, the test suite IS the actual feature verification — running it satisfies this rule.
+- Run the ACTUAL feature, not just tests. For meta-infrastructure hooks, the test suite provides comprehensive functional coverage, but you must ALSO verify the hook is wired (registered in settings.json, referenced in CLAUDE.md, etc.).
 - **Never summarize output. Paste it verbatim.** Don't say "the output shows X" — paste the actual output so the user can see X themselves
 - If something fails, report exactly what failed — don't fix it
 - If the dev server needs starting, start it
@@ -114,6 +119,20 @@ If ANY new file has zero inbound references, report it in the Coverage table as:
 | Integration wiring | **NOT WIRED** | `<filename>` has no inbound references — dead code |
 
 **This blocks AUTOVERIFY.** A component with no inbound references CANNOT receive "Fully verified" status, which prevents AUTOVERIFY: CLEAN from being emitted.
+
+### Phase 2.5 Extension: Cross-Component Integration (Phase-Completing Only)
+
+When dispatched for a phase-completing verification (your dispatch context will indicate this):
+
+1. Run the standard Phase 2.5 checks above (per-file reachability)
+2. Additionally: trace the data/control flow across ALL new files in the phase:
+   - Do the outputs of early work items feed into later work items?
+   - Are there broken chains where component A produces output that
+     component B expects but never receives?
+3. For planner Integration specifications that span multiple work items,
+   verify the full chain works end-to-end (not just each link)
+
+This cross-component check only applies to phase-completing dispatches. Auto-flow individual work items get the standard Phase 2.5 treatment above.
 
 ## When Verification Fails
 

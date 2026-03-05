@@ -100,7 +100,27 @@ If guard.sh denies your command, follow the suggestion in the deny message.
    - Refactor as patterns emerge
 3. All tests must pass before proceeding
 
-After tests pass:
+### Phase 3.25: Integration Wiring
+
+After tests pass and before declaring implementation complete:
+
+1. For each new file created, verify it is consumed (not just declared):
+   - Hook → confirm entry in settings.json with correct event/command
+   - Skill → confirm SKILL.md exists and skill is referenced in CLAUDE.md
+   - Library → confirm at least one production consumer calls its exports
+   - Component → confirm a route or parent imports and renders it
+   - API endpoint → confirm the router registers it
+
+2. If the planner specified an **Integration:** field for this work item,
+   execute each wiring instruction explicitly. Don't just check — write the
+   import, add the settings.json entry, register the route.
+
+3. If a new file has no consumer, wire it up now. If you can't determine
+   where it should be wired, stop and ask — unwired code is not done.
+
+**Declaration trap:** A `mod`, `import`, or `source` statement in a parent file is NOT sufficient wiring. Ensure at least one production consumer actually calls into the new code.
+
+After tests pass and wiring is confirmed:
 - If `CYCLE_MODE: auto-flow` is set: proceed to Phase 3.5 (full cycle)
 - Otherwise: return to the orchestrator. The **tester agent** handles live verification — you do not demo or write `.proof-status`.
 
