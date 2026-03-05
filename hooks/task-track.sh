@@ -75,9 +75,27 @@ fi
 declare_gate "guardian-proof-gate" "Guardian requires .proof-status = verified" "deny"
 if [[ "$AGENT_TYPE" == "guardian" ]]; then
     _PHASH=$(project_hash "$PROJECT_ROOT")  # keep — needed for guardian marker filename
+    # --- M2: Plan-only bypass — documentation merges skip proof-status gate ---
+    # @decision DEC-BOOTSTRAP-PARADOX-002
+    # @title Plan-only merges bypass the proof-status gate in task-track.sh
+    # @status accepted
+    # @rationale When Guardian is dispatched for documentation-only changes
+    #   (plan amendments, README updates), there is no implementer trace and no
+    #   proof-of-work to verify. The @plan-update or @no-source annotation in the
+    #   dispatch prompt signals that no source code is being merged. This avoids
+    #   requiring a full verification cycle for doc-only changes. Risk: the annotation
+    #   could be abused to bypass the gate on source changes. Mitigation: the annotation
+    #   is documented and explicit; any misuse is visible in the dispatch prompt audit
+    #   trail (traces). See #105.
+    _GUARD_PROMPT=$(get_field '.tool_input.prompt' 2>/dev/null || echo "")
+    _PROOF_BYPASS=false
+    if echo "$_GUARD_PROMPT" | grep -qE '@plan-update|@no-source'; then
+        _PROOF_BYPASS=true
+        log_info "guardian-proof-gate" "plan-only merge bypass (@plan-update or @no-source in prompt) — proof gate skipped" 2>/dev/null || true
+    fi
     PROOF_FILE=$(resolve_proof_file)
     [[ ! -f "$PROOF_FILE" ]] && PROOF_FILE=""
-    if [[ -n "$PROOF_FILE" && -f "$PROOF_FILE" ]]; then
+    if [[ "$_PROOF_BYPASS" != "true" && -n "$PROOF_FILE" && -f "$PROOF_FILE" ]]; then
         if validate_state_file "$PROOF_FILE" 2; then
             PROOF_STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
         else
@@ -86,7 +104,9 @@ if [[ "$AGENT_TYPE" == "guardian" ]]; then
         if [[ "$PROOF_STATUS" != "verified" ]]; then
             emit_deny "Cannot dispatch Guardian: proof-of-work is '$PROOF_STATUS' (requires 'verified'). Dispatch tester or complete verification before dispatching Guardian."
         fi
-        # Proof is verified — pre-create guardian marker to close dispatch race (Issue #151).
+    fi
+    if [[ "$_PROOF_BYPASS" == "true" || -n "$PROOF_FILE" ]]; then
+        # Pre-create guardian marker to close dispatch race (Issue #151).
         # track.sh (PostToolUse:Write|Edit) checks .active-guardian-* to skip proof
         # invalidation during Guardian's merge cycle. Without this, any Write/Edit between
         # Gate A pass (PreToolUse:Task) and SubagentStart's init_trace() (which normally

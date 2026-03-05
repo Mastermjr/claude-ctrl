@@ -140,8 +140,9 @@ if [[ -n "$PROMPT" ]] && echo "$PROMPT" | grep -qiE '\bverified\b|\bapproved?\b|
             date +%s > "${CLAUDE_DIR}/.proof-gate-pending" 2>/dev/null || true
 
             if cas_proof_status "$CURRENT_STATUS" "verified"; then
-                # Success — remove breadcrumb and emit dispatch
+                # Success — remove breadcrumb, reset CAS failure counter, emit dispatch
                 rm -f "${CLAUDE_DIR}/.proof-gate-pending" 2>/dev/null || true
+                rm -f "${CLAUDE_DIR}/.cas-failures" 2>/dev/null || true
                 cat <<EOFVERIFY
 {
   "hookSpecificOutput": {
@@ -154,6 +155,30 @@ EOFVERIFY
             else
                 # CAS failed — remove breadcrumb and fall through
                 rm -f "${CLAUDE_DIR}/.proof-gate-pending" 2>/dev/null || true
+                # --- M1: CAS failure diagnostic counter ---
+                # @decision DEC-BOOTSTRAP-PARADOX-001
+                # @title CAS failure counter warns after repeated verification failures
+                # @status accepted
+                # @rationale When cas_proof_status fails 2+ consecutive times for the same
+                #   transition, the gate infrastructure itself may be broken (e.g., a fix
+                #   targeting cas_proof_status is on a branch while old broken code is on main).
+                #   The counter file format: count|expected|new_val|timestamp. On success, it
+                #   is deleted. Warns after 2+ failures so the orchestrator can take action.
+                #   Fixes bootstrap paradox symptom from Phase 2 merge. See #105.
+                _CAS_FAIL_FILE="${CLAUDE_DIR}/.cas-failures"
+                _CAS_FAIL_COUNT=1
+                _CAS_PREV_EXP=""
+                _CAS_PREV_NEW=""
+                if [[ -f "$_CAS_FAIL_FILE" ]]; then
+                    _CAS_PREV_COUNT=$(cut -d'|' -f1 "$_CAS_FAIL_FILE" 2>/dev/null || echo "0")
+                    _CAS_PREV_EXP=$(cut -d'|' -f2 "$_CAS_FAIL_FILE" 2>/dev/null || echo "")
+                    _CAS_PREV_NEW=$(cut -d'|' -f3 "$_CAS_FAIL_FILE" 2>/dev/null || echo "")
+                    # Only increment if same transition (same expected+new_val)
+                    if [[ "$_CAS_PREV_EXP" == "$CURRENT_STATUS" && "$_CAS_PREV_NEW" == "verified" ]]; then
+                        _CAS_FAIL_COUNT=$(( _CAS_PREV_COUNT + 1 ))
+                    fi
+                fi
+                printf '%s\n' "${_CAS_FAIL_COUNT}|${CURRENT_STATUS}|verified|$(date +%s)" > "$_CAS_FAIL_FILE" 2>/dev/null || true
             fi
         fi
     fi
@@ -219,6 +244,26 @@ if [[ -f "$_GATE_PENDING_CHECK" ]]; then
     if [[ "$_GATE_AGE_CHECK" -gt 3 ]]; then
         CONTEXT_PARTS+=("WARNING: A previous verification attempt was interrupted. Please type 'approved' again.")
         rm -f "$_GATE_PENDING_CHECK" 2>/dev/null || true
+    fi
+fi
+
+# --- M1: Bootstrap paradox diagnostic — inject warning if CAS has failed repeatedly ---
+# @decision DEC-BOOTSTRAP-PARADOX-001
+# @title CAS failure counter injects warning after 2+ consecutive failures
+# @status accepted
+# @rationale When cas_proof_status fails 2+ consecutive times for the same
+#   transition, the gate infrastructure itself may be broken (e.g., a fix
+#   to cas_proof_status is on a branch while old broken code runs on main).
+#   The counter file (${CLAUDE_DIR}/.cas-failures) is written by the fast-path
+#   on CAS failure and deleted on success. This main-body check injects the
+#   warning into CONTEXT_PARTS so the orchestrator sees it. Fixes #105.
+_CAS_FAIL_CHECK="${CLAUDE_DIR}/.cas-failures"
+if [[ -f "$_CAS_FAIL_CHECK" ]]; then
+    _CAS_WARN_COUNT=$(cut -d'|' -f1 "$_CAS_FAIL_CHECK" 2>/dev/null || echo "0")
+    _CAS_WARN_EXP=$(cut -d'|' -f2 "$_CAS_FAIL_CHECK" 2>/dev/null || echo "unknown")
+    _CAS_WARN_NEW=$(cut -d'|' -f3 "$_CAS_FAIL_CHECK" 2>/dev/null || echo "unknown")
+    if [[ "$_CAS_WARN_COUNT" =~ ^[0-9]+$ ]] && [[ "$_CAS_WARN_COUNT" -ge 2 ]]; then
+        CONTEXT_PARTS+=("BOOTSTRAP PARADOX WARNING: cas_proof_status has failed ${_CAS_WARN_COUNT} times to transition ${_CAS_WARN_EXP} → ${_CAS_WARN_NEW}. The gate infrastructure may be broken. If you are merging a gate fix, manual proof-status override may be required. See #105.")
     fi
 fi
 

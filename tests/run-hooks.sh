@@ -2756,6 +2756,20 @@ else
     failed=$((failed + 1))
 fi
 
+BOOTSTRAP_TEST="$SCRIPT_DIR/test-bootstrap-mitigation.sh"
+
+if [[ -f "$BOOTSTRAP_TEST" ]]; then
+    if bash "$BOOTSTRAP_TEST" 2>/dev/null; then
+        pass "test-bootstrap-mitigation.sh — all bootstrap paradox mitigation tests passed"
+    else
+        fail "test-bootstrap-mitigation.sh" "one or more bootstrap mitigation tests failed (run directly for details)"
+        failed=$((failed + 1))
+    fi
+else
+    fail "test-bootstrap-mitigation.sh" "test file not found at $BOOTSTRAP_TEST"
+    failed=$((failed + 1))
+fi
+
 echo ""
 fi # end: concurrency
 
