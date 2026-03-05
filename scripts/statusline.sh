@@ -379,18 +379,16 @@ if [[ -n "$cache_initiative" ]]; then
 fi
 
 # Terminal width — must be resolved before the responsive layout sections below.
-# @decision DEC-STATUSLINE-TERMWIDTH-001
-# @title Terminal width detection with subprocess-safe fallback
+# @decision DEC-STATUSLINE-TERMWIDTH-002
+# @title Clamp small COLUMNS to 120 — let Claude Code UI handle final clipping
 # @status accepted
-# @rationale COLUMNS is often 0 (not unset) in subprocess context — the default :-250
-# was masked by this: 0 is set, so 250 never applied, and all segments were dropped.
-# The new approach: treat 0 as "not available" and fall back to tput cols, then 80.
-# Clamp to [40, 200] to prevent pathological truncation or over-wide output.
+# @rationale Claude Code provides COLUMNS for the statusline display area, but small
+# values (including 0 from subprocess context) cause aggressive responsive dropping that
+# removes useful segments. At term_w=120 the full metrics line (~94 chars) fits with zero
+# drops. Display order already puts most-important segments first (context bar → tks →
+# cost), so natural UI clipping shows the best content when the area is narrow.
 term_w="${COLUMNS:-0}"
-if (( term_w <= 0 )); then
-  term_w=$(tput cols 2>/dev/null || echo 80)
-fi
-(( term_w < 40 )) && term_w=80
+(( term_w < 80 )) && term_w=120
 (( term_w > 200 )) && term_w=200
 
 # ---------------------------------------------------------------------------

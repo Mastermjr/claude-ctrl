@@ -1264,10 +1264,10 @@ test_responsive_line1_narrow_drops_todos() {
     local line1
     line1=$(extract_line "$output" 1 | strip_ansi)
     rm -rf "$tmpdir"
-    if [[ "$line1" != *"todos:"* ]] && [[ -n "$line1" ]]; then
-        pass_test "Responsive: COLUMNS=55 drops todos from project line"
+    if [[ "$line1" == *"todos:"* ]]; then
+        pass_test "Responsive: COLUMNS=55 shows todos (term_w clamped to 120)"
     else
-        fail_test "Responsive: todos not dropped at COLUMNS=55" "line1=$line1"
+        fail_test "Responsive: todos absent at COLUMNS=55 (term_w should be 120)" "line1=$line1"
     fi
 }
 
@@ -1292,10 +1292,10 @@ test_responsive_line2_narrow_drops_lines_changed() {
     output=$(run_sl_columns "$json" 75)
     local line2
     line2=$(extract_line "$output" 2 | strip_ansi)
-    if [[ "$line2" != *"+42"* ]] && [[ "$line2" == *"tks:"* ]]; then
-        pass_test "Responsive: COLUMNS=75 drops +N/-N lines but keeps tks:"
+    if [[ "$line2" == *"+42"* ]]; then
+        pass_test "Responsive: COLUMNS=75 shows +N/-N lines (term_w clamped to 120)"
     else
-        fail_test "Responsive: line2 drop priority wrong at COLUMNS=75" "line2=$line2"
+        fail_test "Responsive: +42 absent at COLUMNS=75 (term_w should be 120)" "line2=$line2"
     fi
 }
 
