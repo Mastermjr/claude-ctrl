@@ -374,25 +374,41 @@ for _ci_file in "${CLAUDE_DIR}/.ci-status-"*; do
     fi
 done
 
-# Proof-status files older than 4 hours (cross-project sweep — Bug C)
+# Proof-status files with no active markers (cross-project sweep)
 # @decision DEC-PROOF-SWEEP-001
-# @title TTL-based sweep of stale .proof-status-* files at session-end
+# @title Marker-based sweep of orphaned .proof-status-* files at session-end
 # @status accepted
-# @rationale session-init.sh only cleans the CURRENT project's proof-status. Files from
-#   other projects (or with empty hashes from Bug A) accumulate indefinitely. A 4-hour
-#   TTL sweep at session-end removes all stale proof files regardless of project origin.
-#   4 hours mirrors the .subagent-tokens-* sweep (DEC-TOKEN-SWEEP-001) — no legitimate
-#   verification cycle lasts longer than a single agent session (~30min max_turns).
+# @rationale TTL-based sweep (4h) was a time proxy for ownership — a concurrent session
+#   idle >4h would have its proof file deleted. The marker-based approach checks if ANY
+#   .active-*-{phash} marker exists in TRACE_STORE. No markers → orphaned → delete.
+#   Empty-hash files (.proof-status- from Bug A) are always deleted (no valid phash).
+#   Marker cleanup has its own age-based backstops (30min in init_trace, 15min in
+#   session-init), so no TTL backstop is needed here. Supersedes the 4-hour TTL from
+#   commit 0b1c20a.
 for _proof_file in "${CLAUDE_DIR}/.proof-status-"*; do
     [[ -f "$_proof_file" ]] || continue
-    # Skip lock files (already cleaned above)
     [[ "$_proof_file" == *.lock ]] && continue
-    if [[ "$(uname)" == "Darwin" ]]; then
-        _proof_mtime=$(stat -f %m "$_proof_file" 2>/dev/null || echo "0")
-    else
-        _proof_mtime=$(stat -c %Y "$_proof_file" 2>/dev/null || echo "0")
+
+    # Extract phash from filename: .proof-status-{8hex}
+    _proof_basename="${_proof_file##*/}"
+    _proof_phash="${_proof_basename#.proof-status-}"
+
+    # Bug A empty hash: always safe to delete (no project owns it)
+    if [[ -z "$_proof_phash" ]]; then
+        rm -f "$_proof_file"
+        continue
     fi
-    if (( _NOW_EPOCH - _proof_mtime > 14400 )); then  # 4 hours
+
+    # Marker-based ownership: ANY active marker for this phash means "in use"
+    _has_markers=false
+    for _marker in "${SESSION_TRACE_STORE}/.active-"*"-${_proof_phash}"; do
+        if [[ -f "$_marker" ]]; then
+            _has_markers=true
+            break
+        fi
+    done
+
+    if [[ "$_has_markers" == "false" ]]; then
         rm -f "$_proof_file"
     fi
 done

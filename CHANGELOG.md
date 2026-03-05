@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `feature/wave-planning-metrics`: Replace serial phase-based planning with DAG-based wave decomposition — Phase 3 output format uses dependency graphs to compute waves of parallelizable work; new per-item metrics (Weight S/M/L/XL, Gate none/review/approve, Deps W-ID list); initiative-level summary metrics (critical path, max width); 4 new DAG validation checklist items; issue labels `phase-N` to `wave-N`; both templates (master-plan.md, initiative-block.md) updated consistently
 
+### Fixed
+- `feature/proof-sweep-marker-based`: Replace TTL-based proof-status sweep with marker-based ownership check — session-end.sh now checks for .active-*-{phash} markers in TRACE_STORE instead of 4h mtime TTL; no markers means orphaned, safe to delete; empty-hash files (Bug A) always deleted; PC-03 rewritten for marker logic, PC-05 added for empty-hash coverage (DEC-PROOF-SWEEP-001 updated)
+
 ## [3.0.0] - 2026-03-05
 
 ### Fixed

@@ -7,7 +7,7 @@
 #          → project_hash() produced .proof-status- (empty hash)
 #   Bug B: get_claude_dir() path comparison failed when PROJECT_ROOT had trailing slash
 #          → returned double-nested ~/.claude/.claude path
-#   Bug C: session-end.sh lacked a TTL sweep of all .proof-status-* files
+#   Bug C: session-end.sh lacked ownership-based sweep of all .proof-status-* files
 #          → cross-project files accumulated indefinitely
 #   Bug D: session-end.sh never deleted the proof file after reading outcome
 #          → stale "verified" files survived normal session-end
@@ -149,61 +149,75 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PC-03: Session-end TTL sweep removes files >4h, preserves files <4h
+# PC-03: Session-end marker-based sweep preserves files with active markers,
+#         deletes files with no markers (Bug C fix)
 #
-# Scenario (Bug C): Multiple .proof-status-* files exist from different projects
-# (or with empty hashes from Bug A). The sweep at session-end should remove
-# files older than 4 hours (14400 seconds) and leave newer ones intact.
+# Scenario (Bug C): Multiple .proof-status-* files exist from different projects.
+# The sweep at session-end checks for .active-*-{phash} markers in TRACE_STORE.
+# Files with at least one active marker are preserved; files with no markers
+# are deleted as orphaned.
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "PC-03: TTL sweep removes .proof-status-* older than 4h, preserves newer ones"
+run_test "PC-03: Marker-based sweep preserves .proof-status-* with active marker, deletes orphans"
 
 TMPDIR_03="$PROJECT_ROOT/tmp/test-pc-03-$$"
-mkdir -p "$TMPDIR_03"
+TRACE_STORE_03="$TMPDIR_03/traces"
+mkdir -p "$TMPDIR_03" "$TRACE_STORE_03"
 trap 'rm -rf "$TMPDIR_03"' EXIT
 
-# Create an old proof-status file (5 hours ago — should be removed)
-OLD_PROOF="$TMPDIR_03/.proof-status-aabbccdd"
-echo "verified|0|old-session" > "$OLD_PROOF"
-# Set mtime to 5 hours ago
-touch -t "$(date -v-5H +%Y%m%d%H%M.%S 2>/dev/null || date -d '5 hours ago' +%Y%m%d%H%M.%S 2>/dev/null || date +%Y%m%d%H%M.%S)" "$OLD_PROOF" 2>/dev/null || true
+# Create two proof-status files: one with a marker (active), one without (orphan)
+ACTIVE_PROOF="$TMPDIR_03/.proof-status-aabbccdd"
+ORPHAN_PROOF="$TMPDIR_03/.proof-status-11223344"
+echo "needs-verification|$(date +%s)|active-session" > "$ACTIVE_PROOF"
+echo "needs-verification|$(date +%s)|orphaned-session" > "$ORPHAN_PROOF"
 
-# Create a fresh proof-status file (1 minute ago — should be preserved)
-NEW_PROOF="$TMPDIR_03/.proof-status-11223344"
-echo "needs-verification|$(date +%s)|current-session" > "$NEW_PROOF"
+# Create an active marker for aabbccdd only (11223344 has no marker → orphaned)
+touch "$TRACE_STORE_03/.active-implementer-test-aabbccdd"
 
-_NOW_EPOCH=$(date +%s)
 CLAUDE_DIR="$TMPDIR_03"
+SESSION_TRACE_STORE="$TRACE_STORE_03"
 
-# Inline the fixed TTL sweep logic from session-end.sh
+# Inline the marker-based sweep logic from session-end.sh
 for _proof_file in "${CLAUDE_DIR}/.proof-status-"*; do
     [[ -f "$_proof_file" ]] || continue
     [[ "$_proof_file" == *.lock ]] && continue
-    if [[ "$(uname)" == "Darwin" ]]; then
-        _proof_mtime=$(stat -f %m "$_proof_file" 2>/dev/null || echo "0")
-    else
-        _proof_mtime=$(stat -c %Y "$_proof_file" 2>/dev/null || echo "0")
+
+    _proof_basename="${_proof_file##*/}"
+    _proof_phash="${_proof_basename#.proof-status-}"
+
+    if [[ -z "$_proof_phash" ]]; then
+        rm -f "$_proof_file"
+        continue
     fi
-    if (( _NOW_EPOCH - _proof_mtime > 14400 )); then  # 4 hours
+
+    _has_markers=false
+    for _marker in "${SESSION_TRACE_STORE}/.active-"*"-${_proof_phash}"; do
+        if [[ -f "$_marker" ]]; then
+            _has_markers=true
+            break
+        fi
+    done
+
+    if [[ "$_has_markers" == "false" ]]; then
         rm -f "$_proof_file"
     fi
 done
 
-# Verify: old file removed, new file preserved
-OLD_REMOVED=false
-NEW_PRESERVED=false
+# Verify: active file preserved (has marker), orphan deleted (no marker)
+ACTIVE_PRESERVED=false
+ORPHAN_DELETED=false
 
-[[ ! -f "$OLD_PROOF" ]] && OLD_REMOVED=true
-[[ -f "$NEW_PROOF" ]] && NEW_PRESERVED=true
+[[ -f "$ACTIVE_PROOF" ]] && ACTIVE_PRESERVED=true
+[[ ! -f "$ORPHAN_PROOF" ]] && ORPHAN_DELETED=true
 
-if $OLD_REMOVED && $NEW_PRESERVED; then
+if $ACTIVE_PRESERVED && $ORPHAN_DELETED; then
     pass_test
-elif ! $OLD_REMOVED && ! $NEW_PRESERVED; then
-    fail_test "Old file not removed AND new file missing (both wrong)"
-elif ! $OLD_REMOVED; then
-    fail_test "Old proof-status file was NOT removed (mtime-based TTL failed)"
+elif ! $ACTIVE_PRESERVED && ! $ORPHAN_DELETED; then
+    fail_test "Active file deleted AND orphan preserved (both wrong)"
+elif ! $ACTIVE_PRESERVED; then
+    fail_test "Active proof-status file was incorrectly deleted (marker not detected)"
 else
-    fail_test "New proof-status file was incorrectly removed"
+    fail_test "Orphaned proof-status file was NOT deleted (marker-based sweep failed)"
 fi
 
 TMPDIR_03=""
@@ -248,6 +262,68 @@ else
 fi
 
 TMPDIR_04=""
+trap - EXIT
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PC-05: Empty-hash proof-status file is always deleted (Bug A + Bug C coverage)
+#
+# Scenario: A .proof-status- file with an empty phash suffix exists (from Bug A
+# where _SHA256_CMD was unset). Even if unrelated markers exist in TRACE_STORE,
+# the empty-hash file must always be deleted — no project can legitimately own it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+run_test "PC-05: Empty-hash .proof-status- file is always deleted regardless of other markers"
+
+TMPDIR_05="$PROJECT_ROOT/tmp/test-pc-05-$$"
+TRACE_STORE_05="$TMPDIR_05/traces"
+mkdir -p "$TMPDIR_05" "$TRACE_STORE_05"
+trap 'rm -rf "$TMPDIR_05"' EXIT
+
+# Create the empty-hash file (Bug A artifact)
+EMPTY_PROOF="$TMPDIR_05/.proof-status-"
+echo "needs-verification|$(date +%s)|ghost-session" > "$EMPTY_PROOF"
+
+# Create markers for unrelated projects (should NOT protect the empty-hash file)
+touch "$TRACE_STORE_05/.active-implementer-test-aabbccdd"
+touch "$TRACE_STORE_05/.active-tester-sess-11223344"
+
+CLAUDE_DIR="$TMPDIR_05"
+SESSION_TRACE_STORE="$TRACE_STORE_05"
+
+# Inline the marker-based sweep logic from session-end.sh
+for _proof_file in "${CLAUDE_DIR}/.proof-status-"*; do
+    [[ -f "$_proof_file" ]] || continue
+    [[ "$_proof_file" == *.lock ]] && continue
+
+    _proof_basename="${_proof_file##*/}"
+    _proof_phash="${_proof_basename#.proof-status-}"
+
+    if [[ -z "$_proof_phash" ]]; then
+        rm -f "$_proof_file"
+        continue
+    fi
+
+    _has_markers=false
+    for _marker in "${SESSION_TRACE_STORE}/.active-"*"-${_proof_phash}"; do
+        if [[ -f "$_marker" ]]; then
+            _has_markers=true
+            break
+        fi
+    done
+
+    if [[ "$_has_markers" == "false" ]]; then
+        rm -f "$_proof_file"
+    fi
+done
+
+# Verify: empty-hash file is deleted even though other markers exist
+if [[ ! -f "$EMPTY_PROOF" ]]; then
+    pass_test
+else
+    fail_test "Empty-hash .proof-status- file was NOT deleted (Bug A/C not fixed)"
+fi
+
+TMPDIR_05=""
 trap - EXIT
 
 # ─────────────────────────────────────────────────────────────────────────────
