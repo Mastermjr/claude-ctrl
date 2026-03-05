@@ -586,6 +586,34 @@ if [[ -n "$NOT_TESTED_LINES" ]]; then
     fi
 fi
 
+# Must have integration wiring assessment if new files were created
+# @decision DEC-AV-IWIRE-001
+# @title Integration coverage check in auto-verify secondary validation
+# @status accepted
+# @rationale The tester's Phase 2.5 blocks AUTOVERIFY when integration issues
+#   are found, but nothing verifies Phase 2.5 actually ran. This backstop checks
+#   the tester's summary for evidence of integration assessment. If the implementer
+#   created new files but the tester's coverage table has no integration row,
+#   auto-verify fails and falls back to manual approval.
+_AV_HAS_NEW_FILES=false
+if [[ -n "$_AV_TRACE_ID" ]]; then
+    _IMPL_TRACE=$(ls -1d "${TRACE_STORE}/implementer-"* 2>/dev/null | sort -r | head -1)
+    if [[ -n "$_IMPL_TRACE" && -f "$_IMPL_TRACE/artifacts/files-changed.txt" ]]; then
+        # Check if implementer created new files (not just modified)
+        _IMPL_DIFF_DIR="${_IMPL_TRACE}/artifacts"
+        if [[ -f "$_IMPL_DIFF_DIR/diff.patch" ]] && grep -q '^new file mode' "$_IMPL_DIFF_DIR/diff.patch" 2>/dev/null; then
+            _AV_HAS_NEW_FILES=true
+        fi
+    fi
+fi
+
+if [[ "$_AV_HAS_NEW_FILES" == "true" ]]; then
+    if ! echo "$SUMMARY_TEXT" | grep -qiE '(Integration wiring|integration.*verified|NOT WIRED|entry.point.*reachable)'; then
+        log_info "POST-TASK" "secondary validation FAIL: new files created but no integration assessment in tester summary"
+        AV_FAIL=true
+    fi
+fi
+
 # --- Apply result ---
 if [[ "$AV_FAIL" == "true" ]]; then
     log_info "POST-TASK" "secondary validation FAILED — proof stays $PROOF_STATUS"
@@ -600,6 +628,8 @@ if [[ "$AV_FAIL" == "true" ]]; then
     echo "$VALIDATION_TEXT" | grep -qiE '(\*\*(Medium|Low)\*\*|[Cc]onfidence:?\s*(Medium|Low)|(Medium|Low) confidence)' \
         && _AV_REASONS="${_AV_REASONS}has Medium/Low confidence; "
     [[ -n "${NON_ENV_LINES:-}" ]] && _AV_REASONS="${_AV_REASONS}non-environmental Not tested; "
+    [[ "$_AV_HAS_NEW_FILES" == "true" ]] && ! echo "$SUMMARY_TEXT" | grep -qiE '(Integration wiring|integration.*verified|NOT WIRED|entry.point.*reachable)' \
+        && _AV_REASONS="${_AV_REASONS}new files without integration assessment; "
     ESCAPED=$(printf 'Auto-verify blocked: %s Manual approval required.' \
         "${_AV_REASONS:-unknown reason}" | jq -Rs .)
 
