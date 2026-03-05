@@ -154,7 +154,7 @@ get_plan_status() {
         # from the global count (all active phases) to the per-initiative count when a
         # target initiative is found.
         if [[ -n "$PLAN_ACTIVE_INITIATIVE_NAME" && -n "$_active_section" ]]; then
-            local _p2_in_target=false _p2_current_phase="" _p2_done=false _p2_phase_count=0
+            local _p2_in_target=false _p2_current_phase="" _p2_done=false _p2_phase_count=0 _p2_first_phase=""
             while IFS= read -r _line; do
                 # Enter target initiative block
                 if [[ "$_line" == "### Initiative: ${PLAN_ACTIVE_INITIATIVE_NAME}" ]]; then
@@ -170,6 +170,8 @@ get_plan_status() {
                     if [[ "$_line" =~ ^'####'[[:space:]]+'Phase'[[:space:]][0-9] ]]; then
                         _p2_current_phase="$_line"
                         _p2_phase_count=$(( _p2_phase_count + 1 ))
+                        # Capture first phase header encountered for planned-phase fallback
+                        [[ -z "$_p2_first_phase" ]] && _p2_first_phase="$_line"
                     fi
                     # When Status: in-progress follows a phase header, capture it (continue counting)
                     if [[ -n "$_p2_current_phase" && "$_p2_done" == "false" && "$_line" =~ ^\*\*Status:\*\*.*[Ii]n-[Pp]rogress ]]; then
@@ -178,6 +180,19 @@ get_plan_status() {
                     fi
                 fi
             done <<< "$_active_section"
+            # Fallback: if no in-progress phase but phases exist, use first phase with (planned) marker.
+            # @decision DEC-PLANLIB-PLANNED-PHASE-001
+            # @title Planned-phase fallback for initiative banner
+            # @status accepted
+            # @rationale When an initiative has only planned phases (none in-progress), the banner
+            # previously showed no phase info. We capture the first phase header during the loop
+            # and emit it with a " (planned)" suffix so statusline.sh can render it with dim styling.
+            if [[ "$_p2_done" == "false" && -n "$_p2_first_phase" ]]; then
+                # COUPLING: the " (planned)" suffix is detected by statusline.sh
+                # (scripts/statusline.sh ~line 348: `*"(planned)"` glob).
+                # If you change this marker, update the detection in statusline.sh too.
+                PLAN_IN_PROGRESS_PHASE="${_p2_first_phase} (planned)"
+            fi
             # Override global phase count with per-initiative count for banner accuracy
             if [[ "$_p2_in_target" == "true" && "$_p2_phase_count" -gt 0 ]]; then
                 PLAN_TOTAL_PHASES="$_p2_phase_count"

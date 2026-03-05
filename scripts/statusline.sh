@@ -335,8 +335,24 @@ if [[ -n "$cache_initiative" ]]; then
   _banner="$cache_initiative"
 
   # Extract phase number and title from "#### Phase N: Title -- Subtitle"
+  # Detect "(planned)" fallback marker appended by plan-lib.sh when no in-progress phase exists.
+  # @decision DEC-STATUSLINE-PLANNED-PHASE-001
+  # @title Planned-phase banner fallback rendering
+  # @status accepted
+  # @rationale When all phases are planned (none in-progress), plan-lib.sh appends " (planned)"
+  # to the phase string so the banner can still show phase context. We strip the marker before
+  # parsing, then re-inject it as a dim "[planned]" label in the rendered line0.
   if [[ -n "$cache_phase" ]]; then
-    if [[ "$cache_phase" =~ Phase[[:space:]]([0-9]+):[[:space:]]*(.*) ]]; then
+    _phase_planned=false
+    _phase_str="$cache_phase"
+    # COUPLING: the " (planned)" suffix is emitted by plan-lib.sh get_plan_status()
+    # (hooks/plan-lib.sh ~line 191). If you change that marker, update this detection too.
+    if [[ "$_phase_str" == *"(planned)" ]]; then
+      _phase_planned=true
+      _phase_str="${_phase_str% (planned)}"
+    fi
+
+    if [[ "$_phase_str" =~ Phase[[:space:]]([0-9]+):[[:space:]]*(.*) ]]; then
       _phase_num="${BASH_REMATCH[1]}"
       _phase_title="${BASH_REMATCH[2]}"
       # Strip leading #### prefix if present (e.g. "#### Phase 0: Title")
@@ -355,11 +371,27 @@ if [[ -n "$cache_initiative" ]]; then
     _banner="${_banner}  (+${_extra} more)"
   fi
 
-  line0=$(printf '\033[1;36m%s\033[0m' "$_banner")
+  if [[ "${_phase_planned:-false}" == "true" ]]; then
+    line0=$(printf '\033[1;36m%s \033[2m[planned]\033[0m' "$_banner")
+  else
+    line0=$(printf '\033[1;36m%s\033[0m' "$_banner")
+  fi
 fi
 
 # Terminal width — must be resolved before the responsive layout sections below.
-term_w="${COLUMNS:-250}"
+# @decision DEC-STATUSLINE-TERMWIDTH-001
+# @title Terminal width detection with subprocess-safe fallback
+# @status accepted
+# @rationale COLUMNS is often 0 (not unset) in subprocess context — the default :-250
+# was masked by this: 0 is set, so 250 never applied, and all segments were dropped.
+# The new approach: treat 0 as "not available" and fall back to tput cols, then 80.
+# Clamp to [40, 200] to prevent pathological truncation or over-wide output.
+term_w="${COLUMNS:-0}"
+if (( term_w <= 0 )); then
+  term_w=$(tput cols 2>/dev/null || echo 80)
+fi
+(( term_w < 40 )) && term_w=80
+(( term_w > 200 )) && term_w=200
 
 # ---------------------------------------------------------------------------
 # LINE 2 (project): Workspace + git + agents + todos
@@ -524,8 +556,19 @@ cache_lifetime_tokens_int="${cache_lifetime_tokens%.*}"
 cache_lifetime_tokens_int=$(( ${cache_lifetime_tokens_int:-0} ))
 
 # Persist main session token count for session-end.sh to read as fallback.
-if [[ -n "${CACHE_FILE:-}" ]]; then
-  printf '%d' "$total_tokens_int" > "${CACHE_FILE%/*}/.session-main-tokens" 2>/dev/null || true
+# Uses workspace_dir with double-nesting guard (same logic as get_claude_dir):
+# ~/.claude projects already ARE the .claude dir, so don't append .claude again.
+# @decision DEC-STATUSLINE-TOKEN-PATH-001
+# @title Token persistence path aligned with get_claude_dir()
+# @status accepted
+# @rationale CACHE_FILE%/* resolves to $workspace_dir/.claude for normal projects but
+# to ~/.claude/.claude for the ~/.claude project itself (double-nesting). session-end.sh
+# reads from get_claude_dir() which correctly strips the second .claude. Fix: mirror
+# that logic here — use workspace_dir directly for ~/.claude projects, append .claude otherwise.
+if [[ -n "${workspace_dir:-}" ]]; then
+  _token_dir="$workspace_dir/.claude"
+  [[ "$workspace_dir" == "$HOME/.claude" ]] && _token_dir="$workspace_dir"
+  printf '%d' "$total_tokens_int" > "${_token_dir}/.session-main-tokens" 2>/dev/null || true
 fi
 
 # Build token display: tks: Nk  or  tks: Nk(+Sk)
