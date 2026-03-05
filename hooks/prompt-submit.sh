@@ -146,7 +146,7 @@ if [[ -n "$PROMPT" ]] && echo "$PROMPT" | grep -qiE '\bverified\b|\bapproved?\b|
 {
   "hookSpecificOutput": {
     "hookEventName": "UserPromptSubmit",
-    "additionalContext": "DISPATCH GUARDIAN NOW: User verified proof-of-work. proof-status=verified. Auto-dispatch Guardian per CLAUDE.md. Do NOT ask 'should I commit?' — Guardian owns the approval cycle."
+    "additionalContext": "DISPATCH GUARDIAN NOW with AUTO-VERIFY-APPROVED: User verified proof-of-work. proof-status=verified. Auto-dispatch Guardian per CLAUDE.md with AUTO-VERIFY-APPROVED in the prompt — the user has already approved. Guardian MUST skip its Interactive Approval Protocol and execute the merge cycle directly."
   }
 }
 EOFVERIFY

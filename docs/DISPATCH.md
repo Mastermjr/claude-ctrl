@@ -80,6 +80,17 @@ When the orchestrator receives this system-reminder:
 If auto-verify doesn't trigger, the manual flow applies: present the tester's
 report, engage in Q&A, user approval triggers prompt-submit.sh gate transition.
 
+## Manual Approval Fast Path
+
+When prompt-submit.sh detects an approval keyword (approved, verified, lgtm, etc.)
+and transitions `.proof-status` to `verified`, it emits `DISPATCH GUARDIAN NOW with
+AUTO-VERIFY-APPROVED`. This is functionally equivalent to the auto-verify path above:
+
+1. The user has already approved — their approval keyword IS the approval.
+2. Dispatch Guardian with `AUTO-VERIFY-APPROVED` in the prompt.
+3. Guardian skips its Interactive Approval Protocol and executes directly.
+4. Do NOT ask the user to approve again — that defeats the purpose of the gate.
+
 **After implementer returns with CYCLE COMPLETE:** Do NOT dispatch tester or guardian — the implementer already completed the full cycle. Present the implementer's summary to the user. post-task.sh emits the "CYCLE COMPLETE" directive automatically when it detects this condition in the implementer's trace summary.
 
 ## Pre-Dispatch Gates (Mechanically Enforced)
