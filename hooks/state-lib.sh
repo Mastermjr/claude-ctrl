@@ -5,7 +5,6 @@
 # Depends on: log.sh (detect_project_root, get_claude_dir, log_info)
 #
 # Provides:
-#   state_write_locked  - Generic locked write with optional CAS semantics
 #   state_update        - Write a key/value to state.json with timestamp and source
 #   state_read          - Read a value from state.json by jq path
 #
@@ -21,82 +20,9 @@
 #   (2) audit history with timestamps and sources, (3) coordination visibility
 #   across hooks. Dual-write pattern: dotfile write is the primary (must succeed),
 #   state_update is secondary (failures are logged and suppressed).
-#
-# @decision DEC-STATE-CAS-001
-# @title state_write_locked() generic CAS wrapper — extracted from cas_proof_status()
-# @status accepted
-# @rationale Multiple hooks implement their own inline flock+write patterns for
-#   protected dotfiles (.proof-status, .proof-epoch, future state files). The pattern
-#   is identical: acquire lock, optionally compare current value, write new value,
-#   release lock. Extracting it into state_write_locked() in state-lib.sh gives callers
-#   a single, tested implementation. cas_proof_status() in prompt-submit.sh now
-#   delegates its CAS interior to state_write_locked(), eliminating code duplication
-#   and ensuring the same timeout (STATE_LOCK_TIMEOUT, default 5s) applies everywhere.
 
 # Guard against double-sourcing
 [[ -n "${_STATE_LIB_LOADED:-}" ]] && return 0
-
-# state_write_locked FILE NEW_VALUE [EXPECTED_VALUE]
-#   Generic locked write for protected dotfiles with optional CAS semantics.
-#
-#   FILE:           Path to the file to write (e.g., "${CLAUDE_DIR}/.proof-epoch")
-#   NEW_VALUE:      Content to write atomically
-#   EXPECTED_VALUE: (optional) If provided, acts as a compare-and-swap — the write
-#                   is only performed if the current file content equals EXPECTED_VALUE.
-#                   If the current value differs, logs a warning and returns 1.
-#
-#   Returns:
-#     0 — write succeeded (or CAS matched and write succeeded)
-#     1 — CAS failed (current value != expected) or write error
-#     1 — lock timeout (logs warning, returns 1 non-fatally)
-#
-#   Lock file: <file>.lock (consistent with write_proof_status and state_update)
-#   Timeout: STATE_LOCK_TIMEOUT env var (default: 5 seconds)
-#
-#   Usage (simple write):
-#     state_write_locked "${CLAUDE_DIR}/.proof-epoch" "$(date +%s)"
-#
-#   Usage (CAS — only write if currently "pending"):
-#     state_write_locked "${CLAUDE_DIR}/.proof-status" "verified" "pending" || echo "CAS failed"
-state_write_locked() {
-    local file="$1"
-    local new_value="$2"
-    local expected="${3:-}"
-    local lockfile="${file}.lock"
-    local timeout="${STATE_LOCK_TIMEOUT:-5}"
-
-    mkdir -p "$(dirname "$file")" 2>/dev/null || return 1
-
-    local _result=0
-    (
-        # Use _portable_flock if available, fall back to bare flock, then proceed unlocked
-        local _lock_ok=true
-        if type _portable_flock &>/dev/null; then
-            _portable_flock "$timeout" 9 || _lock_ok=false
-        elif command -v flock &>/dev/null; then
-            flock -w "$timeout" 9 || _lock_ok=false
-        fi
-        if [[ "$_lock_ok" == "false" ]]; then
-            log_info "state_write_locked" "lock timeout on $file" 2>/dev/null || true
-            exit 1
-        fi
-
-        # CAS check: if expected value provided, verify current matches before writing
-        if [[ -n "$expected" ]]; then
-            local current
-            current=$(cat "$file" 2>/dev/null || echo "")
-            if [[ "$current" != "$expected" ]]; then
-                log_info "state_write_locked" "CAS failed on $file: expected='$expected' actual='$current'" 2>/dev/null || true
-                exit 1
-            fi
-        fi
-
-        printf '%s' "$new_value" > "$file" || exit 1
-        exit 0
-    ) 9>"$lockfile"
-    _result=$?
-    return $_result
-}
 
 # state_update KEY VALUE [SOURCE]
 #   KEY:    jq path (e.g., ".proof.status", ".agents.tester.status")
@@ -130,15 +56,9 @@ state_update() {
     # Wrap critical section in flock to prevent concurrent read-modify-write races.
     # fd 9 is used as the lock descriptor; subshell ensures the lock is released on exit.
     (
-        # Use _portable_flock if available, fall back to bare flock, then proceed unlocked
-        local _lock_ok=true
-        if type _portable_flock &>/dev/null; then
-            _portable_flock 5 9 || _lock_ok=false
-        elif command -v flock &>/dev/null; then
-            flock -w 5 9 || _lock_ok=false
-        fi
-        if [[ "$_lock_ok" == "false" ]]; then
-            log_info "STATE" "lock timeout for ${key}, skipping update" 2>/dev/null || true; return 0
+        if ! _lock_fd 5 9; then
+            log_info "STATE" "lock timeout for ${key}, skipping update" 2>/dev/null || true
+            return 0
         fi
 
         # Initialize state.json if missing
@@ -185,6 +105,6 @@ state_read() {
     return 1
 }
 
-export -f state_write_locked state_update state_read
+export -f state_update state_read
 
 _STATE_LIB_LOADED=1

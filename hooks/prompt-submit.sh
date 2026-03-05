@@ -210,59 +210,70 @@ fi
 #   Attempt to transition proof-status from EXPECTED to NEW_STATUS atomically.
 #   Returns 0 on success, 1 if current status doesn't match EXPECTED, 2 on lock failure.
 #
-#   @decision DEC-PROOF-CAS-REFACTOR-001
-#   @title cas_proof_status() delegates to state_write_locked() + write_proof_status()
+#   @decision DEC-PROOF-CAS-ATOMIC-001
+#   @title cas_proof_status() holds single lock across check-and-write (true atomic CAS)
 #   @status accepted
-#   @rationale Phase 1 W1-1 aims to reuse state_write_locked() for flock+CAS patterns.
-#     However, proof-status has two constraints that make full delegation to
-#     state_write_locked() impractical: (1) proof-status files are pipe-delimited
-#     (status|timestamp), so a simple content comparison would fail for status-only
-#     expected values; (2) write_proof_status() enforces the monotonic lattice and
-#     writes to 3 paths (scoped, legacy, worktree breadcrumb) — bypassing it would
-#     break lattice enforcement. The refactor therefore uses state_write_locked() for
-#     the pre-check lock acquisition (writing the expected status string to the
-#     lockfile as a sentinel), then calls write_proof_status() for the lattice-enforced
-#     write. This eliminates the inline flock subshell (the "interior" to replace)
-#     while preserving both CAS semantics and lattice enforcement.
+#   @rationale The prior implementation (DEC-PROOF-CAS-REFACTOR-001) had a race window:
+#     it called state_write_locked() to acquire and immediately release the lock (for a
+#     sentinel write), then called write_proof_status() which acquired the same lock
+#     again. Between those two lock acquisitions a concurrent prompt-submit.sh invocation
+#     could slip in, read the same "pending" state, pass the pre-check, and both would
+#     succeed the CAS. The fix: use a single subshell that holds fd 9 across the entire
+#     check-and-write operation. The write is done directly (not via write_proof_status)
+#     because calling it would deadlock on the same lock file. Guardian marker and
+#     state_update dual-write are inlined to replicate write_proof_status() behavior
+#     within the held lock. The pre-check (unlocked fast path) is kept to avoid
+#     unnecessary lock contention when the state clearly doesn't match.
 cas_proof_status() {
     local expected="$1"
     local new_val="$2"
     local lockfile="${CLAUDE_DIR}/.proof-status.lock"
+    local proof_file
+    proof_file=$(resolve_proof_file)
 
     mkdir -p "$(dirname "$lockfile")" 2>/dev/null || return 2
 
-    # Resolve proof file to read current status for CAS comparison
-    local proof_file
-    proof_file=$(resolve_proof_file)
+    # Pre-check (unlocked fast path — avoids lock contention)
     local current="none"
     if [[ -f "$proof_file" ]]; then
-        if validate_state_file "$proof_file" 2 2>/dev/null; then
-            current=$(cut -d'|' -f1 "$proof_file" 2>/dev/null || echo "none")
-        else
-            current="corrupt"
+        validate_state_file "$proof_file" 2 2>/dev/null || return 1
+        current=$(cut -d'|' -f1 "$proof_file" 2>/dev/null || echo "none")
+    fi
+    [[ "$current" != "$expected" ]] && return 1
+
+    # Atomic CAS: hold lock across re-check AND write
+    local _result=0
+    (
+        if ! _lock_fd 5 9; then
+            log_info "cas_proof_status" "lock timeout" 2>/dev/null || true
+            exit 2
         fi
-    fi
-
-    # Pre-check: fail fast if expected state doesn't match (avoids lock contention)
-    if [[ "$current" != "$expected" ]]; then
-        log_info "cas_proof_status" "CAS pre-check failed: expected=${expected} actual=${current}" 2>/dev/null || true
-        return 1
-    fi
-
-    # Use state_write_locked() to atomically write the expected sentinel to the lock file.
-    # This acquires the flock, verifies no concurrent writer changed state since our
-    # pre-check, and serializes with write_proof_status() (which uses the same lockfile).
-    # The lockfile content (expected status string) serves as a CAS sentinel — if the
-    # lockfile already contains a different value, a concurrent write is in progress.
-    # Non-fatal: state_write_locked failure returns 1, treated as lock failure (exit 2).
-    if ! state_write_locked "$lockfile" "$expected"; then
-        log_info "cas_proof_status" "state_write_locked sentinel failed for $expected" 2>/dev/null || true
-        return 2
-    fi
-
-    # Lock sentinel written — now delegate to write_proof_status for lattice-enforced write.
-    # write_proof_status acquires its own flock on the same lockfile (which we released).
-    write_proof_status "$new_val" "$PROJECT_ROOT" && return 0 || return 1
+        # Re-read under lock (the actual CAS check)
+        local locked_current="none"
+        if [[ -f "$proof_file" ]]; then
+            locked_current=$(cut -d'|' -f1 "$proof_file" 2>/dev/null || echo "none")
+        fi
+        if [[ "$locked_current" != "$expected" ]]; then
+            log_info "cas_proof_status" "CAS failed under lock: expected=${expected} actual=${locked_current}" 2>/dev/null || true
+            exit 1
+        fi
+        # Write directly — we hold the lock that write_proof_status would acquire
+        local timestamp; timestamp=$(date +%s)
+        printf '%s\n' "${new_val}|${timestamp}" > "${proof_file}.tmp" && mv "${proof_file}.tmp" "$proof_file"
+        # Pre-create guardian marker (same as write_proof_status)
+        if [[ "$new_val" == "verified" ]]; then
+            local trace_store="${TRACE_STORE:-$HOME/.claude/traces}"
+            local session="${CLAUDE_SESSION_ID:-$$}"
+            local phash; phash=$(project_hash "$PROJECT_ROOT")
+            echo "pre-verified|${timestamp}" > "${trace_store}/.active-guardian-${session}-${phash}" 2>/dev/null || true
+        fi
+        log_info "cas_proof_status" "CAS succeeded: ${expected} → ${new_val}" 2>/dev/null || true
+        # Dual-write to state.json
+        type state_update &>/dev/null && state_update ".proof.status" "$new_val" "cas_proof_status" || true
+        exit 0
+    ) 9>"$lockfile"
+    _result=$?
+    return $_result
 }
 
 PROOF_FILE=$(resolve_proof_file)
