@@ -401,6 +401,10 @@ echo "needs-verification|12345" > "$TEMP_REPO/.claude/.proof-status-${C10_PHASH}
 # Also write to new path for completeness
 mkdir -p "$TEMP_REPO/.claude/state/${C10_PHASH}"
 echo "needs-verification|12345" > "$TEMP_REPO/.claude/state/${C10_PHASH}/proof-status"
+# Create active agent marker so Check 10 blocks deletion (DEC-PROOF-DELETE-SOFTEN-001)
+C10_SID="test-check10-$$"
+C10_TRACE_DIR=$(mktemp -d "$PROJECT_ROOT/tmp/test-traces-XXXXXX")
+echo "implementer-fake" > "$C10_TRACE_DIR/.active-implementer-${C10_SID}-${C10_PHASH}"
 
 INPUT_JSON=$(cat <<EOF
 {
@@ -413,7 +417,7 @@ EOF
 )
 
 OUTPUT=$(cd "$TEMP_REPO" && \
-         echo "$INPUT_JSON" | CLAUDE_DIR="$TEMP_REPO/.claude" bash "$HOOKS_DIR/pre-bash.sh" 2>&1) || true
+         echo "$INPUT_JSON" | CLAUDE_SESSION_ID="$C10_SID" TRACE_STORE="$C10_TRACE_DIR" CLAUDE_DIR="$TEMP_REPO/.claude" bash "$HOOKS_DIR/pre-bash.sh" 2>&1) || true
 
 if echo "$OUTPUT" | grep -q "deny" && echo "$OUTPUT" | grep -q "verification is active"; then
     pass_test
@@ -422,7 +426,7 @@ else
 fi
 
 cd "$PROJECT_ROOT"
-rm -rf "$TEMP_REPO"
+rm -rf "$TEMP_REPO" "$C10_TRACE_DIR"
 
 run_test "Check 10: Block rm .proof-status when pending"
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-pg-pend-XXXXXX")
@@ -432,6 +436,10 @@ C10_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
 echo "pending|12345" > "$TEMP_REPO/.claude/.proof-status-${C10_PHASH}"
 mkdir -p "$TEMP_REPO/.claude/state/${C10_PHASH}"
 echo "pending|12345" > "$TEMP_REPO/.claude/state/${C10_PHASH}/proof-status"
+# Create active agent marker so Check 10 blocks deletion (DEC-PROOF-DELETE-SOFTEN-001)
+C10_SID="test-check10-pend-$$"
+C10_TRACE_DIR=$(mktemp -d "$PROJECT_ROOT/tmp/test-traces-XXXXXX")
+echo "implementer-fake" > "$C10_TRACE_DIR/.active-implementer-${C10_SID}-${C10_PHASH}"
 
 INPUT_JSON=$(cat <<EOF
 {
@@ -444,7 +452,7 @@ EOF
 )
 
 OUTPUT=$(cd "$TEMP_REPO" && \
-         echo "$INPUT_JSON" | CLAUDE_DIR="$TEMP_REPO/.claude" bash "$HOOKS_DIR/pre-bash.sh" 2>&1) || true
+         echo "$INPUT_JSON" | CLAUDE_SESSION_ID="$C10_SID" TRACE_STORE="$C10_TRACE_DIR" CLAUDE_DIR="$TEMP_REPO/.claude" bash "$HOOKS_DIR/pre-bash.sh" 2>&1) || true
 
 if echo "$OUTPUT" | grep -q "deny" && echo "$OUTPUT" | grep -q "verification is active"; then
     pass_test
@@ -453,7 +461,7 @@ else
 fi
 
 cd "$PROJECT_ROOT"
-rm -rf "$TEMP_REPO"
+rm -rf "$TEMP_REPO" "$C10_TRACE_DIR"
 
 run_test "Check 10: Allow rm .proof-status when verified"
 TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-pg-ver-XXXXXX")
