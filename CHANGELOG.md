@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `feature/rsm-phase4`: Self-validation infrastructure — version sentinels in all library files, `bash -n` syntax preflight in session-init.sh, `hooks-gen` integrity check via post-merge git hook, 292-line self-validation test suite (test-self-validation.sh), source-lib.sh `lib_files()` enumerator for consistent library discovery
 
 ### Fixed
+- `feature/fix-ci`: Resolve 15+ CI failures — SC2168 fix in session-init.sh, mkdir -p before timing log (Ubuntu crash), canonical proof-status paths in tests, context-lib.sh to source-lib.sh migration, removed V2 duplicate test sections, updated diagnose lib health check list
 - `feature/fix-dispatch-integrity`: Restore dispatch protocol integrity after Task-to-Agent rename — migrate all test fixtures/scripts from Task to Agent tool name, remove non-existent max_turns parameter, add Gate D (plan vs planner advisory) and Gate E (worktree isolation advisory) to task-track.sh, add tool-name canary to session-init.sh for future rename detection, add Wave Dispatch section to DISPATCH.md, update turn budget docs to prompt-based
 
 ### Changed
