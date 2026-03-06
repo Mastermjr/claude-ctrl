@@ -43,6 +43,10 @@
 #   other state files and easy to rotate or grep. Writing errors are suppressed
 #   (|| true) to prevent timing instrumentation from denying legitimate commands.
 
+# Guard: prevent re-sourcing (test files that source multiple hooks would
+# otherwise stack EXIT traps and crash bash's eval parser — exit code 139).
+[[ -n "${_SOURCE_LIB_LOADED:-}" ]] && return 0
+_SOURCE_LIB_LOADED=1
 _SOURCE_LIB_VERSION=1
 
 # --- Hook timing instrumentation — <5ms overhead ---

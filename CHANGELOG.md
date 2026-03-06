@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - `feature/fix-ci-round2`: Fix remaining 4 Ubuntu CI failures — move `_PHASH` computation to top-level in session-init.sh (was inside TRACE_STORE conditional, causing `set -u` crash), add `mkdir -p "$TRACE_STORE"` in task-track.sh (find on non-existent dir triggers `set -eo pipefail` crash)
 - `feature/fix-ci`: Resolve 15+ CI failures — SC2168 fix in session-init.sh, mkdir -p before timing log (Ubuntu crash), canonical proof-status paths in tests, context-lib.sh to source-lib.sh migration, removed V2 duplicate test sections, updated diagnose lib health check list
+- `worktree-fix-test-failures`: Fix remaining test failures — source-lib.sh idempotency guard to prevent EXIT trap stacking (exit 139), align proof-gate Check 10 tests with marker-based ownership (DEC-PROOF-DELETE-SOFTEN-001), fix proof-lifecycle T13 network timeout via gh stub
 - `feature/fix-dispatch-integrity`: Restore dispatch protocol integrity after Task-to-Agent rename — migrate all test fixtures/scripts from Task to Agent tool name, remove non-existent max_turns parameter, add Gate D (plan vs planner advisory) and Gate E (worktree isolation advisory) to task-track.sh, add tool-name canary to session-init.sh for future rename detection, add Wave Dispatch section to DISPATCH.md, update turn budget docs to prompt-based
 
 ### Changed

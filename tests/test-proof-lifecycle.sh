@@ -401,7 +401,12 @@ T13_INPUT="{\"prompt\":\"hello world\",\"cwd\":\"${T13_REPO}\"}"
 T13_OUT=$(
     export CLAUDE_PROJECT_DIR="$T13_REPO"
     export CLAUDE_SESSION_ID="test13-$$"
-    printf '%s' "$T13_INPUT" | timeout 10 bash "${HOOKS_DIR}/prompt-submit.sh" 2>/dev/null || true
+    unset PROJECT_ROOT  # ensure detect_project_root() uses CLAUDE_PROJECT_DIR
+    # Create a stub gh that exits immediately to skip slow network calls from todo.sh hud
+    T13_BIN=$(mktemp -d)
+    printf '#!/bin/sh\nexit 1\n' > "$T13_BIN/gh" && chmod +x "$T13_BIN/gh"
+    printf '%s' "$T13_INPUT" | timeout 15 env PATH="$T13_BIN:$PATH" bash "${HOOKS_DIR}/prompt-submit.sh" 2>/dev/null || true
+    rm -rf "$T13_BIN"
 )
 
 if echo "$T13_OUT" | grep -q "previous verification attempt was interrupted"; then
