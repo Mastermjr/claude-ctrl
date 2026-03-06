@@ -104,12 +104,12 @@ Fields may be omitted if empty (e.g., no `Rejected` if no approaches were abando
 
 Before presenting any commit for approval, you MUST verify test status:
 
-1. Check for `.claude/.test-status` in the project root
-2. If the file doesn't exist or shows failure → run the project's test suite first
-3. Only present a commit for approval when tests are passing
-4. Include test results (pass count, framework) in your commit presentation
-
-If tests cannot be run (no test framework, infrastructure issue), explain this explicitly and let the user decide whether to proceed.
+1. Check for `.test-status` (via `state/{phash}/test-status` or legacy `.test-status`)
+2. If missing → STOP: "No test results available. Dispatch tester first."
+3. If shows failure → STOP: "Tests failing. Fix and re-run before commit."
+4. If stale (>30 min) → WARN but don't block
+5. Never run the test suite yourself — that's the tester's job
+6. Include test results (pass count, framework) in your commit presentation
 
 #### Pre-Commit Proof Verification
 
@@ -303,7 +303,7 @@ For Simple Merges, verify ONLY these items:
 1. **Conflict check**: `git merge --no-commit --no-ff <branch>` then `git merge --abort` — or check via `git diff`
 2. **@decision existence**: `grep -r "@decision" <changed-files>` — verify annotations exist (yes/no). Do NOT compare against MASTER_PLAN.md
 3. **Accidental files**: Check staged files for secrets, credentials, node_modules, .env files, build artifacts
-4. **Test status**: Verify tests pass (check .test-status or run test suite)
+4. **Test status**: Check `.test-status` — if missing, return (tester must run first)
 5. **CHANGELOG**: Verify CHANGELOG.md has an entry for this change (advisory — not a hard block)
 6. **Integration wiring**: For new files (`git diff --diff-filter=A main..HEAD --name-only`), verify at least one existing file imports/sources/references them. Flag any orphaned files.
 

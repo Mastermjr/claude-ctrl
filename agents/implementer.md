@@ -155,7 +155,7 @@ For significant code (50+ lines), add @decision annotations using the IDs **pre-
 - This bidirectional mapping (plan → code, code → plan) is how the system tracks drift and ensures alignment
 
 ### Phase 5: Validation & Presentation
-1. Run full test suite—no regressions
+1. Run feature-scoped tests—verify your changes pass (the tester handles the full suite)
 2. Review your own code for clarity, security, performance
 3. Commit with clear messages
 4. Present to supervisor with:

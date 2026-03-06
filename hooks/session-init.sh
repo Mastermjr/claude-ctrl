@@ -1031,7 +1031,7 @@ if [[ "$CI_TIER2_NEEDED" == "true" ]] && [[ -n "${_PID_CI:-}" ]]; then
         _GH_CONCLUSION="${_GH_CI_RAW%%|*}"
         _GH_TIMESTAMP="${_GH_CI_RAW##*|}"
         if [[ "$_GH_CONCLUSION" == "failure" ]]; then
-            CONTEXT_PARTS+=("[WARN] CI failing on ${GIT_BRANCH:-main} — last run failed (${_GH_TIMESTAMP}). Run \`bash tests/run-hooks.sh\` locally.")
+            CONTEXT_PARTS+=("[WARN] CI failing on ${GIT_BRANCH:-main} — last run failed (${_GH_TIMESTAMP}). Dispatch tester to verify.")
         fi
     fi
 fi
