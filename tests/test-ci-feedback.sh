@@ -106,11 +106,11 @@ else
     fail_test "source-lib.sh has syntax errors"
 fi
 
-run_test "Syntax: context-lib.sh valid after ci-lib.sh addition"
-if bash -n "$HOOKS_DIR/context-lib.sh"; then
+run_test "Syntax: core-lib.sh valid after ci-lib.sh addition"
+if bash -n "$HOOKS_DIR/core-lib.sh"; then
     pass_test
 else
-    fail_test "context-lib.sh has syntax errors"
+    fail_test "core-lib.sh has syntax errors"
 fi
 
 run_test "Syntax: check-guardian.sh valid after CI watcher spawn"

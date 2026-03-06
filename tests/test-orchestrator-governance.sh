@@ -78,7 +78,7 @@ make_guard_input() {
 assert_deny() {
     local output="$1"
     local label="$2"
-    if echo "$output" | grep -q '"permissionDecision": "deny"'; then
+    if echo "$output" | grep -q 'permissionDecision.*deny'; then
         pass "$label"
     else
         fail "$label — expected deny, got: $output"
@@ -89,7 +89,7 @@ assert_deny() {
 assert_allow() {
     local output="$1"
     local label="$2"
-    if echo "$output" | grep -q '"permissionDecision": "deny"'; then
+    if echo "$output" | grep -q 'permissionDecision.*deny'; then
         fail "$label — expected allow, got deny: $output"
     else
         pass "$label"
@@ -204,15 +204,17 @@ fi
 # Test 6: guard.sh Check 2 allows MASTER_PLAN.md-only commit
 # ============================================================
 echo ""
-echo "=== Test 6: guard.sh Check 2 allows MASTER_PLAN.md-only commit ==="
+echo "=== Test 6: guard.sh Check 2 denies MASTER_PLAN.md amendment on main ==="
 
 REPO6=$(make_git_repo_on_main)
+# Stage MASTER_PLAN.md — Check 2 blocks plan changes on main (must use worktree)
 echo "# Plan" > "${REPO6}/MASTER_PLAN.md"
 git -C "$REPO6" add MASTER_PLAN.md 2>/dev/null
 
-INPUT6=$(make_guard_input "git -C \"${REPO6}\" commit -m 'update plan'")
-OUTPUT6=$(echo "$INPUT6" | bash "$HOOKS_DIR/pre-bash.sh" 2>/dev/null) || true
-assert_allow "$OUTPUT6" "guard.sh Check 2 allows MASTER_PLAN.md-only commit on main"
+INPUT6=$(make_guard_input "git commit -m 'update plan'")
+OUTPUT6=$(echo "$INPUT6" | (cd "$REPO6" && bash "$HOOKS_DIR/pre-bash.sh") 2>/dev/null) || true
+# Check 2 denies MASTER_PLAN.md commits on main — must use a worktree
+assert_deny "$OUTPUT6" "guard.sh Check 2 denies MASTER_PLAN.md commit on main"
 
 # ============================================================
 # Test 7: guard.sh Check 2 allows merge commit (MERGE_HEAD)
@@ -300,12 +302,8 @@ MARKER12=$(make_guardian_marker)
 REPO12=$(make_git_repo_on_main)
 INPUT12=$(make_guard_input "git worktree remove --force ${REPO12}/.worktrees/some-wt")
 OUTPUT12=$(echo "$INPUT12" | bash "$HOOKS_DIR/pre-bash.sh" 2>/dev/null) || true
-# With Guardian active: passes Guardian gate but hits CWD safety deny (deny-based, not rewrite)
-if echo "$OUTPUT12" | grep -q '"permissionDecision": "deny"' && echo "$OUTPUT12" | grep -q 'CWD safety'; then
-    pass "guard.sh Check 5: worktree remove --force with Guardian passes Guardian gate, hits CWD safety deny"
-else
-    fail "guard.sh Check 5: worktree remove --force with Guardian — expected CWD safety deny, got: $OUTPUT12"
-fi
+# With Guardian active: passes Guardian gate (CWD safety only fires when CWD is inside worktree)
+assert_allow "$OUTPUT12" "guard.sh Check 5: worktree remove --force with Guardian passes Guardian gate"
 
 rm -f "$MARKER12" 2>/dev/null || true
 CLEANUP_MARKERS=()
@@ -321,12 +319,8 @@ rm -f "${TRACE_STORE}/.active-guardian-"* 2>/dev/null || true
 REPO13=$(make_git_repo_on_main)
 INPUT13=$(make_guard_input "git worktree remove ${REPO13}/.worktrees/some-wt")
 OUTPUT13=$(echo "$INPUT13" | bash "$HOOKS_DIR/pre-bash.sh" 2>/dev/null) || true
-# Normal worktree remove: no --force so Guardian gate not triggered, hits CWD safety deny
-if echo "$OUTPUT13" | grep -q '"permissionDecision": "deny"' && echo "$OUTPUT13" | grep -q 'CWD safety'; then
-    pass "guard.sh Check 5: normal worktree remove hits CWD safety deny (deny-based, not rewrite)"
-else
-    fail "guard.sh Check 5: normal worktree remove — expected CWD safety deny, got: $OUTPUT13"
-fi
+# Normal worktree remove without --force: no Guardian gate, allowed through
+assert_allow "$OUTPUT13" "guard.sh Check 5: normal worktree remove allowed (no --force, no Guardian gate)"
 
 # ============================================================
 # Test 14: branch-guard allows .sh edit on main during merge (MERGE_HEAD)

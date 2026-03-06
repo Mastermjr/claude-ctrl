@@ -75,6 +75,7 @@ jobs:
       - name: Run hook contract tests
         run: bash tests/run-hooks.sh
       - name: Run standalone test suites
+        if: always()
         run: |
           # Auto-discover all standalone test files (deterministic sort order)
           failed=0

@@ -124,6 +124,7 @@ T03_TRACE=$(mktemp -d)
     export CLAUDE_PROJECT_DIR="$T03_REPO"
     export TRACE_STORE="$T03_TRACE"
     export CLAUDE_SESSION_ID="test3-$$"
+    source "$HOOKS_DIR/core-lib.sh" 2>/dev/null
     source "$HOOKS_DIR/log.sh" 2>/dev/null
     write_proof_status "verified" "$T03_REPO" 2>/dev/null
 )
@@ -148,6 +149,7 @@ T04_TRACE=$(mktemp -d)
     export CLAUDE_PROJECT_DIR="$T04_REPO"
     export TRACE_STORE="$T04_TRACE"
     export CLAUDE_SESSION_ID="test4-$$"
+    source "$HOOKS_DIR/core-lib.sh" 2>/dev/null
     source "$HOOKS_DIR/log.sh" 2>/dev/null
     write_proof_status "pending" "$T04_REPO" 2>/dev/null
 )
@@ -170,6 +172,7 @@ mkdir -p "$T05_DIR"
 
 (
     export CLAUDE_DIR="$T05_DIR"
+    source "$HOOKS_DIR/core-lib.sh" 2>/dev/null
     source "$HOOKS_DIR/log.sh" 2>/dev/null
     source "$HOOKS_DIR/state-lib.sh" 2>/dev/null
 
@@ -266,9 +269,9 @@ run_test "T08: W4 — prompt-submit.sh emits DISPATCH GUARDIAN NOW on approval"
 T08_REPO=$(make_temp_repo)
 T08_PHASH=$(echo "$T08_REPO" | $_SHA256_CMD | cut -c1-8)
 
-# Create pending proof-status
-echo "pending|$(date +%s)" > "$T08_REPO/.claude/.proof-status-${T08_PHASH}"
-echo "pending|$(date +%s)" > "$T08_REPO/.claude/.proof-status"
+# Create pending proof-status in new state/{phash}/proof-status path
+mkdir -p "$T08_REPO/.claude/state/${T08_PHASH}"
+echo "pending|$(date +%s)" > "$T08_REPO/.claude/state/${T08_PHASH}/proof-status"
 
 T08_INPUT="{\"prompt\":\"approved\",\"cwd\":\"${T08_REPO}\"}"
 
@@ -315,6 +318,7 @@ T10_TRACE=$(mktemp -d)
     export CLAUDE_DIR="$T10_REPO/.claude"
     export TRACE_STORE="$T10_TRACE"
     export CLAUDE_SESSION_ID="test10-$$"
+    source "$HOOKS_DIR/core-lib.sh" 2>/dev/null
     source "$HOOKS_DIR/log.sh" 2>/dev/null
     source "$HOOKS_DIR/state-lib.sh" 2>/dev/null
     write_proof_status "verified" "$T10_REPO" 2>/dev/null
@@ -365,7 +369,8 @@ run_test "T12: Fast path — approval keyword with pending proof emits DISPATCH 
 
 T12_REPO=$(make_temp_repo)
 T12_PHASH=$(echo "$T12_REPO" | $_SHA256_CMD | cut -c1-8)
-echo "pending|$(date +%s)" > "$T12_REPO/.claude/.proof-status-${T12_PHASH}"
+mkdir -p "$T12_REPO/.claude/state/${T12_PHASH}"
+echo "pending|$(date +%s)" > "$T12_REPO/.claude/state/${T12_PHASH}/proof-status"
 _CLEANUP_DIRS+=("$T12_REPO")
 
 T12_INPUT="{\"prompt\":\"lgtm\",\"cwd\":\"${T12_REPO}\"}"
@@ -422,12 +427,14 @@ run_test "T14: Stale lock cleanup — CAS succeeds after removing stale lock"
 
 T14_REPO=$(make_temp_repo)
 T14_PHASH=$(echo "$T14_REPO" | $_SHA256_CMD | cut -c1-8)
-echo "pending|$(date +%s)" > "$T14_REPO/.claude/.proof-status-${T14_PHASH}"
+mkdir -p "$T14_REPO/.claude/state/${T14_PHASH}"
+echo "pending|$(date +%s)" > "$T14_REPO/.claude/state/${T14_PHASH}/proof-status"
 _CLEANUP_DIRS+=("$T14_REPO")
 
-# Create stale lock file (backdate by 30 seconds)
-touch "$T14_REPO/.claude/.proof-status.lock"
-python3 -c "import os,time; os.utime('$T14_REPO/.claude/.proof-status.lock', (time.time()-30, time.time()-30))" 2>/dev/null || true
+# Create stale lock file (backdate by 30 seconds) — new lock path: state/locks/proof.lock
+mkdir -p "$T14_REPO/.claude/state/locks"
+touch "$T14_REPO/.claude/state/locks/proof.lock"
+python3 -c "import os,time; os.utime('$T14_REPO/.claude/state/locks/proof.lock', (time.time()-30, time.time()-30))" 2>/dev/null || true
 
 T14_INPUT="{\"prompt\":\"approved\",\"cwd\":\"${T14_REPO}\"}"
 

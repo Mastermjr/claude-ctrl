@@ -186,8 +186,12 @@ run_track() {
     local input_json
     input_json=$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s"}}' "$file_path")
 
-    # Subshell with export so CLAUDE_PROJECT_DIR reaches the bash subprocess
+    # Subshell with export so CLAUDE_PROJECT_DIR reaches the bash subprocess.
+    # TRACE_STORE is isolated to the test repo to prevent real guardian markers
+    # from ~/.claude/traces from suppressing proof invalidation in the test.
     ( export CLAUDE_PROJECT_DIR="$repo"
+      export TRACE_STORE="$repo/.claude/traces"
+      mkdir -p "$repo/.claude/traces"
       cd "$repo"
       echo "$input_json" | bash "$TRACK_SH" 2>/dev/null
     ) || true
@@ -489,13 +493,14 @@ fi
 
 run_test "session-init.sh: no error when .proof-status is missing at startup"
 # Verify that the proof cleanup block is guarded: only acts when file exists.
-# session-init.sh sets PROOF_FILE="${CLAUDE_DIR}/.proof-status-${_PHASH}" and then
-# checks [[ -f "$PROOF_FILE" ]] before attempting cleanup.
+# session-init.sh checks [[ -f "$_NEW_PROOF" ]] / [[ -f "$_OLD_PROOF" ]] before
+# setting PROOF_FILE, then gates the cleanup on [[ -n "$PROOF_FILE" ]].
+# This ensures no error when neither proof file exists at startup.
 if grep -q 'PROOF_FILE' "$SESSION_INIT_SH" && \
-   grep -q '\[\[ -f "\$PROOF_FILE"' "$SESSION_INIT_SH"; then
+   grep -q '\[\[ -n "\$PROOF_FILE"' "$SESSION_INIT_SH"; then
     pass_test
 else
-    fail_test "session-init.sh is missing -f guard on \$PROOF_FILE (could error when missing)"
+    fail_test "session-init.sh is missing -n guard on \$PROOF_FILE (could error when missing)"
 fi
 
 # ===========================================================================

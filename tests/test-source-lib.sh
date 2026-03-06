@@ -2,7 +2,7 @@
 # Tests for hooks/source-lib.sh — direct hook library sourcing.
 #
 # Purpose: Validate that source-lib.sh correctly sources log.sh and
-#   context-lib.sh from the hooks/ directory. Verifies syntax validity,
+#   core-lib.sh from the hooks/ directory. Verifies syntax validity,
 #   function availability after sourcing, and that all hooks can source
 #   the library without error.
 #
@@ -161,11 +161,11 @@ test_all_hooks_syntax() {
         "check-planner.sh" "check-tester.sh" "ci-lib.sh" "compact-preserve.sh"
         "core-lib.sh" "doc-lib.sh" "git-lib.sh"
         "log.sh" "notify.sh" "plan-lib.sh" "playwright-cleanup.sh"
-        "post-task.sh" "post-write.sh" "pre-bash.sh" "pre-write.sh"
+        "post-task.sh" "post-write.sh" "pre-ask.sh" "pre-bash.sh" "pre-write.sh"
         "prompt-submit.sh" "session-end.sh" "session-init.sh" "session-lib.sh"
         "skill-result.sh" "source-lib.sh" "state-lib.sh" "stop.sh"
         "subagent-start.sh" "task-track.sh" "test-runner.sh" "trace-lib.sh"
-        "track-agent-tokens.sh" "webfetch-fallback.sh"
+        "webfetch-fallback.sh"
     )
 
     for hook in "${all_hooks[@]}"; do
@@ -180,7 +180,7 @@ test_all_hooks_syntax() {
     done
 
     if [[ ${#failed_hooks[@]} -eq 0 ]]; then
-        pass_test "All 34 hooks pass bash -n syntax check"
+        pass_test "All ${#all_hooks[@]} hooks pass bash -n syntax check"
     else
         fail_test "Some hooks failed syntax check" "${failed_hooks[*]}"
     fi

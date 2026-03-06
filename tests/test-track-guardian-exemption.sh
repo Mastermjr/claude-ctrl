@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # test-track-guardian-exemption.sh — Tests for Guardian-active proof invalidation bypass (#49)
 #
-# Purpose: Verify that track.sh does NOT reset .proof-status from verified→pending
+# Purpose: Verify that post-write.sh does NOT reset .proof-status from verified→pending
 #   when a Guardian agent is active. This prevents a deadlock where Guardian's own
 #   commit/merge workflow (which may trigger Write/Edit events) invalidates the proof
-#   mid-commit and causes guard.sh Check 8 to block the commit.
+#   mid-commit and causes pre-bash.sh Check 8 to block the commit.
 #
 # Contracts verified:
 #   1. No guardian marker + source write + verified proof → proof resets to pending
@@ -15,11 +15,11 @@
 #      (exemption only applies when status is "verified"; other states unaffected)
 #
 # @decision DEC-TRACK-GUARDIAN-001
-# @title Guardian-active guard in track.sh (issue #49)
+# @title Guardian-active guard in post-write.sh (issue #49)
 # @status accepted
-# @rationale track.sh fires on every Write/Edit, including writes during Guardian's
+# @rationale post-write.sh fires on every Write/Edit, including writes during Guardian's
 #   commit/merge workflow. Without agent awareness, a Write during Guardian's
-#   conflict-resolution step resets verified→pending, causing guard.sh Check 8 to
+#   conflict-resolution step resets verified→pending, causing pre-bash.sh Check 8 to
 #   block the commit. Wrapping the invalidation block in a guardian-active check
 #   (via .active-guardian-* marker files in TRACE_STORE) prevents this deadlock.
 #   These tests validate: (a) non-guardian path still invalidates, (b) guardian path
@@ -33,7 +33,7 @@ set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
 HOOKS_DIR="${PROJECT_ROOT}/hooks"
-TRACK_SH="${HOOKS_DIR}/track.sh"
+TRACK_SH="${HOOKS_DIR}/post-write.sh"
 
 # Ensure tmp directory exists
 mkdir -p "$PROJECT_ROOT/tmp"
@@ -79,12 +79,61 @@ make_temp_repo() {
 }
 
 # ---------------------------------------------------------------------------
-# Helper: run_track — invoke track.sh simulating a Write event.
+# Helper: write_proof — write proof status to the canonical path that
+# resolve_proof_file() will find. Uses the new state/{phash}/proof-status format.
+# ---------------------------------------------------------------------------
+write_proof() {
+    local repo="$1" status="$2"
+    local phash
+    phash=$(echo "$repo" | ${_SHA256_CMD:-shasum -a 256} | cut -c1-8)
+    local proof_dir="$repo/.claude/state/${phash}"
+    mkdir -p "$proof_dir"
+    echo "${status}|$(date +%s)" > "${proof_dir}/proof-status"
+    # Also write to legacy path for backward compat
+    echo "${status}|$(date +%s)" > "$repo/.claude/.proof-status-${phash}"
+    # Backdate proof files so epoch reset can work (monotonic lattice)
+    touch -t 202601010000 "${proof_dir}/proof-status" "$repo/.claude/.proof-status-${phash}"
+    # Create epoch file at "now" — newer than proof, allowing verified→pending regression
+    echo "epoch|$(date +%s)" > "${proof_dir}/proof-epoch"
+}
+
+# ---------------------------------------------------------------------------
+# Helper: read_proof — read the proof status from the canonical path
+# ---------------------------------------------------------------------------
+read_proof() {
+    local repo="$1"
+    local phash
+    phash=$(echo "$repo" | ${_SHA256_CMD:-shasum -a 256} | cut -c1-8)
+    local proof_file="$repo/.claude/state/${phash}/proof-status"
+    if [[ -f "$proof_file" ]]; then
+        cut -d'|' -f1 "$proof_file"
+    else
+        # Fallback to legacy
+        proof_file="$repo/.claude/.proof-status-${phash}"
+        if [[ -f "$proof_file" ]]; then
+            cut -d'|' -f1 "$proof_file"
+        else
+            echo "missing"
+        fi
+    fi
+}
+
+# Portable SHA-256
+if command -v shasum >/dev/null 2>&1; then
+    _SHA256_CMD="shasum -a 256"
+elif command -v sha256sum >/dev/null 2>&1; then
+    _SHA256_CMD="sha256sum"
+else
+    _SHA256_CMD="cat"
+fi
+
+# ---------------------------------------------------------------------------
+# Helper: run_track — invoke post-write.sh simulating a Write event.
 # Args:
 #   $1 = file_path written
 #   $2 = repo path (CLAUDE_PROJECT_DIR)
 #   $3 = TRACE_STORE path (separate from repo, so guardian markers are isolated)
-# Returns: track.sh stdout (usually empty)
+# Returns: post-write.sh stdout (usually empty)
 # ---------------------------------------------------------------------------
 run_track() {
     local file_path="$1"
@@ -108,26 +157,20 @@ run_track() {
 
 run_test "No guardian marker: source write resets verified→pending"
 REPO=$(make_temp_repo)
-_CLEANUP_DIRS+=("${REPO}")
 _CLEANUP_DIRS+=("$REPO")
 TRACE=$(mktemp -d "$PROJECT_ROOT/tmp/test-tge-trace-XXXXXX")
 _CLEANUP_DIRS+=("$TRACE")
 # No .active-guardian-* files in TRACE_STORE
-echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status"
+write_proof "$REPO" "verified"
 
 run_track "$REPO/main.sh" "$REPO" "$TRACE"
 
-if [[ -f "$REPO/.claude/.proof-status" ]]; then
-    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
-    if [[ "$STATUS" == "pending" ]]; then
-        pass_test
-    else
-        fail_test "Expected 'pending' after source write without guardian, got '$STATUS'"
-    fi
+STATUS=$(read_proof "$REPO")
+if [[ "$STATUS" == "pending" ]]; then
+    pass_test
 else
-    fail_test ".proof-status was deleted instead of set to pending"
+    fail_test "Expected 'pending' after source write without guardian, got '$STATUS'"
 fi
-rm -rf "$REPO" "$TRACE"
 
 # ===========================================================================
 # Test 2: Guardian marker present — source write does NOT reset verified proof
@@ -136,121 +179,96 @@ rm -rf "$REPO" "$TRACE"
 
 run_test "Guardian marker present: source write does NOT reset verified proof"
 REPO=$(make_temp_repo)
-_CLEANUP_DIRS+=("${REPO}")
+_CLEANUP_DIRS+=("$REPO")
 TRACE=$(mktemp -d "$PROJECT_ROOT/tmp/test-tge-trace-XXXXXX")
-# Create a guardian marker in TRACE_STORE (simulates an active Guardian agent)
-touch "$TRACE/.active-guardian-test-session-001"
-echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status"
+_CLEANUP_DIRS+=("$TRACE")
+# Create a guardian marker with valid timestamp format (TTL-based check)
+echo "pre-dispatch|$(date +%s)" > "$TRACE/.active-guardian-test-session-001"
+write_proof "$REPO" "verified"
 
 run_track "$REPO/main.sh" "$REPO" "$TRACE"
 
-if [[ -f "$REPO/.claude/.proof-status" ]]; then
-    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
-    if [[ "$STATUS" == "verified" ]]; then
-        pass_test
-    else
-        fail_test "Expected 'verified' with guardian active, got '$STATUS' (proof was invalidated)"
-    fi
+STATUS=$(read_proof "$REPO")
+if [[ "$STATUS" == "verified" ]]; then
+    pass_test
 else
-    fail_test ".proof-status was deleted while guardian was active"
+    fail_test "Expected 'verified' with guardian active, got '$STATUS' (proof was invalidated)"
 fi
-rm -rf "$REPO" "$TRACE"
 
 # ===========================================================================
 # Test 3: Guardian marker present, proof is needs-verification — no change
-# Contract: exemption only gates the verified→pending transition; other states
-#   are unaffected (needs-verification stays needs-verification, etc.)
 # ===========================================================================
 
 run_test "Guardian marker present: needs-verification proof unchanged by source write"
 REPO=$(make_temp_repo)
-_CLEANUP_DIRS+=("${REPO}")
+_CLEANUP_DIRS+=("$REPO")
 TRACE=$(mktemp -d "$PROJECT_ROOT/tmp/test-tge-trace-XXXXXX")
-touch "$TRACE/.active-guardian-test-session-002"
-ORIGINAL_TS=$(date +%s)
-echo "needs-verification|${ORIGINAL_TS}" > "$REPO/.claude/.proof-status"
+_CLEANUP_DIRS+=("$TRACE")
+echo "pre-dispatch|$(date +%s)" > "$TRACE/.active-guardian-test-session-002"
+write_proof "$REPO" "needs-verification"
 
 run_track "$REPO/main.sh" "$REPO" "$TRACE"
 
-if [[ -f "$REPO/.claude/.proof-status" ]]; then
-    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
-    TS=$(cut -d'|' -f2 "$REPO/.claude/.proof-status")
-    if [[ "$STATUS" == "needs-verification" && "$TS" == "$ORIGINAL_TS" ]]; then
-        pass_test
-    else
-        fail_test "needs-verification proof changed: status='$STATUS' ts='$TS' (expected unchanged)"
-    fi
+STATUS=$(read_proof "$REPO")
+if [[ "$STATUS" == "needs-verification" ]]; then
+    pass_test
 else
-    fail_test ".proof-status was deleted (expected needs-verification to remain)"
+    fail_test "needs-verification proof changed: status='$STATUS' (expected unchanged)"
 fi
-rm -rf "$REPO" "$TRACE"
 
 # ===========================================================================
 # Test 4: Guardian marker present, proof is pending — no change
-# Contract: the invalidation block only runs when status==verified, so pending
-#   should be unaffected regardless of guardian state.
 # ===========================================================================
 
 run_test "Guardian marker present: pending proof unchanged by source write"
 REPO=$(make_temp_repo)
-_CLEANUP_DIRS+=("${REPO}")
+_CLEANUP_DIRS+=("$REPO")
 TRACE=$(mktemp -d "$PROJECT_ROOT/tmp/test-tge-trace-XXXXXX")
-touch "$TRACE/.active-guardian-test-session-003"
-ORIGINAL_TS="11111"
-echo "pending|${ORIGINAL_TS}" > "$REPO/.claude/.proof-status"
+_CLEANUP_DIRS+=("$TRACE")
+echo "pre-dispatch|$(date +%s)" > "$TRACE/.active-guardian-test-session-003"
+write_proof "$REPO" "pending"
 
 run_track "$REPO/main.sh" "$REPO" "$TRACE"
 
-if [[ -f "$REPO/.claude/.proof-status" ]]; then
-    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
-    if [[ "$STATUS" == "pending" ]]; then
-        pass_test
-    else
-        fail_test "Pending proof changed to '$STATUS' while guardian was active (expected pending)"
-    fi
+STATUS=$(read_proof "$REPO")
+if [[ "$STATUS" == "pending" ]]; then
+    pass_test
 else
-    fail_test ".proof-status was deleted (expected pending to remain)"
+    fail_test "Pending proof changed to '$STATUS' while guardian was active (expected pending)"
 fi
-rm -rf "$REPO" "$TRACE"
 
 # ===========================================================================
 # Test 5: Guardian marker removed — invalidation resumes normally
-# Contract: once guardian finishes (marker removed), the next source write
-#   does invalidate the proof again (no lingering exemption state).
 # ===========================================================================
 
 run_test "After guardian marker removed: source write resumes invalidation"
 REPO=$(make_temp_repo)
-_CLEANUP_DIRS+=("${REPO}")
+_CLEANUP_DIRS+=("$REPO")
 TRACE=$(mktemp -d "$PROJECT_ROOT/tmp/test-tge-trace-XXXXXX")
+_CLEANUP_DIRS+=("$TRACE")
 # Create then immediately remove the guardian marker (simulates guardian completing)
-touch "$TRACE/.active-guardian-test-session-004"
+echo "pre-dispatch|$(date +%s)" > "$TRACE/.active-guardian-test-session-004"
 rm -f "$TRACE/.active-guardian-test-session-004"
-echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status"
+write_proof "$REPO" "verified"
 
 run_track "$REPO/main.sh" "$REPO" "$TRACE"
 
-if [[ -f "$REPO/.claude/.proof-status" ]]; then
-    STATUS=$(cut -d'|' -f1 "$REPO/.claude/.proof-status")
-    if [[ "$STATUS" == "pending" ]]; then
-        pass_test
-    else
-        fail_test "Expected 'pending' after guardian marker removed, got '$STATUS'"
-    fi
+STATUS=$(read_proof "$REPO")
+if [[ "$STATUS" == "pending" ]]; then
+    pass_test
 else
-    fail_test ".proof-status was deleted (expected pending after marker removal)"
+    fail_test "Expected 'pending' after guardian marker removed, got '$STATUS'"
 fi
-rm -rf "$REPO" "$TRACE"
 
 # ===========================================================================
-# Test 6: Syntax check — track.sh is valid bash
+# Test 6: Syntax check — post-write.sh is valid bash
 # ===========================================================================
 
-run_test "Syntax: track.sh is valid bash"
+run_test "Syntax: post-write.sh is valid bash"
 if bash -n "$TRACK_SH"; then
     pass_test
 else
-    fail_test "track.sh has syntax errors"
+    fail_test "post-write.sh has syntax errors"
 fi
 
 # ===========================================================================

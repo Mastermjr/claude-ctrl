@@ -2,7 +2,7 @@
 # Test proof-status path resolution — simplified canonical single-path model.
 #
 # Validates the DEC-PROOF-SINGLE-001 simplification:
-#   - resolve_proof_file() always returns CLAUDE_DIR/.proof-status-{phash}
+#   - resolve_proof_file() always returns CLAUDE_DIR/state/{phash}/proof-status
 #   - No breadcrumb resolution needed — single path shared across all worktrees
 #   - task-track.sh Gate C.2 writes to canonical scoped path (no breadcrumb write)
 #   - prompt-submit.sh writes verified to canonical scoped path (single write)
@@ -16,7 +16,7 @@
 # @status accepted
 # @rationale The proof-status gate broke in worktree scenarios because of
 #   the 3-tier resolution ambiguity. DEC-PROOF-SINGLE-001 eliminates this:
-#   one path (.proof-status-{phash} in CLAUDE_DIR) is always authoritative.
+#   one path (state/{phash}/proof-status in CLAUDE_DIR) is always authoritative.
 #   This test suite verifies the single-path model works correctly across
 #   all hook entry points (task-track, prompt-submit, guard, check-guardian).
 #   Supersedes the breadcrumb-based test suite that tested the 3-tier model.
@@ -122,12 +122,15 @@ fi
 # CLAUDE_DIR/.proof-status-{phash}. No breadcrumb lookup.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Helper: source log.sh and call resolve_proof_file() with explicit CLAUDE_DIR
-# and PROJECT_ROOT so the phash is deterministic.
+# Helper: source core-lib.sh then log.sh and call resolve_proof_file() with
+# explicit CLAUDE_DIR and PROJECT_ROOT so the phash is deterministic.
+# core-lib.sh must come first because write_proof_status() in log.sh needs
+# _lock_fd() which is defined in core-lib.sh.
 _resolve_proof_file() {
     local claude_dir="$1"
     local project_root="$2"
     bash -c "
+        source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
         source '$HOOKS_DIR/log.sh' 2>/dev/null
         export CLAUDE_DIR='$claude_dir'
         export PROJECT_ROOT='$project_root'
@@ -135,13 +138,14 @@ _resolve_proof_file() {
     "
 }
 
-# Helper: compute the expected scoped proof path for a given project_root
+# Helper: compute the expected scoped proof path for a given project_root.
+# New canonical format: state/{phash}/proof-status
 _scoped_proof_path() {
     local claude_dir="$1"
     local project_root="$2"
     local phash
     phash=$(echo "$project_root" | $_SHA256_CMD | cut -c1-8 2>/dev/null || echo "00000000")
-    echo "$claude_dir/.proof-status-${phash}"
+    echo "${claude_dir}/state/${phash}/proof-status"
 }
 
 run_test "resolve_proof_file: returns scoped CLAUDE_DIR path (no proof file exists)"
@@ -164,6 +168,7 @@ run_test "resolve_proof_file: returns scoped CLAUDE_DIR path (scoped proof file 
 T_CLAUDE=$(mktemp -d "$PROJECT_ROOT/tmp/test-rpf-XXXXXX")
 T_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-rpf-proj-XXXXXX")
 EXPECTED=$(_scoped_proof_path "$T_CLAUDE" "$T_PROJ")
+mkdir -p "$(dirname "$EXPECTED")"
 echo "pending|12345" > "$EXPECTED"
 RESULT=$(_resolve_proof_file "$T_CLAUDE" "$T_PROJ")
 if [[ "$RESULT" == "$EXPECTED" ]]; then
@@ -222,7 +227,7 @@ T_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-rpf-proj-XXXXXX")
 # Compute phash via two paths
 PHASH_A=$(echo "$T_PROJ" | $_SHA256_CMD | cut -c1-8)
 PHASH_B=$(echo "$T_PROJ" | $_SHA256_CMD | cut -c1-8)
-EXPECTED="$T_CLAUDE/.proof-status-${PHASH_A}"
+EXPECTED="$T_CLAUDE/state/${PHASH_A}/proof-status"
 RESULT=$(_resolve_proof_file "$T_CLAUDE" "$T_PROJ")
 if [[ "$PHASH_A" == "$PHASH_B" && "$RESULT" == "$EXPECTED" ]]; then
     pass_test
@@ -295,7 +300,7 @@ cat <<'EOF' | CLAUDE_PROJECT_DIR="$TEMP_REPO" bash "$HOOKS_DIR/task-track.sh" > 
 EOF
 
 # Verify: scoped file written, no breadcrumb
-SCOPED_FILE="$TEMP_REPO/.claude/.proof-status-${IMPL_PHASH}"
+SCOPED_FILE="$TEMP_REPO/.claude/state/${IMPL_PHASH}/proof-status"
 BREADCRUMB_FILE="$TEMP_REPO/.claude/.active-worktree-path-${IMPL_PHASH}"
 LEGACY_BREADCRUMB="$TEMP_REPO/.claude/.active-worktree-path"
 
@@ -326,14 +331,15 @@ _CLEANUP_DIRS+=("${TEMP_PROJ}")
 git -C "$TEMP_PROJ" init > /dev/null 2>&1
 mkdir -p "$TEMP_PROJ/.claude"
 TEMP_PHASH=$(echo "$TEMP_PROJ" | $_SHA256_CMD | cut -c1-8)
-echo "pending|12345" > "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}"
+mkdir -p "$TEMP_PROJ/.claude/state/${TEMP_PHASH}"
+echo "pending|12345" > "$TEMP_PROJ/.claude/state/${TEMP_PHASH}/proof-status"
 
 INPUT_JSON=$(jq -n '{"hook_event_name":"UserPromptSubmit","prompt":"verified"}')
 cd "$TEMP_PROJ" && \
     CLAUDE_PROJECT_DIR="$TEMP_PROJ" \
     echo "$INPUT_JSON" | bash "$HOOKS_DIR/prompt-submit.sh" > /dev/null 2>&1
 
-STATUS=$(cut -d'|' -f1 "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}" 2>/dev/null || echo "missing")
+STATUS=$(cut -d'|' -f1 "$TEMP_PROJ/.claude/state/${TEMP_PHASH}/proof-status" 2>/dev/null || echo "missing")
 if [[ "$STATUS" == "verified" ]]; then
     pass_test
 else
@@ -348,14 +354,15 @@ TEMP_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-ps-lgtm-XXXXXX")
 git -C "$TEMP_PROJ" init > /dev/null 2>&1
 mkdir -p "$TEMP_PROJ/.claude"
 TEMP_PHASH=$(echo "$TEMP_PROJ" | $_SHA256_CMD | cut -c1-8)
-echo "pending|12345" > "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}"
+mkdir -p "$TEMP_PROJ/.claude/state/${TEMP_PHASH}"
+echo "pending|12345" > "$TEMP_PROJ/.claude/state/${TEMP_PHASH}/proof-status"
 
 INPUT_JSON=$(jq -n '{"hook_event_name":"UserPromptSubmit","prompt":"lgtm"}')
 cd "$TEMP_PROJ" && \
     CLAUDE_PROJECT_DIR="$TEMP_PROJ" \
     echo "$INPUT_JSON" | bash "$HOOKS_DIR/prompt-submit.sh" > /dev/null 2>&1
 
-STATUS=$(cut -d'|' -f1 "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}" 2>/dev/null || echo "missing")
+STATUS=$(cut -d'|' -f1 "$TEMP_PROJ/.claude/state/${TEMP_PHASH}/proof-status" 2>/dev/null || echo "missing")
 if [[ "$STATUS" == "verified" ]]; then
     pass_test
 else
@@ -370,14 +377,15 @@ TEMP_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-ps-nv-XXXXXX")
 git -C "$TEMP_PROJ" init > /dev/null 2>&1
 mkdir -p "$TEMP_PROJ/.claude"
 TEMP_PHASH=$(echo "$TEMP_PROJ" | $_SHA256_CMD | cut -c1-8)
-echo "needs-verification|12345" > "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}"
+mkdir -p "$TEMP_PROJ/.claude/state/${TEMP_PHASH}"
+echo "needs-verification|12345" > "$TEMP_PROJ/.claude/state/${TEMP_PHASH}/proof-status"
 
 INPUT_JSON=$(jq -n '{"hook_event_name":"UserPromptSubmit","prompt":"verified"}')
 cd "$TEMP_PROJ" && \
     CLAUDE_PROJECT_DIR="$TEMP_PROJ" \
     echo "$INPUT_JSON" | bash "$HOOKS_DIR/prompt-submit.sh" > /dev/null 2>&1
 
-STATUS=$(cut -d'|' -f1 "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}" 2>/dev/null || echo "missing")
+STATUS=$(cut -d'|' -f1 "$TEMP_PROJ/.claude/state/${TEMP_PHASH}/proof-status" 2>/dev/null || echo "missing")
 if [[ "$STATUS" == "verified" ]]; then
     pass_test
 else
@@ -394,7 +402,8 @@ TEMP_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-ps-nodual-XXXXXX")
 git -C "$TEMP_PROJ" init > /dev/null 2>&1
 mkdir -p "$TEMP_PROJ/.claude"
 TEMP_PHASH=$(echo "$TEMP_PROJ" | $_SHA256_CMD | cut -c1-8)
-echo "pending|12345" > "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}"
+mkdir -p "$TEMP_PROJ/.claude/state/${TEMP_PHASH}"
+echo "pending|12345" > "$TEMP_PROJ/.claude/state/${TEMP_PHASH}/proof-status"
 # Simulate: legacy breadcrumb pointing to a worktree (should NOT be followed)
 FAKE_WT=$(mktemp -d "$PROJECT_ROOT/tmp/test-ps-fakewt-XXXXXX")
 _CLEANUP_DIRS+=("${FAKE_WT}")
@@ -406,7 +415,7 @@ cd "$TEMP_PROJ" && \
     CLAUDE_PROJECT_DIR="$TEMP_PROJ" \
     echo "$INPUT_JSON" | bash "$HOOKS_DIR/prompt-submit.sh" > /dev/null 2>&1
 
-SCOPED_STATUS=$(cut -d'|' -f1 "$TEMP_PROJ/.claude/.proof-status-${TEMP_PHASH}" 2>/dev/null || echo "missing")
+SCOPED_STATUS=$(cut -d'|' -f1 "$TEMP_PROJ/.claude/state/${TEMP_PHASH}/proof-status" 2>/dev/null || echo "missing")
 WT_PROOF_EXISTS=false
 [[ -f "$FAKE_WT/.claude/.proof-status" ]] && WT_PROOF_EXISTS=true
 
@@ -428,7 +437,8 @@ TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-guard-ver-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
 GUARD_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
-echo "verified|12345" > "$TEMP_REPO/.claude/.proof-status-${GUARD_PHASH}"
+mkdir -p "$TEMP_REPO/.claude/state/${GUARD_PHASH}"
+echo "verified|12345" > "$TEMP_REPO/.claude/state/${GUARD_PHASH}/proof-status"
 
 INPUT_JSON=$(cat <<EOF
 {
@@ -458,7 +468,8 @@ TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-guard-pend-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
 GUARD_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
-echo "pending|12345" > "$TEMP_REPO/.claude/.proof-status-${GUARD_PHASH}"
+mkdir -p "$TEMP_REPO/.claude/state/${GUARD_PHASH}"
+echo "pending|12345" > "$TEMP_REPO/.claude/state/${GUARD_PHASH}/proof-status"
 
 INPUT_JSON=$(cat <<EOF
 {
@@ -493,7 +504,8 @@ git -C "$TEMP_PROJ" init > /dev/null 2>&1
 git -C "$TEMP_PROJ" commit --allow-empty -m "init" > /dev/null 2>&1
 mkdir -p "$TEMP_PROJ/.claude"
 CG_PHASH=$(echo "$TEMP_PROJ" | $_SHA256_CMD | cut -c1-8)
-echo "verified|12345" > "$TEMP_PROJ/.claude/.proof-status-${CG_PHASH}"
+mkdir -p "$TEMP_PROJ/.claude/state/${CG_PHASH}"
+echo "verified|12345" > "$TEMP_PROJ/.claude/state/${CG_PHASH}/proof-status"
 
 RESPONSE_JSON=$(jq -n '{"response":"Guardian committed successfully — commit abc123 created"}')
 
@@ -502,7 +514,7 @@ cd "$TEMP_PROJ" && \
     echo "$RESPONSE_JSON" | bash "$HOOKS_DIR/check-guardian.sh" > /dev/null 2>&1
 
 SCOPED_PROOF_EXISTS=false
-[[ -f "$TEMP_PROJ/.claude/.proof-status-${CG_PHASH}" ]] && SCOPED_PROOF_EXISTS=true
+[[ -f "$TEMP_PROJ/.claude/state/${CG_PHASH}/proof-status" ]] && SCOPED_PROOF_EXISTS=true
 
 if [[ "$SCOPED_PROOF_EXISTS" == "false" ]]; then
     pass_test
@@ -549,7 +561,8 @@ TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-reg-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
 REG_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
-echo "needs-verification|12345" > "$TEMP_REPO/.claude/.proof-status-${REG_PHASH}"
+mkdir -p "$TEMP_REPO/.claude/state/${REG_PHASH}"
+echo "needs-verification|12345" > "$TEMP_REPO/.claude/state/${REG_PHASH}/proof-status"
 
 INPUT_JSON=$(cat <<EOF
 {
@@ -580,7 +593,8 @@ TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-reg2-XXXXXX")
 git -C "$TEMP_REPO" init > /dev/null 2>&1
 mkdir -p "$TEMP_REPO/.claude"
 REG2_PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
-echo "verified|12345" > "$TEMP_REPO/.claude/.proof-status-${REG2_PHASH}"
+mkdir -p "$TEMP_REPO/.claude/state/${REG2_PHASH}"
+echo "verified|12345" > "$TEMP_REPO/.claude/state/${REG2_PHASH}/proof-status"
 
 INPUT_JSON=$(cat <<EOF
 {
@@ -662,11 +676,13 @@ rm -rf "$TEMP_I"
 # invariant of DEC-PROOF-SINGLE-001.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Helper: call resolve_proof_file() with explicit CLAUDE_DIR and PROJECT_ROOT
+# Helper: call resolve_proof_file() with explicit CLAUDE_DIR and PROJECT_ROOT.
+# core-lib.sh is sourced first so _lock_fd() is available for write_proof_status().
 _resolve_j() {
     local claude_dir="$1"
     local project_root="$2"
     bash -c "
+        source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
         source '$HOOKS_DIR/log.sh' 2>/dev/null
         export CLAUDE_DIR='$claude_dir'
         export PROJECT_ROOT='$project_root'
@@ -680,7 +696,7 @@ _CLEANUP_DIRS+=("${J1_CLAUDE}")
 J1_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j1-proj-XXXXXX")
 _CLEANUP_DIRS+=("${J1_PROJ}")
 J1_PHASH=$(echo "$J1_PROJ" | $_SHA256_CMD | cut -c1-8)
-EXPECTED_J1="$J1_CLAUDE/.proof-status-${J1_PHASH}"
+EXPECTED_J1="$J1_CLAUDE/state/${J1_PHASH}/proof-status"
 
 # Simulate task-track, prompt-submit, guard.sh each calling resolve_proof_file
 R1=$(_resolve_j "$J1_CLAUDE" "$J1_PROJ")
@@ -708,8 +724,10 @@ git -C "$J2_PROJ" init --quiet > /dev/null 2>&1
 J2_PHASH=$(echo "$J2_PROJ" | $_SHA256_CMD | cut -c1-8)
 
 # Write via write_proof_status — uses get_claude_dir = <J2_PROJ>/.claude
+# core-lib.sh must be sourced first so _lock_fd() is available.
 (
     export CLAUDE_PROJECT_DIR="$J2_PROJ"
+    source "$HOOKS_DIR/core-lib.sh" 2>/dev/null
     source "$HOOKS_DIR/log.sh" 2>/dev/null
     write_proof_status "pending" "$J2_PROJ" 2>/dev/null || true
 )
@@ -718,10 +736,10 @@ J2_PHASH=$(echo "$J2_PROJ" | $_SHA256_CMD | cut -c1-8)
 PROOF_PATH=$(_resolve_j "$J2_CLAUDE" "$J2_PROJ")
 STATUS=$(cut -d'|' -f1 "$PROOF_PATH" 2>/dev/null || echo "missing")
 
-if [[ "$STATUS" == "pending" && "$PROOF_PATH" == "$J2_CLAUDE/.proof-status-${J2_PHASH}" ]]; then
+if [[ "$STATUS" == "pending" && "$PROOF_PATH" == "$J2_CLAUDE/state/${J2_PHASH}/proof-status" ]]; then
     pass_test
 else
-    fail_test "Round-trip failed: path='$PROOF_PATH' status='$STATUS' (expected pending at $J2_CLAUDE/.proof-status-${J2_PHASH})"
+    fail_test "Round-trip failed: path='$PROOF_PATH' status='$STATUS' (expected pending at $J2_CLAUDE/state/${J2_PHASH}/proof-status)"
 fi
 rm -rf "$J2_PROJ"
 
@@ -738,8 +756,9 @@ J3_PHASH_A=$(echo "$J3_PROJ_A" | $_SHA256_CMD | cut -c1-8)
 J3_PHASH_B=$(echo "$J3_PROJ_B" | $_SHA256_CMD | cut -c1-8)
 
 # Write different statuses to each project's canonical path
-echo "pending|11111" > "$J3_CLAUDE/.proof-status-${J3_PHASH_A}"
-echo "verified|22222" > "$J3_CLAUDE/.proof-status-${J3_PHASH_B}"
+mkdir -p "$J3_CLAUDE/state/${J3_PHASH_A}" "$J3_CLAUDE/state/${J3_PHASH_B}"
+echo "pending|11111" > "$J3_CLAUDE/state/${J3_PHASH_A}/proof-status"
+echo "verified|22222" > "$J3_CLAUDE/state/${J3_PHASH_B}/proof-status"
 
 STATUS_A=$(cut -d'|' -f1 "$(_resolve_j "$J3_CLAUDE" "$J3_PROJ_A")" 2>/dev/null || echo "missing")
 STATUS_B=$(cut -d'|' -f1 "$(_resolve_j "$J3_CLAUDE" "$J3_PROJ_B")" 2>/dev/null || echo "missing")
@@ -757,7 +776,7 @@ _CLEANUP_DIRS+=("${J4_CLAUDE}")
 J4_PROJ=$(mktemp -d "$PROJECT_ROOT/tmp/test-j4-proj-XXXXXX")
 _CLEANUP_DIRS+=("${J4_PROJ}")
 J4_PHASH=$(echo "$J4_PROJ" | $_SHA256_CMD | cut -c1-8)
-EXPECTED_J4="$J4_CLAUDE/.proof-status-${J4_PHASH}"
+EXPECTED_J4="$J4_CLAUDE/state/${J4_PHASH}/proof-status"
 
 R1=$(_resolve_j "$J4_CLAUDE" "$J4_PROJ")
 if [[ "$R1" == "$EXPECTED_J4" ]]; then

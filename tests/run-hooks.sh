@@ -2647,71 +2647,8 @@ safe_cleanup "$_GAPS_MOCK_DIR" "$SCRIPT_DIR"
 echo ""
 fi # end: gaps-report.sh
 
-# =============================================================================
-# --- Test: Concurrency and state management tests ---
-# Validates Phase 1 locking and CAS mechanisms:
-#   state_write_locked() CAS, _lock_fd timeout, write_proof_status() lattice,
-#   is_protected_state_file() registry, Gate 0 denial for registry-protected files.
-# =============================================================================
-if should_run_section "Concurrency and state management"; then
-echo ""
-echo "--- Concurrency and state management (Phase 1) ---"
-CONCURRENCY_TEST="$SCRIPT_DIR/test-concurrency.sh"
-
-if [[ -f "$CONCURRENCY_TEST" ]]; then
-    if bash "$CONCURRENCY_TEST" 2>/dev/null; then
-        pass "test-concurrency.sh — all 12 concurrency tests passed"
-    else
-        fail "test-concurrency.sh" "one or more concurrency tests failed (run directly for details)"
-        failed=$((failed + 1))
-    fi
-else
-    fail "test-concurrency.sh" "test file not found at $CONCURRENCY_TEST"
-    failed=$((failed + 1))
-fi
-
-BOOTSTRAP_TEST="$SCRIPT_DIR/test-bootstrap-mitigation.sh"
-
-if [[ -f "$BOOTSTRAP_TEST" ]]; then
-    if bash "$BOOTSTRAP_TEST" 2>/dev/null; then
-        pass "test-bootstrap-mitigation.sh — all bootstrap paradox mitigation tests passed"
-    else
-        fail "test-bootstrap-mitigation.sh" "one or more bootstrap mitigation tests failed (run directly for details)"
-        failed=$((failed + 1))
-    fi
-else
-    fail "test-bootstrap-mitigation.sh" "test file not found at $BOOTSTRAP_TEST"
-    failed=$((failed + 1))
-fi
-
-echo ""
-fi # end: concurrency
-
-# =============================================================================
-# --- Test: State Directory Migration tests (Phase 3) ---
-# Validates W3-0 through W3-4: state_dir(), state_locks_dir(), resolve_proof_file()
-# new-first fallback, write_proof_status() dual-write, read_test_status() fallback,
-# is_protected_state_file() state/* path matching, and session-end sweep.
-# =============================================================================
-if should_run_section "State Directory Migration"; then
-echo ""
-echo "--- State Directory Migration tests (Phase 3) ---"
-STATE_DIR_TEST="$SCRIPT_DIR/test-state-directory.sh"
-
-if [[ -f "$STATE_DIR_TEST" ]]; then
-    if bash "$STATE_DIR_TEST" 2>/dev/null; then
-        pass "test-state-directory.sh — all 10 state directory migration tests passed"
-    else
-        fail "test-state-directory.sh" "one or more state directory migration tests failed (run directly for details)"
-        failed=$((failed + 1))
-    fi
-else
-    fail "test-state-directory.sh" "test file not found at $STATE_DIR_TEST"
-    failed=$((failed + 1))
-fi
-
-echo ""
-fi # end: State Directory Migration
+# (Concurrency, bootstrap-mitigation, and state-directory tests removed from
+# inline delegation — they run as standalone test files in CI step 2.)
 
 # --- Test: Bash 3.2 compatibility — no declare -A in hooks ---
 # Prevents regressions: macOS ships bash 3.2 which silently ignores declare -A.
@@ -2749,30 +2686,8 @@ fi
 echo ""
 fi # end: bash32-compat
 
-# =============================================================================
-# --- Test: Self-Validation tests (Phase 4) ---
-# Validates W4-0 through W4-2: version sentinels, verify_library_consistency(),
-# bash -n preflight loop, .hooks-gen file format, and staleness detection.
-# =============================================================================
-if should_run_section "Self-Validation Tests"; then
-echo ""
-echo "--- Self-Validation Tests (Phase 4) ---"
-SELF_VALID_TEST="$SCRIPT_DIR/test-self-validation.sh"
-
-if [[ -f "$SELF_VALID_TEST" ]]; then
-    if bash "$SELF_VALID_TEST" 2>/dev/null; then
-        pass "test-self-validation.sh — all 7 self-validation tests passed"
-    else
-        fail "test-self-validation.sh" "one or more self-validation tests failed (run directly for details)"
-        failed=$((failed + 1))
-    fi
-else
-    fail "test-self-validation.sh" "test file not found at $SELF_VALID_TEST"
-    failed=$((failed + 1))
-fi
-
-echo ""
-fi # end: self-validation
+# (Self-validation tests removed from inline delegation — they run as
+# standalone test files in CI step 2.)
 
 # --- Summary ---
 echo "==========================="

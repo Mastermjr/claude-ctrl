@@ -66,10 +66,13 @@ compute_phash() {
 }
 
 # Helper: call resolve_proof_file() in a subshell with controlled env
+# core-lib.sh must be sourced BEFORE log.sh because write_proof_status()
+# calls _lock_fd() which is defined in core-lib.sh.
 call_resolve() {
     local project_root="$1"
     local claude_dir="$2"
     bash -c "
+        source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
         source '$HOOKS_DIR/log.sh' 2>/dev/null
         export CLAUDE_DIR='$claude_dir'
         export PROJECT_ROOT='$project_root'
@@ -104,16 +107,18 @@ mkdir -p "$MOCK_WORKTREE/.claude"
 
 # Pre-compute phash for the mock project
 PHASH=$(compute_phash "$MOCK_PROJECT")
-SCOPED_BREADCRUMB="$ORCH_CLAUDE/.active-worktree-path-${PHASH}"
-SCOPED_PROOF="$ORCH_CLAUDE/.proof-status-${PHASH}"
-LEGACY_PROOF="$ORCH_CLAUDE/.proof-status"
-WORKTREE_PROOF="$MOCK_WORKTREE/.claude/.proof-status"
+# New canonical path: state/{phash}/proof-status
+SCOPED_PROOF="$ORCH_CLAUDE/state/${PHASH}/proof-status"
+# Legacy path (dual-write compat): .proof-status-{phash}
+LEGACY_PROOF="$ORCH_CLAUDE/.proof-status-${PHASH}"
+# Note: breadcrumb system (.active-worktree-path-*) and worktree proof copy
+# have been removed per DEC-PROOF-BREADCRUMB-001. There is no WORKTREE_PROOF.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 1: Initial state — no proof file, resolve returns scoped default
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "T01: Initial state — no proof file, resolve returns scoped CLAUDE_DIR path"
+run_test "T01: Initial state — no proof file, resolve returns state/{phash}/proof-status path"
 RESULT=$(call_resolve "$MOCK_PROJECT" "$ORCH_CLAUDE")
 EXPECTED="$SCOPED_PROOF"
 if [[ "$RESULT" == "$EXPECTED" ]]; then
@@ -123,39 +128,39 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 2: Write breadcrumb — simulates orchestrator writing breadcrumb
-#         before implementer dispatch (task-track.sh Gate C behavior)
+# Test 2: State dir exists but no proof file — resolve returns new path
+#         (Breadcrumb system removed per DEC-PROOF-BREADCRUMB-001; resolver
+#          now uses a simple two-step: check new path, check old dotfile, default to new)
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "T02: Breadcrumb written — resolve falls back to scoped path (no worktree proof yet)"
-echo "$MOCK_WORKTREE" > "$SCOPED_BREADCRUMB"
-# Worktree proof doesn't exist yet — resolver should fall back to scoped CLAUDE_DIR
+run_test "T02: State dir exists but no proof file — resolve returns state/{phash}/proof-status"
+mkdir -p "$ORCH_CLAUDE/state/${PHASH}"
+# No proof file yet — resolver should return the new canonical path
 RESULT=$(call_resolve "$MOCK_PROJECT" "$ORCH_CLAUDE")
 EXPECTED="$SCOPED_PROOF"
 if [[ "$RESULT" == "$EXPECTED" ]]; then
     pass_test
 else
-    fail_test "Expected scoped fallback '$EXPECTED', got '$RESULT'"
+    fail_test "Expected new canonical path '$EXPECTED', got '$RESULT'"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 3: Implementer dispatch → needs-verification written to worktree path
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "T03: needs-verification in worktree — resolve returns worktree path"
+run_test "T03: needs-verification written — resolve returns new canonical state path"
 TS=$(date +%s)
-echo "needs-verification|${TS}" > "$WORKTREE_PROOF"
-# write_proof_status also writes the orchestrator side during real dispatch;
-# simulate that to have a complete picture
+# write_proof_status dual-writes to new path + legacy dotfile; simulate both
+mkdir -p "$(dirname "$SCOPED_PROOF")"
 echo "needs-verification|${TS}" > "$SCOPED_PROOF"
 echo "needs-verification|${TS}" > "$LEGACY_PROOF"
 
 RESULT=$(call_resolve "$MOCK_PROJECT" "$ORCH_CLAUDE")
-EXPECTED="$WORKTREE_PROOF"
+EXPECTED="$SCOPED_PROOF"
 if [[ "$RESULT" == "$EXPECTED" ]]; then
     pass_test
 else
-    fail_test "Expected worktree path '$EXPECTED', got '$RESULT'"
+    fail_test "Expected canonical path '$EXPECTED', got '$RESULT'"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,34 +169,39 @@ fi
 #          would reset THAT file back to pending, not the scoped orchestrator file)
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "T04: After source write invalidation — proof transitions to pending at worktree"
+run_test "T04: After source write invalidation — proof transitions to pending at canonical path"
 # Simulate post-write.sh behavior: it calls resolve_proof_file and writes "pending"
 # to that resolved path
 RESOLVED=$(call_resolve "$MOCK_PROJECT" "$ORCH_CLAUDE")
 TS=$(date +%s)
 echo "pending|${TS}" > "$RESOLVED"
 
-# Now test that resolve still returns the worktree path
+# Now test that resolve still returns the canonical new path
 RESULT=$(call_resolve "$MOCK_PROJECT" "$ORCH_CLAUDE")
-EXPECTED="$WORKTREE_PROOF"
+EXPECTED="$SCOPED_PROOF"
 WAS_WRITTEN_CORRECTLY="false"
-[[ "$RESOLVED" == "$WORKTREE_PROOF" ]] && WAS_WRITTEN_CORRECTLY="true"
+[[ "$RESOLVED" == "$SCOPED_PROOF" ]] && WAS_WRITTEN_CORRECTLY="true"
 
 if [[ "$RESULT" == "$EXPECTED" && "$WAS_WRITTEN_CORRECTLY" == "true" ]]; then
     pass_test
 else
-    fail_test "Resolved='$RESOLVED' (want '$WORKTREE_PROOF'), result='$RESULT'"
+    fail_test "Resolved='$RESOLVED' (want '$SCOPED_PROOF'), result='$RESULT'"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 5: User approval → write_proof_status("verified") dual-writes all 3 paths
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "T05: User approval — write_proof_status('verified') dual-writes all 3 paths"
+run_test "T05: User approval — write_proof_status('verified') dual-writes new + legacy paths"
 TRACE_DIR_TMP="$TMPDIR/traces"
 mkdir -p "$TRACE_DIR_TMP"
 
+# Reset proof to pending first (so monotonic lattice allows verified write)
+echo "pending|$(date +%s)" > "$SCOPED_PROOF"
+echo "pending|$(date +%s)" > "$LEGACY_PROOF"
+
 bash -c "
+    source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
     source '$HOOKS_DIR/log.sh' 2>/dev/null
     export CLAUDE_DIR='$ORCH_CLAUDE'
     export PROJECT_ROOT='$MOCK_PROJECT'
@@ -202,25 +212,25 @@ bash -c "
 
 SCOPED_STATUS=$(cut -d'|' -f1 "$SCOPED_PROOF" 2>/dev/null || echo "missing")
 LEGACY_STATUS=$(cut -d'|' -f1 "$LEGACY_PROOF" 2>/dev/null || echo "missing")
-WORKTREE_STATUS=$(cut -d'|' -f1 "$WORKTREE_PROOF" 2>/dev/null || echo "missing")
 
-if [[ "$SCOPED_STATUS" == "verified" && "$LEGACY_STATUS" == "verified" && "$WORKTREE_STATUS" == "verified" ]]; then
+# No worktree proof — the breadcrumb/worktree system was removed
+if [[ "$SCOPED_STATUS" == "verified" && "$LEGACY_STATUS" == "verified" ]]; then
     pass_test
 else
-    fail_test "scoped='$SCOPED_STATUS', legacy='$LEGACY_STATUS', worktree='$WORKTREE_STATUS' (all must be 'verified')"
+    fail_test "new_canonical='$SCOPED_STATUS', legacy_dotfile='$LEGACY_STATUS' (both must be 'verified')"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 6: After verified — resolve returns worktree path (worktree still active)
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "T06: After verified — resolve still returns worktree path (breadcrumb active)"
+run_test "T06: After verified — resolve returns canonical state path (no breadcrumb system)"
 RESULT=$(call_resolve "$MOCK_PROJECT" "$ORCH_CLAUDE")
-EXPECTED="$WORKTREE_PROOF"
+EXPECTED="$SCOPED_PROOF"
 if [[ "$RESULT" == "$EXPECTED" ]]; then
     pass_test
 else
-    fail_test "Expected worktree path '$EXPECTED', got '$RESULT'"
+    fail_test "Expected canonical path '$EXPECTED', got '$RESULT'"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -244,15 +254,15 @@ fi
 
 run_test "T08: validate_state_file passes on well-formed 'verified|timestamp' content"
 RESULT=$(bash -c "
-    source '$HOOKS_DIR/log.sh' 2>/dev/null
     source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
-    validate_state_file '$WORKTREE_PROOF' 2 && echo 'valid' || echo 'invalid'
+    source '$HOOKS_DIR/log.sh' 2>/dev/null
+    validate_state_file '$SCOPED_PROOF' 2 && echo 'valid' || echo 'invalid'
 " 2>/dev/null)
 
 if [[ "$RESULT" == "valid" ]]; then
     pass_test
 else
-    fail_test "validate_state_file returned '$RESULT' for '$WORKTREE_PROOF'"
+    fail_test "validate_state_file returned '$RESULT' for '$SCOPED_PROOF'"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,37 +294,33 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 10: Post-commit cleanup — breadcrumb removed, worktree proof removed
+# Test 10: Post-commit cleanup — no stale legacy dotfiles remain
+#         (Breadcrumb system removed per DEC-PROOF-BREADCRUMB-001)
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "T10: Post-commit cleanup — breadcrumb and worktree proof removed"
-# Simulate check-guardian breadcrumb cleanup loop
-for BREADCRUMB in "${ORCH_CLAUDE}/.active-worktree-path-${_PHASH}" "${ORCH_CLAUDE}/.active-worktree-path"; do
-    if [[ -f "$BREADCRUMB" ]]; then
-        WORKTREE_PATH=$(cat "$BREADCRUMB" 2>/dev/null | tr -d '[:space:]')
-        if [[ -n "$WORKTREE_PATH" && -d "$WORKTREE_PATH" ]]; then
-            rm -f "${WORKTREE_PATH}/.claude/.proof-status"
-        fi
-        rm -f "$BREADCRUMB"
-    fi
+run_test "T10: Post-commit cleanup — no legacy dotfiles remain after state cleanup"
+# After T09 removed the proof files, verify no stale .proof-status* dotfiles remain
+STALE_DOTFILES=0
+for _f in "${ORCH_CLAUDE}/.proof-status"*; do
+    [[ -f "$_f" ]] && STALE_DOTFILES=$((STALE_DOTFILES + 1))
+done
+# Also ensure no breadcrumb files exist (they should never have been created)
+BREADCRUMB_EXISTS=false
+for _b in "${ORCH_CLAUDE}/.active-worktree-path"*; do
+    [[ -f "$_b" ]] && BREADCRUMB_EXISTS=true
 done
 
-BREADCRUMB_EXISTS=false
-WORKTREE_PROOF_EXISTS=false
-[[ -f "$SCOPED_BREADCRUMB" ]] && BREADCRUMB_EXISTS=true
-[[ -f "$WORKTREE_PROOF" ]] && WORKTREE_PROOF_EXISTS=true
-
-if [[ "$BREADCRUMB_EXISTS" == "false" && "$WORKTREE_PROOF_EXISTS" == "false" ]]; then
+if [[ "$STALE_DOTFILES" -eq 0 && "$BREADCRUMB_EXISTS" == "false" ]]; then
     pass_test
 else
-    fail_test "Breadcrumb=$BREADCRUMB_EXISTS, worktree_proof=$WORKTREE_PROOF_EXISTS"
+    fail_test "stale_dotfiles=$STALE_DOTFILES breadcrumb_exists=$BREADCRUMB_EXISTS (both must be 0/false)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 11: Post-cleanup — resolve returns scoped default (breadcrumb gone)
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "T11: After full cleanup — resolve returns scoped default (clean state)"
+run_test "T11: After full cleanup — resolve returns new canonical path (clean state)"
 RESULT=$(call_resolve "$MOCK_PROJECT" "$ORCH_CLAUDE")
 EXPECTED="$SCOPED_PROOF"
 if [[ "$RESULT" == "$EXPECTED" ]]; then
@@ -327,12 +333,14 @@ fi
 # Test 12: write_proof_status — no breadcrumb, only writes orchestrator paths
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "T12: write_proof_status without breadcrumb — only writes scoped + legacy (no worktree)"
-# State is fully cleaned. Write pending to start a new cycle without breadcrumb.
+run_test "T12: write_proof_status — writes new canonical + legacy dotfile (no worktree path)"
+# State is fully cleaned (T09 removed proof files). Write needs-verification to start fresh.
+# Note: Proof files were removed, so needs-verification (ordinal 1) can be written from none (ordinal 0).
 TRACE_DIR_TMP2="$TMPDIR/traces2"
 mkdir -p "$TRACE_DIR_TMP2"
 
 bash -c "
+    source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
     source '$HOOKS_DIR/log.sh' 2>/dev/null
     export CLAUDE_DIR='$ORCH_CLAUDE'
     export PROJECT_ROOT='$MOCK_PROJECT'
@@ -343,36 +351,42 @@ bash -c "
 
 SCOPED_STATUS2=$(cut -d'|' -f1 "$SCOPED_PROOF" 2>/dev/null || echo "missing")
 LEGACY_STATUS2=$(cut -d'|' -f1 "$LEGACY_PROOF" 2>/dev/null || echo "missing")
-WORKTREE_STATUS2=$(cut -d'|' -f1 "$WORKTREE_PROOF" 2>/dev/null || echo "not-written")
+# Worktree proof path no longer exists — dual-write is only new path + legacy dotfile
+WORKTREE_PROOF_ABSENT=true
+[[ -f "$MOCK_WORKTREE/.claude/.proof-status" ]] && WORKTREE_PROOF_ABSENT=false
 
-if [[ "$SCOPED_STATUS2" == "needs-verification" && "$LEGACY_STATUS2" == "needs-verification" && "$WORKTREE_STATUS2" == "not-written" ]]; then
+if [[ "$SCOPED_STATUS2" == "needs-verification" && "$LEGACY_STATUS2" == "needs-verification" && "$WORKTREE_PROOF_ABSENT" == "true" ]]; then
     pass_test
 else
-    fail_test "scoped='$SCOPED_STATUS2', legacy='$LEGACY_STATUS2', worktree='$WORKTREE_STATUS2' (worktree must be absent)"
+    fail_test "canonical='$SCOPED_STATUS2', legacy='$LEGACY_STATUS2', worktree_absent=$WORKTREE_PROOF_ABSENT (first two must be needs-verification, last must be true)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 13: Stale breadcrumb after worktree deleted — resolve falls back gracefully
+# Test 13: Old-path migration fallback — resolve returns legacy dotfile path
+#          when only .proof-status-{phash} exists (not state/{phash}/proof-status)
+#          (Breadcrumb system removed; this tests the migration fallback path)
 # ─────────────────────────────────────────────────────────────────────────────
 
-run_test "T13: Stale breadcrumb (worktree deleted) — resolve falls back to scoped path"
-STALE_WORKTREE="$TMPDIR/worktrees/stale-feature"
-mkdir -p "$STALE_WORKTREE/.claude"
-STALE_PHASH=$(compute_phash "$MOCK_PROJECT")
-STALE_BREADCRUMB="$ORCH_CLAUDE/.active-worktree-path-${STALE_PHASH}"
-echo "$STALE_WORKTREE" > "$STALE_BREADCRUMB"
-# Remove the worktree to make breadcrumb stale
-rm -rf "$STALE_WORKTREE"
+run_test "T13: Migration fallback — only old .proof-status-{phash} exists → resolve returns it"
+# Create a separate mock project to test the legacy fallback cleanly
+LEGACY_TEST_PROJECT="$TMPDIR/legacy-project"
+LEGACY_TEST_CLAUDE="$LEGACY_TEST_PROJECT/.claude"
+mkdir -p "$LEGACY_TEST_CLAUDE"
+git -C "$LEGACY_TEST_PROJECT" init >/dev/null 2>&1
 
-RESULT=$(call_resolve "$MOCK_PROJECT" "$ORCH_CLAUDE")
-EXPECTED="$SCOPED_PROOF"
+LEGACY_TEST_PHASH=$(compute_phash "$LEGACY_TEST_PROJECT")
+LEGACY_DOTFILE="$LEGACY_TEST_CLAUDE/.proof-status-${LEGACY_TEST_PHASH}"
+# Write only the old dotfile path — do NOT create state/{phash}/proof-status
+echo "needs-verification|$(date +%s)" > "$LEGACY_DOTFILE"
+
+RESULT=$(call_resolve "$LEGACY_TEST_PROJECT" "$LEGACY_TEST_CLAUDE")
+EXPECTED="$LEGACY_DOTFILE"
 if [[ "$RESULT" == "$EXPECTED" ]]; then
-    rm -f "$STALE_BREADCRUMB"
     pass_test
 else
-    rm -f "$STALE_BREADCRUMB"
-    fail_test "Expected scoped fallback '$EXPECTED', got '$RESULT'"
+    fail_test "Expected legacy dotfile '$EXPECTED', got '$RESULT'"
 fi
+rm -rf "$LEGACY_TEST_PROJECT"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 14: project_hash is consistent (same input → same output)
@@ -462,7 +476,9 @@ mkdir -p "$AV_PROJECT/.claude" "$AV_TRACES"
 git -C "$AV_PROJECT" init >/dev/null 2>&1
 AV_PHASH=$(compute_phash "$AV_PROJECT")
 AV_SESSION="av-lifecycle-$$"
-AV_SCOPED_PROOF="$AV_PROJECT/.claude/.proof-status-${AV_PHASH}"
+# New canonical path: state/{phash}/proof-status
+AV_SCOPED_PROOF="$AV_PROJECT/.claude/state/${AV_PHASH}/proof-status"
+mkdir -p "$(dirname "$AV_SCOPED_PROOF")"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # T16-Step1: Tester completes — auto-verify marker created + "verified" written
@@ -474,8 +490,9 @@ AV_TS=$(date +%s)
 # Simulate post-task.sh: write auto-verify marker then write "verified"
 printf 'auto-verify|%s\n' "$AV_TS" > \
     "${AV_TRACES}/.active-autoverify-${AV_SESSION}-${AV_PHASH}"
+# Dual-write: new canonical path + legacy dotfile
 printf 'verified|%s\n' "$AV_TS" > "$AV_SCOPED_PROOF"
-printf 'verified|%s\n' "$AV_TS" > "$AV_PROJECT/.claude/.proof-status"
+printf 'verified|%s\n' "$AV_TS" > "$AV_PROJECT/.claude/.proof-status-${AV_PHASH}"
 
 AV_MARKER_EXISTS=false
 [[ -f "${AV_TRACES}/.active-autoverify-${AV_SESSION}-${AV_PHASH}" ]] && AV_MARKER_EXISTS=true

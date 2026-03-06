@@ -90,7 +90,7 @@ OUTPUT=$(TRACE_STORE="$FAKE_TRACE" run_guard "$REPO" "$(make_input 'git branch -
 
 rm -rf "$REPO" "$FAKE_TRACE"
 
-if echo "$OUTPUT" | grep -q '"permissionDecision": "deny"'; then
+if echo "$OUTPUT" | grep -q 'permissionDecision.*deny'; then
     pass_test
 else
     fail_test "Expected deny when no Guardian active. Got: $OUTPUT"
@@ -124,7 +124,7 @@ OUTPUT=$(TRACE_STORE="$FAKE_TRACE" run_guard "$REPO" "$(make_input "git -C $REPO
 
 rm -rf "$REPO" "$FAKE_TRACE"
 
-if ! echo "$OUTPUT" | grep -q '"permissionDecision": "deny"'; then
+if ! echo "$OUTPUT" | grep -q 'permissionDecision.*deny'; then
     pass_test
 else
     fail_test "Expected allow when Guardian active and branch merged. Got: $OUTPUT"
@@ -158,7 +158,7 @@ OUTPUT=$(TRACE_STORE="$FAKE_TRACE" run_guard "$REPO" "$(make_input "git -C $REPO
 
 rm -rf "$REPO" "$FAKE_TRACE"
 
-if echo "$OUTPUT" | grep -q '"permissionDecision": "deny"' && \
+if echo "$OUTPUT" | grep -q 'permissionDecision.*deny' && \
    echo "$OUTPUT" | grep -qi "unmerged\|unmerged commits"; then
     pass_test
 else
@@ -181,7 +181,7 @@ OUTPUT=$(TRACE_STORE="$FAKE_TRACE" run_guard "$REPO" "$(make_input 'git branch -
 
 rm -rf "$REPO" "$FAKE_TRACE"
 
-if echo "$OUTPUT" | grep -q '"permissionDecision": "deny"' && \
+if echo "$OUTPUT" | grep -q 'permissionDecision.*deny' && \
    echo "$OUTPUT" | grep -qi "Guardian\|guardian"; then
     pass_test
 else
@@ -203,7 +203,7 @@ OUTPUT=$(TRACE_STORE="$FAKE_TRACE" run_guard "$REPO" "$(make_input 'git branch -
 
 rm -rf "$REPO" "$FAKE_TRACE"
 
-if echo "$OUTPUT" | grep -q '"permissionDecision": "deny"'; then
+if echo "$OUTPUT" | grep -q 'permissionDecision.*deny'; then
     pass_test
 else
     fail_test "Expected deny for git branch --delete --force without Guardian. Got: $OUTPUT"
@@ -226,7 +226,7 @@ OUTPUT=$(TRACE_STORE="$FAKE_TRACE" run_guard "$REPO" "$(make_input 'git branch -
 rm -rf "$REPO" "$FAKE_TRACE"
 
 # Should NOT be denied by guard.sh (git will handle the actual merge check)
-if ! echo "$OUTPUT" | grep -q '"permissionDecision": "deny"'; then
+if ! echo "$OUTPUT" | grep -q 'permissionDecision.*deny'; then
     pass_test
 else
     fail_test "git branch -d with Guardian active was denied by guard.sh. Got: $OUTPUT"

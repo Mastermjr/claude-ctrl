@@ -59,8 +59,8 @@ call_validate() {
     local file="$1"
     local expected_fields="${2:-2}"
     bash -c "
-        source '$HOOKS_DIR/log.sh' 2>/dev/null
         source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
+        source '$HOOKS_DIR/log.sh' 2>/dev/null
         validate_state_file '$file' '$expected_fields' && echo 'valid' || echo 'invalid'
     " 2>/dev/null
 }
@@ -210,6 +210,7 @@ TRACE_TMP="$TMPDIR/traces-atomic"
 mkdir -p "$TRACE_TMP"
 
 bash -c "
+    source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
     source '$HOOKS_DIR/log.sh' 2>/dev/null
     export CLAUDE_DIR='$ATOMIC_CLAUDE'
     export PROJECT_ROOT='$ATOMIC_PROJECT'
@@ -218,13 +219,16 @@ bash -c "
     write_proof_status 'verified' '$ATOMIC_PROJECT' 2>/dev/null
 " 2>/dev/null
 
-# After write completes, find all proof files and verify each has both fields
+# After write completes, find all proof files and verify each has both fields.
+# write_proof_status dual-writes to:
+#   - New path: state/{phash}/proof-status
+#   - Legacy path: .proof-status-{phash}
 PHASH=$(echo "$ATOMIC_PROJECT" | $_SHA256_CMD | cut -c1-8)
+NEW_STATE_PROOF="$ATOMIC_CLAUDE/state/${PHASH}/proof-status"
 SCOPED_PROOF="$ATOMIC_CLAUDE/.proof-status-${PHASH}"
-LEGACY_PROOF="$ATOMIC_CLAUDE/.proof-status"
 
 PARTIAL_FOUND=false
-for pf in "$SCOPED_PROOF" "$LEGACY_PROOF"; do
+for pf in "$NEW_STATE_PROOF" "$SCOPED_PROOF"; do
     if [[ -f "$pf" ]]; then
         CONTENT=$(cat "$pf" 2>/dev/null || echo "")
         FIELD_COUNT=$(echo "$CONTENT" | awk -F'|' '{print NF}')
@@ -265,8 +269,8 @@ NULL_RESULT=""
 NULL_EXIT=0
 NULL_RESULT=$(timeout 5 bash -c "
     set -euo pipefail
-    source '$HOOKS_DIR/log.sh' 2>/dev/null
     source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
+    source '$HOOKS_DIR/log.sh' 2>/dev/null
     validate_state_file '$NULL_FILE' 2 && echo 'valid' || echo 'invalid'
 " 2>/dev/null) || NULL_EXIT=$?
 

@@ -41,7 +41,7 @@ fi
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$TEST_DIR/.." && pwd)"
 HOOKS_DIR="${PROJECT_ROOT}/hooks"
-TRACK_SH="${HOOKS_DIR}/track.sh"
+TRACK_SH="${HOOKS_DIR}/post-write.sh"
 TASK_TRACK_SH="${HOOKS_DIR}/task-track.sh"
 
 # Ensure tmp directory exists
@@ -180,21 +180,38 @@ TRACE=$(make_temp_trace)
 _CLEANUP_DIRS+=("${TRACE}")
 BASELINE_PHASH=$(echo "$REPO" | $_SHA256_CMD | cut -c1-8)
 # No .active-guardian-* files in TRACE_STORE — simulates the race window.
-# Write to the canonical scoped path so track.sh reads it correctly.
-echo "verified|$(date +%s)" > "$REPO/.claude/.proof-status-${BASELINE_PHASH}"
+# Use the new canonical path: state/{phash}/proof-status
+BASELINE_STATE_DIR="$REPO/.claude/state/${BASELINE_PHASH}"
+mkdir -p "$BASELINE_STATE_DIR"
+# Write proof-status with a timestamp 60 seconds in the past so the epoch file
+# (written at "now") will have a strictly greater mtime. This enables the epoch
+# reset, which allows the monotonic lattice to permit verified→pending transitions.
+# The epoch reset simulates a deliberate new-cycle reset that existed before the fix.
+_PAST_TS=$(( $(date +%s) - 60 ))
+printf '%s\n' "verified|${_PAST_TS}" > "$BASELINE_STATE_DIR/proof-status"
+# Set mtime to the past timestamp so epoch file (at "now") is strictly newer.
+touch -t "$(date -r "$_PAST_TS" '+%Y%m%d%H%M.%S' 2>/dev/null || date -d "@${_PAST_TS}" '+%Y%m%d%H%M.%S' 2>/dev/null)" \
+    "$BASELINE_STATE_DIR/proof-status" 2>/dev/null || true
+# Create epoch file at current time — must be newer than proof-status.
+touch "$BASELINE_STATE_DIR/proof-epoch"
 
 run_track "$REPO/main.sh" "$REPO" "$TRACE"
 
-PROOF_FILE="$REPO/.claude/.proof-status-${BASELINE_PHASH}"
+# post-write.sh dual-writes to both new and old paths — check new canonical path
+PROOF_FILE="$BASELINE_STATE_DIR/proof-status"
+OLD_PROOF_FILE="$REPO/.claude/.proof-status-${BASELINE_PHASH}"
+_STATUS=""
 if [[ -f "$PROOF_FILE" ]]; then
-    STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
-    if [[ "$STATUS" == "pending" ]]; then
-        pass_test
-    else
-        fail_test "Expected 'pending' (race condition baseline), got '$STATUS'"
-    fi
+    _STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
+elif [[ -f "$OLD_PROOF_FILE" ]]; then
+    _STATUS=$(cut -d'|' -f1 "$OLD_PROOF_FILE")
+fi
+if [[ "$_STATUS" == "pending" ]]; then
+    pass_test
+elif [[ -z "$_STATUS" ]]; then
+    fail_test "proof-status file missing after run_track"
 else
-    fail_test ".proof-status-${BASELINE_PHASH} was deleted unexpectedly"
+    fail_test "Expected 'pending' (race condition baseline), got '$_STATUS'"
 fi
 rm -rf "$REPO" "$TRACE"
 

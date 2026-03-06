@@ -96,7 +96,9 @@ SCOPED_PROOF_CC01="$MOCK_CLAUDE_CC01/.proof-status-${PHASH_CC01}"
 SESSION_CC01="cc01-session-$$"
 
 # Step 1: Write verified proof
+# Source core-lib.sh BEFORE log.sh so _lock_fd() is available when write_proof_status runs
 bash -c "
+    source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
     source '$HOOKS_DIR/log.sh' 2>/dev/null
     export CLAUDE_DIR='$MOCK_CLAUDE_CC01'
     export PROJECT_ROOT='$MOCK_PROJECT_CC01'
@@ -106,7 +108,9 @@ bash -c "
 " 2>/dev/null
 
 # Step 2: Guardian marker is auto-created by write_proof_status('verified') —
-# verify it was created, then confirm it's fresh
+# verify it was created, then confirm it's fresh.
+# resolve_proof_file() now returns the new state/{phash}/proof-status path.
+NEW_PROOF_CC01="$MOCK_CLAUDE_CC01/state/${PHASH_CC01}/proof-status"
 GUARDIAN_MARKER="${MOCK_TRACES_CC01}/.active-guardian-${SESSION_CC01}-${PHASH_CC01}"
 if [[ ! -f "$GUARDIAN_MARKER" ]]; then
     fail_test "write_proof_status('verified') did not create guardian marker at $GUARDIAN_MARKER"
@@ -131,12 +135,15 @@ else
     done
 
     if [[ "$_guardian_active" == "true" ]]; then
-        # Proof should still be "verified" — guardian blocked invalidation
-        PROOF_STATUS=$(cut -d'|' -f1 "$SCOPED_PROOF_CC01" 2>/dev/null || echo "missing")
+        # Proof should still be "verified" — guardian blocked invalidation.
+        # Check new canonical path first, fall back to old scoped path (dual-write).
+        local_proof_path="$NEW_PROOF_CC01"
+        [[ ! -f "$local_proof_path" ]] && local_proof_path="$SCOPED_PROOF_CC01"
+        PROOF_STATUS=$(cut -d'|' -f1 "$local_proof_path" 2>/dev/null || echo "missing")
         if [[ "$PROOF_STATUS" == "verified" ]]; then
             pass_test
         else
-            fail_test "Proof should stay 'verified' with guardian active, got '$PROOF_STATUS'"
+            fail_test "Proof should stay 'verified' with guardian active, got '$PROOF_STATUS' (checked: $local_proof_path)"
         fi
     else
         fail_test "Guardian marker exists (age=${MARKER_AGE}s) but was not detected as active"
@@ -214,6 +221,7 @@ PHASH_CC03=$(compute_phash "$MOCK_PROJECT_CC03")
 SESSION_CC03="cc03-session-$$"
 
 bash -c "
+    source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
     source '$HOOKS_DIR/log.sh' 2>/dev/null
     export CLAUDE_DIR='$MOCK_CLAUDE_CC03'
     export PROJECT_ROOT='$MOCK_PROJECT_CC03'
@@ -222,19 +230,24 @@ bash -c "
     write_proof_status 'pending' '$MOCK_PROJECT_CC03' 2>/dev/null
 " 2>/dev/null
 
-# Check for .tmp residue
+# Check for .tmp residue in both old and new locations
 TMP_RESIDUE_FOUND=false
-for f in "$MOCK_CLAUDE_CC03"/.proof-status*.tmp; do
+for f in "$MOCK_CLAUDE_CC03"/.proof-status*.tmp \
+         "$MOCK_CLAUDE_CC03/state/${PHASH_CC03}/proof-status.tmp"*; do
     [[ -f "$f" ]] && TMP_RESIDUE_FOUND=true && break
 done
 
-# Verify all written proof files have complete content
-SCOPED_CC03="$MOCK_CLAUDE_CC03/.proof-status-${PHASH_CC03}"
-LEGACY_CC03="$MOCK_CLAUDE_CC03/.proof-status"
+# Verify all written proof files have complete content.
+# New canonical path: state/{phash}/proof-status
+# Legacy path (dual-write): .proof-status-{phash}
+NEW_CC03="$MOCK_CLAUDE_CC03/state/${PHASH_CC03}/proof-status"
+OLD_CC03="$MOCK_CLAUDE_CC03/.proof-status-${PHASH_CC03}"
 
 INCOMPLETE_FOUND=false
-for pf in "$SCOPED_CC03" "$LEGACY_CC03"; do
+FOUND_AT_LEAST_ONE=false
+for pf in "$NEW_CC03" "$OLD_CC03"; do
     if [[ -f "$pf" ]]; then
+        FOUND_AT_LEAST_ONE=true
         CONTENT=$(cat "$pf" 2>/dev/null || echo "")
         STATUS=$(echo "$CONTENT" | cut -d'|' -f1)
         TS=$(echo "$CONTENT" | cut -d'|' -f2)
@@ -244,11 +257,12 @@ for pf in "$SCOPED_CC03" "$LEGACY_CC03"; do
         fi
     fi
 done
+[[ "$FOUND_AT_LEAST_ONE" == "false" ]] && INCOMPLETE_FOUND=true
 
 if [[ "$TMP_RESIDUE_FOUND" == "false" && "$INCOMPLETE_FOUND" == "false" ]]; then
     pass_test
 else
-    fail_test "tmp_residue=$TMP_RESIDUE_FOUND, incomplete_content=$INCOMPLETE_FOUND"
+    fail_test "tmp_residue=$TMP_RESIDUE_FOUND, incomplete_content=$INCOMPLETE_FOUND (new=$NEW_CC03, old=$OLD_CC03)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -314,7 +328,9 @@ PHASH_CC05=$(compute_phash "$MOCK_PROJECT_CC05")
 SESSION_CC05="cc05-session-$$"
 
 # Write 3 statuses in sequence — last must win
+# Source core-lib.sh BEFORE log.sh so _lock_fd() is available when write_proof_status runs
 bash -c "
+    source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
     source '$HOOKS_DIR/log.sh' 2>/dev/null
     export CLAUDE_DIR='$MOCK_CLAUDE_CC05'
     export PROJECT_ROOT='$MOCK_PROJECT_CC05'
@@ -325,23 +341,25 @@ bash -c "
     write_proof_status 'pending' '$MOCK_PROJECT_CC05' 2>/dev/null
 " 2>/dev/null
 
-SCOPED_CC05="$MOCK_CLAUDE_CC05/.proof-status-${PHASH_CC05}"
-LEGACY_CC05="$MOCK_CLAUDE_CC05/.proof-status"
+# New canonical path: state/{phash}/proof-status
+# Legacy path (dual-write): .proof-status-{phash}
+NEW_CC05="$MOCK_CLAUDE_CC05/state/${PHASH_CC05}/proof-status"
+OLD_CC05="$MOCK_CLAUDE_CC05/.proof-status-${PHASH_CC05}"
 
-SCOPED_STATUS=$(cut -d'|' -f1 "$SCOPED_CC05" 2>/dev/null || echo "missing")
-LEGACY_STATUS=$(cut -d'|' -f1 "$LEGACY_CC05" 2>/dev/null || echo "missing")
+NEW_STATUS=$(cut -d'|' -f1 "$NEW_CC05" 2>/dev/null || echo "missing")
+OLD_STATUS=$(cut -d'|' -f1 "$OLD_CC05" 2>/dev/null || echo "missing")
 
 # Both must be "pending" (last call) — not "needs-verification" (first call)
-if [[ "$SCOPED_STATUS" == "pending" && "$LEGACY_STATUS" == "pending" ]]; then
+if [[ "$NEW_STATUS" == "pending" && "$OLD_STATUS" == "pending" ]]; then
     # Also verify no corruption: timestamp is numeric
-    SCOPED_TS=$(cut -d'|' -f2 "$SCOPED_CC05" 2>/dev/null || echo "")
-    if [[ "$SCOPED_TS" =~ ^[0-9]+$ ]]; then
+    NEW_TS=$(cut -d'|' -f2 "$NEW_CC05" 2>/dev/null || echo "")
+    if [[ "$NEW_TS" =~ ^[0-9]+$ ]]; then
         pass_test
     else
-        fail_test "Last write has invalid timestamp: '$SCOPED_TS'"
+        fail_test "Last write has invalid timestamp: '$NEW_TS'"
     fi
 else
-    fail_test "Expected 'pending' from last write, got scoped='$SCOPED_STATUS' legacy='$LEGACY_STATUS'"
+    fail_test "Expected 'pending' from last write, got new='$NEW_STATUS' old='$OLD_STATUS'"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -363,21 +381,30 @@ PHASH_CC06=$(compute_phash "$MOCK_PROJECT_CC06")
 # Create a breadcrumb that contains only whitespace (simulates partial write)
 printf '   \n' > "$MOCK_CLAUDE_CC06/.active-worktree-path-${PHASH_CC06}"
 
-# resolve_proof_file must not crash — it should treat empty path as stale breadcrumb
+# resolve_proof_file must not crash — it should treat empty path as stale breadcrumb.
+# Source core-lib.sh BEFORE log.sh so _lock_fd() is available.
 RESOLVE_RESULT=""
 RESOLVE_EXIT=0
 RESOLVE_RESULT=$(bash -c "
+    source '$HOOKS_DIR/core-lib.sh' 2>/dev/null
     source '$HOOKS_DIR/log.sh' 2>/dev/null
     export CLAUDE_DIR='$MOCK_CLAUDE_CC06'
     export PROJECT_ROOT='$MOCK_PROJECT_CC06'
     resolve_proof_file 2>/dev/null
 " 2>/dev/null) || RESOLVE_EXIT=$?
 
-# Must return a non-empty path and not crash
+# Must return a non-empty path and not crash.
+# resolve_proof_file() returns state/{phash}/proof-status (new canonical path) when no
+# existing file is found. Verify it returns a sensible path, not whitespace garbage.
 if [[ -n "$RESOLVE_RESULT" && "$RESOLVE_EXIT" -eq 0 ]]; then
-    # Must not return a path with the empty breadcrumb content in it
+    # Must not return a path with the whitespace breadcrumb content in it
     if [[ "$RESOLVE_RESULT" != *"   "* ]]; then
-        pass_test
+        # Extra: verify the returned path looks like a valid state path or old scoped path
+        if [[ "$RESOLVE_RESULT" == */state/* || "$RESOLVE_RESULT" == */.proof-status-* ]]; then
+            pass_test
+        else
+            fail_test "resolve_proof_file returned unexpected path format: '$RESOLVE_RESULT'"
+        fi
     else
         fail_test "resolve_proof_file returned a path with whitespace: '$RESOLVE_RESULT'"
     fi
