@@ -149,11 +149,15 @@ if [[ -f "$CACHE_FILE" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Read todo count
+# Read todo count (legacy fallback — superseded by cache split display)
+# .todo-count format: "proj|glob" (written by session-init.sh cache-first path).
+# For the legacy single-number fallback, read field 1 (proj count).
 # ---------------------------------------------------------------------------
 todo_count=0
 if [[ -f "$TODO_CACHE" ]]; then
-  todo_count=$(cat "$TODO_CACHE" 2>/dev/null || echo 0)
+  _raw_todo=$(cat "$TODO_CACHE" 2>/dev/null || echo 0)
+  # Support both plain integer (old format) and pipe-delimited proj|glob (new format)
+  todo_count=$(printf '%s' "$_raw_todo" | cut -d'|' -f1)
   [[ "$todo_count" =~ ^[0-9]+$ ]] || todo_count=0
 fi
 

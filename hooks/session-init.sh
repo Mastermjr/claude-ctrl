@@ -246,67 +246,60 @@ get_plan_status "$PROJECT_ROOT"
 # Globals set here are read by write_statusline_cache() as TODO_PROJECT_COUNT and
 # TODO_GLOBAL_COUNT.
 # @decision DEC-STARTUP-PERF-001
-# @title Parallelize GitHub API calls to eliminate serial startup latency
+# @title Cache-first todo counts — gh API calls are non-blocking background refreshes
 # @status accepted
-# @rationale session-init.sh made 5 serial gh CLI calls (repo view, issue list x2,
-# run list, todo.sh hud) totaling ~33s. Fix: launch todo + CI queries as background
-# jobs writing to temp files, then collect results. Also removes the redundant
-# todo.sh hud call (duplicated the inline todo counts). Collapses ~33s → ~6s.
+# @rationale Previous implementation wait()ed on background gh jobs, blocking startup
+# by 5s+ even with parallelism. Fix: read cached .todo-count immediately (pipe-delimited
+# proj|glob format), set globals from cache, then launch gh refresh as disowned background
+# job that writes updated values for the NEXT session. Startup path now does zero network
+# calls. .todo-count format: "proj|glob" integers (stop.sh reads f1/f2, statusline reads
+# f1 as legacy fallback, cache gets todo_project/todo_global for split display).
 TODO_PROJECT_COUNT=0
 TODO_GLOBAL_COUNT=0
+_TODO_COUNT_FILE="$HOME/.claude/.todo-count"
 _GH_TMPDIR=$(mktemp -d)
 trap 'rm -rf "$_GH_TMPDIR"' EXIT
+
+# Read cached counts immediately (zero network calls on startup path)
+if [[ -f "$_TODO_COUNT_FILE" ]]; then
+    _CACHED_PROJ=$(cut -d'|' -f1 "$_TODO_COUNT_FILE" 2>/dev/null || echo "0")
+    _CACHED_GLOB=$(cut -d'|' -f2 "$_TODO_COUNT_FILE" 2>/dev/null || echo "0")
+    [[ "$_CACHED_PROJ" =~ ^[0-9]+$ ]] && TODO_PROJECT_COUNT="$_CACHED_PROJ" || TODO_PROJECT_COUNT=0
+    [[ "$_CACHED_GLOB" =~ ^[0-9]+$ ]] && TODO_GLOBAL_COUNT="$_CACHED_GLOB" || TODO_GLOBAL_COUNT=0
+fi
+
 if command -v gh >/dev/null 2>&1; then
     _GLOBAL_REPO="juanandresgs/cc-todos"
 
-    # Phase 1: detect current repo from git remote (no network call — was gh repo view @ ~2-10s)
+    # Detect current repo from git remote (no network call)
     _CURRENT_REPO=$(git remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||' || echo "")
 
-    # Phase 2: launch todo + CI queries in parallel as background jobs
-    if [[ -n "$_CURRENT_REPO" ]]; then
-        # Project todo count (background)
-        (gh issue list --repo "$_CURRENT_REPO" --label claude-todo --state open --json number --jq length 2>/dev/null || echo "0") > "$_GH_TMPDIR/proj" &
-        _PID_PROJ=$!
-
-        if [[ "$_CURRENT_REPO" != "$_GLOBAL_REPO" ]]; then
-            # Global todo count (background)
-            (gh issue list --repo "$_GLOBAL_REPO" --label claude-todo --state open --json number --jq length 2>/dev/null || echo "0") > "$_GH_TMPDIR/glob" &
-            _PID_GLOB=$!
+    # Launch gh refresh as a disowned background job — writes cache for NEXT session.
+    # Never wait() on this process; startup is non-blocking.
+    (
+        _bg_proj=0
+        _bg_glob=0
+        if [[ -n "$_CURRENT_REPO" ]]; then
+            _bg_proj=$(gh issue list --repo "$_CURRENT_REPO" --label claude-todo --state open --json number --jq length 2>/dev/null || echo "0")
+            [[ "$_bg_proj" =~ ^[0-9]+$ ]] || _bg_proj=0
+            if [[ "$_CURRENT_REPO" != "$_GLOBAL_REPO" ]]; then
+                _bg_glob=$(gh issue list --repo "$_GLOBAL_REPO" --label claude-todo --state open --json number --jq length 2>/dev/null || echo "0")
+                [[ "$_bg_glob" =~ ^[0-9]+$ ]] || _bg_glob=0
+            fi
+        else
+            _bg_glob=$(gh issue list --repo "$_GLOBAL_REPO" --label claude-todo --state open --json number --jq length 2>/dev/null || echo "0")
+            [[ "$_bg_glob" =~ ^[0-9]+$ ]] || _bg_glob=0
         fi
-    fi
+        # Write pipe-delimited proj|glob for next session (stop.sh reads f1/f2, statusline reads f1)
+        echo "${_bg_proj}|${_bg_glob}" > "$HOME/.claude/.todo-count" 2>/dev/null || true
+    ) &
+    disown $! 2>/dev/null || true
 
     # CI tier-2 query (background — launched speculatively; result consumed later only if needed)
     if has_github_actions "$PROJECT_ROOT" 2>/dev/null; then
-        (gh run list --limit 1 --json conclusion,updatedAt --jq '.[0] | "\(.conclusion)|\(.updatedAt)"' 2>/dev/null || echo "") > "$_GH_TMPDIR/ci" &
+        (gh run list --limit 1 --json conclusion,updatedAt --jq '.[0] | "\(.conclusion)|\(.updatedAt)"' 2>/dev/null || echo "") > "${_GH_TMPDIR:-/tmp}/ci" &
         _PID_CI=$!
     fi
-
-    # Collect todo results (wait for background jobs)
-    if [[ -n "$_CURRENT_REPO" ]]; then
-        wait "$_PID_PROJ" 2>/dev/null || true
-        _PROJ_COUNT=$(cat "$_GH_TMPDIR/proj" 2>/dev/null || echo "0")
-        [[ "$_PROJ_COUNT" =~ ^[0-9]+$ ]] || _PROJ_COUNT=0
-        TODO_PROJECT_COUNT="$_PROJ_COUNT"
-
-        if [[ "$_CURRENT_REPO" == "$_GLOBAL_REPO" ]]; then
-            TODO_GLOBAL_COUNT=0
-        elif [[ -n "${_PID_GLOB:-}" ]]; then
-            wait "$_PID_GLOB" 2>/dev/null || true
-            _GLOB_COUNT=$(cat "$_GH_TMPDIR/glob" 2>/dev/null || echo "0")
-            [[ "$_GLOB_COUNT" =~ ^[0-9]+$ ]] || _GLOB_COUNT=0
-            TODO_GLOBAL_COUNT="$_GLOB_COUNT"
-        fi
-    else
-        # No GitHub remote: fall back to cached global count
-        _TODO_COUNT_FILE="$HOME/.claude/.todo-count"
-        if [[ -f "$_TODO_COUNT_FILE" ]]; then
-            _GLOB=$(cat "$_TODO_COUNT_FILE" 2>/dev/null || echo "0")
-            [[ "$_GLOB" =~ ^[0-9]+$ ]] && TODO_GLOBAL_COUNT="$_GLOB" || TODO_GLOBAL_COUNT=0
-        fi
-    fi
-
-    # Write .todo-count for statusline cache fallback
-    echo "$TODO_GLOBAL_COUNT" > "$HOME/.claude/.todo-count" 2>/dev/null || true
 fi
 
 # --- Sum lifetime session cost for statusline display (REQ-P1-001) ---
