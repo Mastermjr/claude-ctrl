@@ -82,12 +82,27 @@ QUESTION_TEXT=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.questions[].quest
 
 # --- Gate 0: dispatch-confirmation-deny (orchestrator only) ---
 # Catches "Want me to dispatch Guardian?" / "Should I dispatch tester?" / "Ready for merge?"
+# Also catches CI monitoring questions: "Want me to monitor CI?", "Should I check the build?"
 # CLAUDE.md prohibits these — auto-dispatch rules prescribe the next action.
 # Fires before the orchestrator bypass so it can intercept this specific anti-pattern.
+#
+# @decision DEC-ASK-GATE-002
+# @title Gate 0 expanded to catch CI monitoring questions and declarative forms
+# @status accepted
+# @rationale Gate 0 originally caught dispatch-confirmation questions ("Want me to dispatch
+#   Guardian?") but missed CI monitoring patterns ("Want me to monitor the CI pipeline?",
+#   "Should I check the build?", "Let me watch the deployment"). These all violate auto-dispatch
+#   rules — ci-watch.sh handles CI monitoring autonomously. Three regex clauses:
+#   1. Original + expanded action verbs (monitor/watch/check/wait for) + declarative forms
+#      (let me/I'll/I can) to catch all phrasings including bare declaratives.
+#   2. Original dispatch/invoke pattern (unchanged, kept for clarity).
+#   3. New CI-specific pattern: any monitor/watch/check + CI target noun combination,
+#      even without a question preamble (catches "Let me monitor the pipeline").
 declare_gate "dispatch-confirmation-deny" "Blocks dispatch-confirmation questions from the orchestrator" "deny"
 if [[ "$AGENT_TYPE" == "orchestrator" ]]; then
-    if [[ "$QUESTION_TEXT" =~ (want[[:space:]]+me[[:space:]]+to|shall[[:space:]]+I|should[[:space:]]+I|ready[[:space:]]+for).*(dispatch|invoke|call|run|merge|commit|push|verify|test)[[:space:]]*(tester|guardian|implementer|planner|agent)? ]] || \
-       [[ "$QUESTION_TEXT" =~ (dispatch|invoke).*(tester|guardian|implementer|planner) ]]; then
+    if [[ "$QUESTION_TEXT" =~ (want[[:space:]]+me[[:space:]]+to|shall[[:space:]]+I|should[[:space:]]+I|ready[[:space:]]+for|let[[:space:]]+me|I.ll|I[[:space:]]+can).*(dispatch|invoke|call|run|merge|commit|push|verify|test|monitor|watch|check|wait[[:space:]]+for)[[:space:]]*(tester|guardian|implementer|planner|agent|CI|pipeline|build|deployment|actions|workflow)? ]] || \
+       [[ "$QUESTION_TEXT" =~ (dispatch|invoke).*(tester|guardian|implementer|planner) ]] || \
+       [[ "$QUESTION_TEXT" =~ (monitor|watch|check).*(CI|pipeline|build|deployment|actions|workflow) ]]; then
         emit_deny "Dispatch-confirmation blocked. Auto-dispatch rules (CLAUDE.md) require the orchestrator to dispatch agents without asking. If proof-status gates block Guardian, dispatch the tester first."
     fi
 fi

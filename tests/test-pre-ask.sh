@@ -220,6 +220,41 @@ else
     pass "T12: orchestrator legitimate disambiguation passes Gate 0"
 fi
 
+# --- T13-T16: CI monitoring questions blocked (M4 fix — issue #107) ---
+# Gate 0 must catch CI monitoring questions that previously slipped through.
+
+# T13: "Want me to monitor the CI pipeline?" — should be denied for orchestrator
+OUTPUT=$(run_hook "$FIXTURE_DIR/ask-ci-monitor-want.json")  # no agent marker = orchestrator
+if [[ "$(echo "$OUTPUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)" == "deny" ]]; then
+    pass "T13: CI monitoring 'Want me to monitor CI pipeline' denied for orchestrator"
+else
+    fail "T13: CI monitoring 'Want me to monitor CI pipeline' denied for orchestrator" "expected deny, got: $OUTPUT"
+fi
+
+# T14: "Should I check the build status?" — should be denied for orchestrator
+OUTPUT=$(run_hook "$FIXTURE_DIR/ask-ci-check-build.json")  # no agent marker = orchestrator
+if [[ "$(echo "$OUTPUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)" == "deny" ]]; then
+    pass "T14: CI monitoring 'Should I check the build' denied for orchestrator"
+else
+    fail "T14: CI monitoring 'Should I check the build' denied for orchestrator" "expected deny, got: $OUTPUT"
+fi
+
+# T15: "Should I wait for the workflow to complete?" — should be denied for orchestrator
+OUTPUT=$(run_hook "$FIXTURE_DIR/ask-ci-watch-workflow.json")  # no agent marker = orchestrator
+if [[ "$(echo "$OUTPUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)" == "deny" ]]; then
+    pass "T15: CI monitoring 'Should I wait for workflow' denied for orchestrator"
+else
+    fail "T15: CI monitoring 'Should I wait for workflow' denied for orchestrator" "expected deny, got: $OUTPUT"
+fi
+
+# T16: "Let me monitor the deployment" — should be denied for orchestrator
+OUTPUT=$(run_hook "$FIXTURE_DIR/ask-ci-let-me-monitor.json")  # no agent marker = orchestrator
+if [[ "$(echo "$OUTPUT" | jq -r '.hookSpecificOutput.permissionDecision // empty' 2>/dev/null)" == "deny" ]]; then
+    pass "T16: CI monitoring 'Let me monitor the deployment' denied for orchestrator"
+else
+    fail "T16: CI monitoring 'Let me monitor the deployment' denied for orchestrator" "expected deny, got: $OUTPUT"
+fi
+
 # --- Summary ---
 echo ""
 echo "Results: $TESTS_PASSED passed, $TESTS_FAILED failed out of $((TESTS_PASSED + TESTS_FAILED)) tests"

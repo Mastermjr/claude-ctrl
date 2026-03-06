@@ -1,0 +1,16 @@
+{
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Let me monitor the deployment to make sure it succeeds.",
+        "header": "Deployment monitoring",
+        "options": [
+          {"label": "Yes", "description": "Go ahead"},
+          {"label": "No", "description": "Skip"}
+        ],
+        "multiSelect": false
+      }
+    ]
+  }
+}

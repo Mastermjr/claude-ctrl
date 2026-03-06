@@ -1,0 +1,16 @@
+{
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Should I check the build status before continuing?",
+        "header": "Build check",
+        "options": [
+          {"label": "Yes", "description": "Check build now"},
+          {"label": "No", "description": "Continue without checking"}
+        ],
+        "multiSelect": false
+      }
+    ]
+  }
+}

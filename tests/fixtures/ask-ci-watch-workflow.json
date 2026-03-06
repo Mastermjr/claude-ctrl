@@ -1,0 +1,16 @@
+{
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Should I wait for the workflow to complete?",
+        "header": "Workflow monitoring",
+        "options": [
+          {"label": "Yes", "description": "Wait for workflow"},
+          {"label": "No", "description": "Skip waiting"}
+        ],
+        "multiSelect": false
+      }
+    ]
+  }
+}

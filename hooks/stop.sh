@@ -10,6 +10,18 @@
 # Produces a single systemMessage combining all three outputs into a structured
 # summary for the model's next context window.
 #
+# @decision DEC-GATE-ISOLATE-003
+# @title Per-section crash isolation in stop.sh (S1 fix)
+# @status accepted
+# @rationale A crash in one section (e.g., surface's rg/grep on a corrupt file)
+#   exits the entire hook under set -euo pipefail, silencing ALL subsequent sections.
+#   Sections share the _SUMMARY_PARTS accumulator (parent-shell array), so subshell
+#   isolation (_run_gate) cannot be used — it would prevent sections from appending
+#   to the accumulator. Instead, set +e / set -e sandwiching is applied around each
+#   major section. Crashes are swallowed; the section produces no output and execution
+#   continues. The evidence gate and forward-motion gate (which use exit 2) are
+#   NOT isolated — their exit 2 is intentional and must propagate.
+#
 # @decision DEC-CONSOLIDATE-005
 # @title Merge 3 Stop hooks into stop.sh
 # @status accepted
@@ -141,6 +153,7 @@ fi
 #   a session — it provides correct scoping for session-bounded TTL sentinels.
 _SESSION_KEY="${CLAUDE_SESSION_ID:-$$}"
 _SURFACE_SENTINEL="${CLAUDE_DIR}/.stop-surface-${_SESSION_KEY}"
+set +e  # Isolate surface section — crashes here should not silence session-summary
 if $_RUN_SURFACE && _ttl_expired "$_SURFACE_SENTINEL" "$STOP_SURFACE_TTL"; then
     log_info "SURFACE" "$SOURCE_COUNT_SURFACE source files modified this session"
 
@@ -481,11 +494,14 @@ elif $_RUN_SURFACE; then
     # Clear CHANGES so Section 2 doesn't re-process
     [[ -n "$CHANGES" && -f "$CHANGES" ]] && rm -f "$CHANGES"
 fi
+set -e  # Re-enable fail-fast after surface isolation
 
 # ============================================================================
 # SECTION 2: Session Summary — files changed, git state, test status, trajectory
 # Ported from session-summary.sh (287L)
 # ============================================================================
+
+set +e  # Isolate session-summary section — crashes here should not silence forward-motion
 
 # OPT-3: Reuse _CHANGES_SAVED instead of re-calling get_session_changes().
 # Section 1 may have rm -f'd the file; that's fine — we check -f below before use.
@@ -789,6 +805,7 @@ RETRO
 
     _SUMMARY_PARTS+=("$(echo -e "$SESS_SUMMARY")")
 fi
+set -e  # Re-enable fail-fast after session-summary isolation
 
 # ============================================================================
 # SECTION 3a: Evidence Gate — reject bare completion claims without evidence

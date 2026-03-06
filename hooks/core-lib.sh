@@ -438,6 +438,71 @@ enable_fail_closed() {
     trap '_hook_crash_deny' EXIT
 }
 
+# --- Per-gate Error Isolation ---
+# @decision DEC-GATE-ISOLATE-001
+# @title _run_gate() wraps advisory gates in subshells to contain crashes
+# @status accepted
+# @rationale When 5+ gates are consolidated into one hook file, a crash in one advisory
+#   gate kills the entire hook — blocking all subsequent operations (e.g., doc-freshness
+#   crashing blocks ALL git commits). enable_fail_closed() fail-closed behavior is correct
+#   for safety-critical denials, but wrong for advisory gates where the denial is "gate
+#   crashed, not a real violation."
+#
+#   _run_gate() wraps the gate function in a subshell with set -euo pipefail. If it exits
+#   non-zero, the error is logged and execution continues — other gates are unaffected.
+#   Subshell isolation means variables set inside don't propagate back; this is correct for
+#   deny/advisory gates (they emit JSON to stdout and exit). For side-effect gates that set
+#   parent-shell variables (e.g., track.sh setting PROJECT_ROOT), use set +e / set -e
+#   sandwiching instead (see post-write.sh Step 1 pattern).
+#
+#   Safety-critical gates (nuclear deny, CWD guard, proof-status protection) MUST NOT use
+#   _run_gate() — they must fail-closed. Only advisory and non-blocking gates use this.
+#
+# _run_gate GATE_NAME FUNCTION [ARGS...]
+#   Run FUNCTION in an isolated subshell. If it crashes (exits non-zero), log and continue.
+#   The caller's environment is NOT modified (subshell isolation).
+#
+# Usage:
+#   _run_gate "doc-freshness" _do_doc_freshness_check
+#   _run_gate "plan-validate" _do_plan_validate "$PLAN_FILE"
+_run_gate() {
+    local gate_name="$1"
+    shift
+    (
+        set -euo pipefail
+        "$@"
+    ) || {
+        local rc=$?
+        log_info "$gate_name" "gate crashed (exit $rc) — isolated, continuing" 2>/dev/null || true
+        return 0  # Don't propagate — other gates continue
+    }
+}
+
+# _run_blocking_gate GATE_NAME FUNCTION [ARGS...]
+#   Like _run_gate but preserves planned exit 2 (PostToolUse block signal).
+#   Crashes (any non-zero exit other than 2) are isolated — logged and ignored.
+#   Use this for PostToolUse gates that legitimately block with exit 2
+#   (plan-validate, lint) but whose crashes should not block all writes.
+#
+# Exit 2 semantics: PostToolUse hooks use exit 2 to signal Claude Code to
+#   block the write and show the reason. A crash that exits non-2 would also
+#   block under set -euo pipefail; this function treats it as a non-fatal crash.
+_run_blocking_gate() {
+    local gate_name="$1"
+    shift
+    local _rc=0
+    (
+        set -euo pipefail
+        "$@"
+    ) || _rc=$?
+    if [[ "$_rc" -eq 2 ]]; then
+        exit 2  # Planned block — propagate to parent hook
+    elif [[ "$_rc" -ne 0 ]]; then
+        log_info "$gate_name" "gate crashed (exit $_rc) — isolated, continuing" 2>/dev/null || true
+    fi
+    # rc=0: gate passed normally — continue
+}
+
 # --- Cached Project Context ---
 # @decision DEC-REMED-005 (see file header for full rationale)
 _CACHED_PROJECT_ROOT=""
@@ -500,4 +565,4 @@ export _PROTECTED_STATE_FILES
 export -f project_hash is_source_file is_skippable_path is_test_file is_claude_meta_repo
 export -f read_test_status validate_state_file atomic_write safe_cleanup append_audit _log_deny
 export -f declare_gate emit_deny emit_advisory emit_flush enable_fail_closed _hook_crash_deny
-export -f cache_project_context _lock_fd is_protected_state_file
+export -f cache_project_context _lock_fd is_protected_state_file _run_gate _run_blocking_gate

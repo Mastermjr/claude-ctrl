@@ -547,7 +547,19 @@ fi
 # @decision DEC-DOCFRESH-003 (carried forward)
 # @title doc-freshness fires only on git commit/merge, not all Bash commands
 # @status accepted
+#
+# @decision DEC-GATE-ISOLATE-004
+# @title Doc-freshness crash isolation via set +e sandwiching
+# @status accepted
+# @rationale Doc-freshness crashes (e.g., doc-lib.sh failures, corrupt cache)
+#   should NOT block git commands that already passed all safety gates.
+#   set +e prevents any crash in this advisory section from triggering the
+#   _hook_crash_deny EXIT trap. The section still emits deny/advisory as normal
+#   when it finds real issues — only unexpected crashes are swallowed.
+#   All safety-critical gates above this point run under set -e (fail-closed).
 # =============================================================================
+
+set +e  # Advisory section — crashes here should NOT block git commands that passed safety gates
 
 # Load doc-lib here (not at top) so the common path (non-commit git commands)
 # exits at the git-early-exit gate above without paying doc-lib parse cost.

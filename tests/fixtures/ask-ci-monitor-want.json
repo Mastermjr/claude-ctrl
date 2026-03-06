@@ -1,0 +1,16 @@
+{
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Want me to monitor the CI pipeline until it completes?",
+        "header": "CI monitoring",
+        "options": [
+          {"label": "Yes", "description": "Monitor CI now"},
+          {"label": "No", "description": "Skip monitoring"}
+        ],
+        "multiSelect": false
+      }
+    ]
+  }
+}

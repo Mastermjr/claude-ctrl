@@ -19,6 +19,17 @@
 #   test-runner.sh is excluded because it is async (60s timeout) and must remain
 #   a separate hook invocation to avoid blocking the synchronous hook chain.
 #   code-review.sh is excluded per Phase 2 pruning (low-signal, unreliable MCP).
+#
+# @decision DEC-GATE-ISOLATE-002
+# @title Per-gate crash isolation in post-write.sh (S1 fix)
+# @status accepted
+# @rationale A crash in one advisory gate blocked ALL writes because set -euo pipefail
+#   exits the entire hook on any unhandled error. With 3 gates consolidated in one file,
+#   a doc-freshness bug or linter crash blocked all write operations.
+#   Fix: track (side-effect gate) uses set +e / set -e sandwiching — crashes are
+#   suppressed but parent-shell variables and side effects continue.
+#   plan-validate and lint use _run_blocking_gate() (from core-lib.sh) — crashes are
+#   isolated, but planned exit 2 (block signal) propagates correctly to Claude Code.
 
 set -euo pipefail
 
@@ -51,8 +62,11 @@ FILE_PATH=$(get_field '.tool_input.file_path')
 # ============================================================
 # Step 1: Track — session change tracking + proof invalidation
 # Source: track.sh
+# Isolation: set +e / set -e sandwiching (side-effect gate — must set parent vars,
+# so subshell is not used; crashes are suppressed and execution continues).
 # ============================================================
 declare_gate "track" "Session change tracking + proof invalidation" "side-effect"
+set +e  # Isolate crashes in track section — a crash here should NOT block writes
 
 # Exit silently if parent directory doesn't exist
 if [[ -e "$(dirname "$FILE_PATH")" ]]; then
@@ -171,13 +185,16 @@ if [[ -e "$(dirname "$FILE_PATH")" ]]; then
         fi
     fi
 fi
+set -e  # Re-enable fail-fast after track isolation
 
 # ============================================================
 # Step 2: Plan validate — structural validation of MASTER_PLAN.md
 # Source: plan-validate.sh
+# Isolation: _run_blocking_gate() — crashes are isolated, exit 2 propagates.
 # ============================================================
 declare_gate "plan-validate" "MASTER_PLAN.md structural validation" "advisory"
 
+_plan_validate_gate() {
 # Only validate MASTER_PLAN.md writes
 if [[ "$FILE_PATH" =~ MASTER_PLAN\.md$ ]]; then
     # Resolve to absolute path if needed
@@ -351,13 +368,18 @@ EOF
         fi
     fi
 fi
+} # end _plan_validate_gate
+
+_run_blocking_gate "plan-validate" _plan_validate_gate
 
 # ============================================================
 # Step 3: Lint — auto-detect and run project linter
 # Source: lint.sh
+# Isolation: _run_blocking_gate() — crashes are isolated, exit 2 propagates.
 # ============================================================
 declare_gate "lint" "Auto-detect and run project linter" "advisory"
 
+_lint_gate() {
 # Only lint files that exist and are source files
 if [[ -f "$FILE_PATH" ]] && is_source_file "$FILE_PATH" && ! is_skippable_path "$FILE_PATH"; then
     _LINT_PROJECT_ROOT=$(detect_project_root)
@@ -542,5 +564,8 @@ BREAKER_EOF
         fi
     fi
 fi
+} # end _lint_gate
+
+_run_blocking_gate "lint" _lint_gate
 
 exit 0
