@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `feature/xplatform-reliability`: Portable `_file_mtime()` and `_with_timeout()` wrappers in core-lib.sh — replace 25 inline `stat -f %m` patterns across 12 files with Linux-first stat order (DEC-XPLAT-001), replace 10 bare `timeout` commands across 5 files with GNU timeout + Perl alarm fallback (DEC-XPLAT-002)
+
 ### Added
 - `feature/dispatch-enforcement-tests`: Orchestrator guard test suite — 8 tests across 6 scenarios for Gate 1.5 (DEC-DISPATCH-003): deny orchestrator, allow subagent, backward compat (missing SID), non-source bypass, and protected file registry (DEC-TEST-ORCH-GUARD-001)
 - `feature/dispatch-enforcement`: Gate 1.5 in pre-write.sh blocks orchestrator from writing source code directly — compares CLAUDE_SESSION_ID against .orchestrator-sid (written by session-init.sh) to detect orchestrator context; dispatch routing table restored to CLAUDE.md; .orchestrator-sid lifecycle managed by session-init/session-end (DEC-DISPATCH-001, DEC-DISPATCH-002, DEC-DISPATCH-003)
