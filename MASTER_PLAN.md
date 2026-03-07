@@ -6,7 +6,7 @@
 **Languages:** Bash (85%), Markdown (10%), Python (3%), JSON (2%)
 **Root:** /Users/turla/.claude
 **Created:** 2026-03-01
-**Last updated:** 2026-03-06 (Cross-Platform Reliability initiative added)
+**Last updated:** 2026-03-06 (SQLite Unified State Store initiative added)
 
 The Claude Code configuration directory. It shapes how Claude Code operates across all projects via hooks, agents, skills, and instructions. Managed as a git repository (juanandresgs/claude-config-pro). The hook system enforces governance (git safety, documentation, proof gates, worktree discipline) while the agent system dispatches specialized roles (planner, implementer, tester, guardian) for all project work.
 
@@ -104,6 +104,14 @@ The Claude Code configuration directory. It shapes how Claude Code operates acro
 | 2026-03-06 | DEC-XPLAT-001 | xplatform-reliability | _file_mtime() in core-lib.sh with OS detection at load time | 25 inline stat calls use macOS-first order; Linux stat -f %m returns mount point not mtime; single function with Linux-first detection prevents recurrence |
 | 2026-03-06 | DEC-XPLAT-002 | xplatform-reliability | _with_timeout() wrapper using Perl fallback | Stock macOS lacks timeout command; Perl alarm+exec available everywhere; zero new dependencies |
 | 2026-03-06 | DEC-XPLAT-003 | xplatform-reliability | Fix stale test references inline | Section names reference context-lib.sh (moved to core-lib.sh/source-lib.sh); CYCLE COMPLETE fixture for removed CYCLE_MODE; real fixes not suppression |
+| 2026-03-06 | DEC-SQLITE-001 | sqlite-state-store | Global SQLite WAL database at $CLAUDE_DIR/state/state.db | WAL contention negligible for hook workloads; global simplifies cross-project queries and diagnostics |
+| 2026-03-06 | DEC-SQLITE-002 | sqlite-state-store | workflow_id = {phash}_main / {phash}_{wt_basename} | Deterministic, stable across sessions; proof invalidation handles multi-instance safety |
+| 2026-03-06 | DEC-SQLITE-003 | sqlite-state-store | Proof invalidation on write as multi-instance safety mechanism | Proof is about code state not instance identity; shared proof for shared worktree is correct |
+| 2026-03-06 | DEC-SQLITE-004 | sqlite-state-store | PID-based liveness replaces TTL-based marker expiry | kill -0 is instantaneous and definitive; handles SIGKILL crashes that bypass cleanup hooks |
+| 2026-03-06 | DEC-SQLITE-005 | sqlite-state-store | Automatic re-verification on proof invalidation (max 3 retries) | Keeps pipeline flowing without human intervention in multi-instance scenarios |
+| 2026-03-06 | DEC-SQLITE-006 | sqlite-state-store | Dual-write/dual-read migration with 1-release soak period | Transparent migration; no data loss; flat files retained as fallback during transition |
+| 2026-03-06 | DEC-SQLITE-007 | sqlite-state-store | One sqlite3 invocation per state operation | ~2-3ms per spawn well within budget; _state_sql() wrapper prepends WAL + busy_timeout pragmas |
+| 2026-03-06 | DEC-SQLITE-008 | sqlite-state-store | History table replaces .audit-log and state.json history array | Structured history with SQL queries; capped at 500 entries per workflow via trigger |
 
 ---
 
@@ -1587,6 +1595,314 @@ Main is sacred. Each wave dispatches parallel worktrees:
 - Related: Portable SHA-256 detection (e50930a) — prior cross-platform fix pattern
 - `hooks/core-lib.sh` — target for portability functions
 - `man stat` — macOS: `-f %m` = mount point on Linux, `-c %Y` = mtime on Linux
+
+### Initiative: SQLite Unified State Store
+**Status:** active
+**Started:** 2026-03-06
+**Goal:** Replace the scattered flat-file state system and jq-based state.json with a single SQLite WAL database, providing per-worktree isolation via workflow_id, PID-based liveness detection, and automatic re-verification on proof invalidation.
+
+> The hook governance system manages ~20 state files across 28 hook scripts using scattered flat files with coordination bolted on incrementally (flock, monotonic lattice, atomic tmp+mv, jq read-modify-write under flock). Power users running multiple Claude Code instances experience silent state corruption: two instances can write `.proof-status-{phash}` concurrently with semantic conflicts where one instance's verification satisfies another's proof gate. CHANGELOG documents 13+ state-related bugs. RSM Phase 2 deferred SQLite migration (DEC-RSM-SQLITE-001: "Partial: locking/CAS delivered, SQLite deferred to future phase"). This initiative picks up that deferred work with expanded scope: workflow_id isolation, PID liveness, and automatic re-verification.
+
+**Dominant Constraint:** reliability — The state system must never cause false denies (blocking legitimate work) or false allows (permitting unauthorized state changes). Correctness over performance or simplicity.
+
+#### Goals
+- REQ-GOAL-001: Concurrent state writes from multiple Claude Code instances on the same project are safe — no corruption, no lost updates, no semantic confusion about which workflow owns which state
+- REQ-GOAL-002: All governance state consolidated into a single SQLite WAL database with per-workflow isolation
+- REQ-GOAL-003: Hook system latency for state operations reduced by 50%+ compared to jq-based state.json
+- REQ-GOAL-004: New state files can be added by inserting a single row schema definition, not by modifying 6+ files
+- REQ-GOAL-005: Architecture supports future multi-instance coordination (Unix socket daemon, MCP server) without schema changes
+
+#### Non-Goals
+- REQ-NOGO-001: Cross-machine state synchronization — each machine runs its own state service
+- REQ-NOGO-002: Real-time event streaming / pub-sub for hooks — hooks are short-lived; SSE belongs in Phase 5 daemon
+- REQ-NOGO-003: Migrating trace data (traces/index.jsonl, manifests) to SQLite — traces are append-only JSONL with different access patterns
+- REQ-NOGO-004: GUI or TUI state visualization — this PRD covers the data layer, not the presentation layer
+- REQ-NOGO-005: Replacing session-scoped ephemeral files (.lint-cache, .test-runner.lock) — PID-file semantics are correct for these
+
+#### Requirements
+
+**Must-Have (P0)**
+
+- REQ-P0-001: SQLite WAL database as authoritative state store at `$CLAUDE_DIR/state/state.db`
+  Acceptance: Given a new session on a fresh install, When session-init.sh runs, Then `state.db` is created with correct schema (state + history tables) and pragmas (WAL mode, busy_timeout=5000)
+- REQ-P0-002: Per-workflow state isolation via workflow_id = `{phash}_main` or `{phash}_{wt_basename}`
+  Acceptance: Given two instances on worktrees A and B, When Instance A writes `proof-status=verified`, Then Instance B's `state_read("proof_status")` still returns its own status (not A's)
+- REQ-P0-003: `state_update()`, `state_read()`, `state_cas()`, `state_delete()` rewritten for SQLite
+  Acceptance: Given 10 parallel `state_update()` calls in separate subshells, When executed, Then all 10 writes are visible in the database with no lost updates
+- REQ-P0-004: Monotonic lattice enforcement in SQLite via `state_cas()` for proof_status
+  Acceptance: Given `proof-status=verified` for workflow W, When `state_cas("proof_status", "verified", "pending")` is called, Then the write is rejected; When a new proof-epoch is written, Then the lattice resets
+- REQ-P0-005: Transparent migration from flat files to SQLite on first session-init.sh run
+  Acceptance: Given existing `.proof-status-{phash}` with value `verified|1709500000`, When session-init.sh runs migration, Then `state_read("proof_status")` returns `verified` with correct workflow_id; flat files retained as fallback during migration window
+- REQ-P0-006: PID-based liveness detection for stale state cleanup
+  Acceptance: Given Instance A (PID 12345) wrote `proof-status=needs-verification` and crashed, When Instance B starts a new session, Then the stale `needs-verification` is removed
+- REQ-P0-007: History table with bounded growth (500 entries per workflow_id via trigger)
+  Acceptance: Given 600 state writes for workflow W, When queried, Then history contains exactly 500 entries (newest 500)
+- REQ-P0-008: Automatic re-verification on proof invalidation — orchestrator detects "proof invalidated" as retryable, re-dispatches tester, max 3 retries before escalating
+  Acceptance: Given Instance A's guardian is blocked because Instance B invalidated proof, When guardian returns "proof invalidated", Then orchestrator auto-re-dispatches tester -> re-verifies -> re-dispatches guardian
+- REQ-P0-009: All existing 159+ tests pass with no regressions after migration
+  Acceptance: `bash tests/run-hooks.sh` exits 0 with all tests passing
+
+**Nice-to-Have (P1)**
+
+- REQ-P1-001: Global state queries across all workflows — `state_read_all(key)` returns values for all workflows
+  Criterion: `diagnose` skill and statusline can query proof status across all active worktrees
+- REQ-P1-002: First-run onboarding and dependency setup — on first start (no state.db), check for sqlite3 availability; if missing, present onboarding explanation with install guidance; system operates in degraded mode with persistent warning until sqlite3 is set up; if DB corrupted, explain and offer rebuild (never silently fall back to flat files)
+  Criterion: Missing sqlite3 produces actionable onboarding message; corrupted DB explains the situation and offers `state_rebuild()`; no silent fallback
+- REQ-P1-003: Session-scoped state via session_id column — replaces `${CLAUDE_SESSION_ID}` suffix pattern
+  Criterion: `DELETE FROM state WHERE session_id=? AND key LIKE 'session.%'` replaces 5 separate `rm -f` calls in session-end.sh
+- REQ-P1-004: Structured key namespace convention — dot-notation keys (`proof.status`, `test.result`, `agent.{type}.status`)
+  Criterion: Wildcard queries like `SELECT * FROM state WHERE key LIKE 'agent.%'` work
+
+**Future Consideration (P2)**
+
+- REQ-P2-001: Unix socket daemon wrapping SQLite (Phase 5 of RSM)
+- REQ-P2-002: MCP state server exposing CAS/lease/subscribe
+- REQ-P2-003: Event-sourced state replication across worktrees
+
+#### Definition of Done
+
+All P0 requirements (001-009) satisfied. SQLite WAL database is the authoritative state store. Per-workflow isolation via workflow_id prevents cross-worktree state contamination. Flat-file migration is transparent and automatic. PID-based liveness cleans up after crashed instances. Automatic re-verification handles multi-instance proof races. History table replaces both `.audit-log` and `state.json` history array. All 159+ existing tests pass, plus new SQLite-specific tests for each wave. DEC-IDs: DEC-SQLITE-001 through DEC-SQLITE-008.
+
+#### Architectural Decisions
+
+- DEC-SQLITE-001: Global SQLite WAL database at `$CLAUDE_DIR/state/state.db`
+  Addresses: REQ-P0-001, REQ-GOAL-002.
+  Rationale: WAL contention negligible for hook workloads (<200 writes/session, each <1ms). Global database simplifies cross-project queries and diagnostics. sqlite3 3.51.0 confirmed available on macOS (zero new dependencies). Per-project database rejected — complicates cross-project queries with no WAL contention benefit at this scale.
+
+- DEC-SQLITE-002: workflow_id derivation: `{phash}_main` for main checkout, `{phash}_{wt_basename}` for linked worktrees
+  Addresses: REQ-P0-002.
+  Rationale: Deterministic, stable across sessions, distinguishes main from worktrees. `project_hash()` already exists in core-lib.sh; `workflow_id()` extends it. Per-session isolation rejected — breaks cross-session state persistence and prevents collaboration.
+
+- DEC-SQLITE-003: Proof invalidation on write as multi-instance safety mechanism
+  Addresses: REQ-P0-008, REQ-GOAL-001.
+  Rationale: Proof is about the code state, not the instance identity. Two instances on the same worktree contribute to the same code — shared proof is correct. Any source write fires `post-write.sh` which sets `proof.status = pending`, forcing re-verification that covers ALL changes. Per-session workflow_ids would prevent collaboration.
+
+- DEC-SQLITE-004: PID-based liveness detection replaces TTL-based marker expiry
+  Addresses: REQ-P0-006.
+  Rationale: `kill -0 $pid` is instantaneous and definitive. TTL-based expiry requires tuning (600s guardian TTL is arbitrary) and cannot detect SIGKILL crashes. PID liveness handles all death scenarios. PID recycling mitigated by correlating PID with session_id — dead PID + stale session = cleanup.
+
+- DEC-SQLITE-005: Automatic re-verification on proof invalidation (max 3 retries)
+  Addresses: REQ-P0-008.
+  Rationale: When guardian is blocked because proof was invalidated by concurrent write, orchestrator auto-dispatches tester -> re-verifies -> re-dispatches guardian. Keeps the pipeline flowing without human intervention. Max 3 retries prevents infinite loops in pathological contention scenarios.
+
+- DEC-SQLITE-006: Dual-write/dual-read migration with 1-release-cycle soak period
+  Addresses: REQ-P0-005.
+  Rationale: Transparent migration: SQLite primary, flat file fallback during transition. No data loss. Migrated flat-file state gets `{phash}_main` as default workflow_id (flat files couldn't distinguish worktrees). After soak period, flat files retired in Wave 4.
+
+- DEC-SQLITE-007: One `sqlite3` invocation per state operation (not persistent process)
+  Addresses: REQ-P0-003, REQ-GOAL-003.
+  Rationale: Overhead is ~2-3ms per sqlite3 spawn, well within budget vs ~30ms for jq. Simpler than persistent process with stdin pipe. `_state_sql()` wrapper function prepends WAL + busy_timeout pragmas to every invocation.
+
+- DEC-SQLITE-008: History table replaces `.audit-log` and `state.json` history array
+  Addresses: REQ-P0-007.
+  Rationale: Structured history with SQL queries replaces both the flat `.audit-log` and the jq-managed history array in state.json. Capped at 500 entries per workflow via AFTER INSERT trigger. `.audit-log` can be regenerated from history table on demand.
+
+#### Waves
+
+##### Initiative Summary
+- **Total items:** 7
+- **Critical path:** 4 waves (W1 -> W2 -> W3 -> W4)
+- **Max width:** 2 (Waves 1, 2, 3)
+- **Gates:** 1 review (W2-1), 1 approve (W4-1)
+
+##### Wave 1 (no dependencies)
+**Parallel dispatches:** 2
+
+**W1-1: Core SQLite infrastructure — schema, API, workflow_id (#128)** — Weight: L, Gate: none
+- Create `_state_sql()` wrapper in `hooks/state-lib.sh`:
+  - Prepends `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;` to every invocation
+  - Accepts SQL string + optional args, calls `sqlite3 --batch "$STATE_DB" "$pragmas $sql"`
+  - Creates `$CLAUDE_DIR/state/state.db` on first call if not exists
+  - Runs schema creation (state table, history table, indexes, cap_history trigger) idempotently
+- Create `workflow_id()` in `hooks/state-lib.sh`:
+  - Detects if in linked worktree: `git worktree list --porcelain` parsing
+  - Returns `{phash}_main` for main checkout, `{phash}_{wt_basename}` for linked worktrees
+  - Caches result in `_WORKFLOW_ID` module variable (stable within session)
+- Rewrite `state_update()` for SQLite:
+  - `INSERT OR REPLACE INTO state (key, value, workflow_id, session_id, updated_at, source, pid) VALUES (?, ?, ?, ?, strftime('%s','now'), ?, ?)`
+  - Also `INSERT INTO history` for audit trail
+  - Auto-populates workflow_id, session_id (`$CLAUDE_SESSION_ID`), pid (`$$`)
+- Rewrite `state_read()` for SQLite:
+  - `SELECT value FROM state WHERE key=? AND workflow_id=?`
+  - Returns empty string if not found
+  - Optional second arg overrides auto-detected workflow_id
+- Create `state_cas()` for SQLite:
+  - `UPDATE state SET value=?, updated_at=strftime('%s','now'), source=?, pid=? WHERE key=? AND workflow_id=? AND value=?`
+  - Check `changes()` — 1 = success, 0 = conflict
+  - Enforce lattice for `proof_status` key via ordinal map (same as existing `_PROOF_ORDINALS`)
+  - Returns "ok" on success, "conflict:$actual_value" on mismatch
+- Create `state_delete()` for SQLite:
+  - `DELETE FROM state WHERE key=? AND workflow_id=?`
+- Schema per PRD Appendix B (state table, history table, indexes, cap_history trigger)
+- **Integration:** `hooks/state-lib.sh` — all files that `require_state` get the new functions. `hooks/source-lib.sh` `require_state()` already loads state-lib.sh. No new registrations needed.
+
+**W1-2: Unit tests for SQLite state operations (#129)** — Weight: M, Gate: none
+- Create `tests/test-sqlite-state.sh` with test cases:
+  - Schema creation: DB created on first call, WAL mode confirmed, tables exist
+  - state_update/state_read round-trip
+  - state_cas success and conflict cases
+  - Lattice enforcement: verified->pending rejected, pending->verified accepted, epoch reset
+  - Workflow isolation: two workflow_ids, writes don't cross-contaminate
+  - Concurrent writes: 10 parallel state_update() in subshells, all visible
+  - Concurrent CAS: 10 parallel state_cas(), exactly 1 succeeds
+  - History capping: 600 writes, verify 500 remain
+  - state_delete removes key
+  - Missing key returns empty string
+- Register in `tests/run-hooks.sh` test runner
+- **Integration:** `tests/run-hooks.sh` — add new section "SQLite state operations" with `should_run_section` gate
+
+##### Wave 2 (depends on Wave 1)
+**Parallel dispatches:** 2
+**Blocked by:** W1-1, W1-2
+
+**W2-1: Migration and dual-path (#130)** — Weight: XL, Gate: review, Deps: W1-1, W1-2
+- Migration logic in `hooks/session-init.sh`:
+  - `state_migrate_flat_files()` called on session start if migration not yet done
+  - Detects existing flat files: `.proof-status-{phash}`, `.test-status`, `.subagent-tracker-*`, `.plan-drift`, `.agent-findings`, `.audit-log`, `state/state.json`
+  - Imports each into SQLite with `{phash}_main` as default workflow_id
+  - Sets migration sentinel: `state_update("_migration.completed", "1", "session-init.sh")`
+  - Idempotent: skips if sentinel exists
+- Dual-read in all state consumers (SQLite primary, flat file fallback):
+  - `state_read()` already reads SQLite; add `_state_read_with_fallback()` that checks flat file if SQLite returns empty during migration window
+  - Update readers in: `hooks/pre-bash.sh`, `hooks/task-track.sh`, `hooks/check-tester.sh`, `hooks/check-guardian.sh`, `hooks/check-implementer.sh`, `hooks/prompt-submit.sh`
+- Dual-write in all state producers (SQLite primary, flat file secondary):
+  - `write_proof_status()` in `hooks/log.sh`: write SQLite via `state_update("proof.status", ...)`, keep flat file write during migration window
+  - Test-status writers: update to dual-write
+  - Guardian marker writers in `hooks/task-track.sh`: dual-write
+- Update `cas_proof_status()` in `hooks/prompt-submit.sh` to use `state_cas()` with flat-file fallback
+- Migration tests:
+  - Existing `.proof-status-{phash}` imported correctly
+  - Existing `.test-status` imported with correct workflow_id
+  - After migration: `state_read()` returns imported value
+  - Flat files not deleted during migration window
+  - Dual-read prefers SQLite over flat file when both exist
+- **Integration:** `hooks/session-init.sh` — add migration call in startup sequence. `hooks/log.sh` — `write_proof_status()` dual-write. `hooks/prompt-submit.sh` — `cas_proof_status()` dual-path. All check-*.sh files — dual-read for state queries.
+
+**W2-2: First-run onboarding and structured key namespace (#131)** — Weight: M, Gate: none, Deps: W1-1
+- First-run onboarding in `hooks/session-init.sh`:
+  - On first start (no state.db), check `command -v sqlite3`
+  - If sqlite3 missing: inject onboarding message into CONTEXT_PARTS explaining what the SQLite state store does, why it is needed, and how to install sqlite3 (brew install sqlite3 on macOS, apt-get install sqlite3 on Linux)
+  - System operates in degraded mode with persistent warning banner until sqlite3 is available
+  - If state.db exists but is corrupted (`PRAGMA integrity_check` fails): explain the situation and offer `state_rebuild()` which re-creates from flat file fallback
+  - Never silently fall back to flat files — always inform the user
+- Structured key namespace in `hooks/state-lib.sh`:
+  - Document key naming convention: `proof.status`, `proof.epoch`, `test.result`, `test.fails`, `test.timestamp`, `agent.{type}.status`, `session.changes`, `session.prompt_count`, `plan.drift.unplanned_count`
+  - Create `_STATE_KEY_MAP` associative array mapping old flat file names to new dot-notation keys
+  - `state_read_all(key)` for global queries: `SELECT value, workflow_id FROM state WHERE key=?`
+  - `state_list_workflows()`: `SELECT DISTINCT workflow_id, MAX(updated_at) FROM state GROUP BY workflow_id`
+- Tests for onboarding and namespace:
+  - sqlite3 missing produces onboarding message (mock by unsetting PATH)
+  - Corrupted DB produces rebuild message
+  - Key namespace queries return correct results
+- **Integration:** `hooks/session-init.sh` — onboarding check in startup. `hooks/state-lib.sh` — key map and global query functions.
+
+##### Wave 3 (depends on Wave 2)
+**Parallel dispatches:** 2
+**Blocked by:** W2-1, W2-2
+
+**W3-1: PID-based liveness and stale state cleanup (#132)** — Weight: M, Gate: none, Deps: W2-1
+- PID column already populated by `state_update()` (from Wave 1)
+- Create `state_cleanup_dead_pids()` in `hooks/state-lib.sh`:
+  - Query: `SELECT DISTINCT pid FROM state WHERE pid IS NOT NULL`
+  - For each PID: `kill -0 $pid 2>/dev/null` — if dead, check session_id correlation
+  - Dead PID + stale session: clean up governance-critical state (`proof.status=needs-verification`, active agent markers)
+  - Dead PID + `proof.status=verified`: preserve (completed work should not be lost)
+  - Log each cleanup action to history table
+- Call `state_cleanup_dead_pids()` from `hooks/session-init.sh` on every session start
+- Guardian serialization via `guardian_lock` table:
+  - `CREATE TABLE IF NOT EXISTS guardian_lock (project TEXT PRIMARY KEY, pid INTEGER, session_id TEXT, acquired_at INTEGER)`
+  - `_guardian_acquire_lock()`: INSERT OR FAIL with PID liveness pre-check on existing lock
+  - `_guardian_release_lock()`: DELETE WHERE pid=$$
+  - Replaces `.active-guardian-*` flat file markers
+- Tests:
+  - Stale PID (use a completed background process PID) cleaned up
+  - Live PID preserved
+  - Dead PID with verified status preserved
+  - Guardian lock acquisition and release
+  - Guardian lock with dead PID — new guardian can acquire
+- **Integration:** `hooks/session-init.sh` — call `state_cleanup_dead_pids()` at startup. `hooks/task-track.sh` — replace guardian marker flat files with `guardian_lock` table.
+
+**W3-2: Automatic re-verification on proof invalidation (#133)** — Weight: L, Gate: none, Deps: W2-1
+- Update `hooks/check-guardian.sh` to detect proof invalidation:
+  - When proof gate check fails because status regressed from `verified` to `pending` (concurrent write)
+  - Return structured JSON with `"proof_invalidated": true` in hookSpecificOutput
+  - Include reason: "Proof invalidated by concurrent write — re-verification required"
+- Update `hooks/task-track.sh` post-task handling:
+  - When guardian returns with `proof_invalidated: true`, emit re-verification directive
+  - Track re-verification attempt count in state: `state_update("proof.reverify_count", ...)`
+  - Max 3 retries before escalating to user with explanation
+- Update CLAUDE.md dispatch guidance:
+  - Add re-verification loop: guardian blocked -> re-dispatch tester -> re-dispatch guardian
+  - Document the retry limit and escalation behavior
+- Tests:
+  - Simulated proof invalidation triggers re-verification directive
+  - Re-verification count tracked correctly
+  - Max retry limit (3) produces escalation message
+- **Integration:** `hooks/check-guardian.sh` — proof invalidation detection. `hooks/task-track.sh` — re-verification directive emission. `CLAUDE.md` or `docs/DISPATCH.md` — re-verification loop documentation.
+
+##### Wave 4 (depends on Wave 3 + 1-release soak period)
+**Parallel dispatches:** 1
+**Blocked by:** W3-1, W3-2, plus 1-release soak period
+
+**W4-1: Flat file retirement (#134)** — Weight: M, Gate: approve, Deps: W3-1, W3-2
+- Remove dual-write from all producers:
+  - `write_proof_status()` in `hooks/log.sh`: remove flat file write, SQLite only
+  - Test-status writers: remove flat file write
+  - Guardian marker writers: remove flat file write (guardian_lock table is authoritative)
+- Remove flat file fallback from all consumers:
+  - `_state_read_with_fallback()` → plain `state_read()` (remove fallback branch)
+  - Remove `resolve_proof_file()` flat-file resolution code
+  - Remove `_PROTECTED_STATE_FILES` entries for files now managed by SQLite
+- Clean up deprecated paths:
+  - Remove `.proof-status-{phash}` flat files
+  - Remove `.test-status` flat file
+  - Remove `.plan-drift`, `.agent-findings` flat files
+  - Remove `state/state.json` (replaced by state.db)
+  - Remove `.audit-log` (replaced by history table)
+  - Simplify `scripts/clean-state.sh` to clean SQLite orphans only
+- Update `_PROTECTED_STATE_FILES` registry: replace flat file patterns with `state/state.db`
+- Tests:
+  - Flat file writes no longer occur
+  - state_read() works without flat file fallback
+  - clean-state.sh handles SQLite-only cleanup
+  - All 159+ existing tests still pass
+- **Integration:** `hooks/log.sh` — remove flat file writes. `hooks/core-lib.sh` — update `_PROTECTED_STATE_FILES`. `scripts/clean-state.sh` — SQLite-only cleanup. All check-*.sh — remove flat file fallback.
+
+##### Critical Files
+- `hooks/state-lib.sh` — Core SQLite API: `_state_sql()`, `workflow_id()`, `state_update()`, `state_read()`, `state_cas()`, `state_delete()`, `state_cleanup_dead_pids()`, `state_migrate_flat_files()`
+- `hooks/session-init.sh` — Migration trigger, PID cleanup, first-run onboarding, DB health check
+- `hooks/log.sh` — `write_proof_status()` dual-write then retirement, `resolve_proof_file()` retirement
+- `hooks/prompt-submit.sh` — `cas_proof_status()` SQLite rewrite with lattice enforcement
+- `hooks/check-guardian.sh` — Proof invalidation detection, guardian lock acquisition
+- `hooks/task-track.sh` — Guardian marker migration, re-verification directive
+- `hooks/core-lib.sh` — `_PROTECTED_STATE_FILES` registry updates
+- `tests/test-sqlite-state.sh` — Comprehensive SQLite state operation tests (new file)
+
+##### Decision Log
+<!-- Guardian appends here after wave completion -->
+
+#### SQLite Unified State Store Worktree Strategy
+
+Main is sacred. Each wave dispatches parallel worktrees:
+- **Wave 1 W1-1:** `~/.claude/.worktrees/sqlite-core` on branch `feature/sqlite-core`
+- **Wave 1 W1-2:** `~/.claude/.worktrees/sqlite-tests` on branch `feature/sqlite-tests`
+- **Wave 2 W2-1:** `~/.claude/.worktrees/sqlite-migration` on branch `feature/sqlite-migration`
+- **Wave 2 W2-2:** `~/.claude/.worktrees/sqlite-onboarding` on branch `feature/sqlite-onboarding`
+- **Wave 3 W3-1:** `~/.claude/.worktrees/sqlite-liveness` on branch `feature/sqlite-liveness`
+- **Wave 3 W3-2:** `~/.claude/.worktrees/sqlite-reverify` on branch `feature/sqlite-reverify`
+- **Wave 4 W4-1:** `~/.claude/.worktrees/sqlite-retirement` on branch `feature/sqlite-retirement`
+
+#### SQLite Unified State Store References
+
+- PRD: `prds/sqlite-unified-state-store.md` (comprehensive requirements, schema, API surface)
+- Prior research: `tmp/state-management-research.md` (flock, SQLite WAL, Unix socket, MCP)
+- RSM Initiative: Phases 0-2 completed (flock, CAS, portable locking); Phase 3 superseded by this initiative; Phase 4 independent; Phase 5 depends on this
+- SQLite version: 3.51.0 (confirmed on target system)
+- Existing state-lib.sh: 154 lines, provides `state_update()` and `state_read()` (jq-based, to be rewritten)
+- Schema: PRD Appendix B (state table, history table, indexes, cap_history trigger)
+- API surface: PRD Appendix C (`workflow_id()`, `_state_sql()`, `state_update()`, `state_read()`, `state_cas()`, `state_delete()`, `state_cleanup_dead_pids()`, `state_migrate_flat_files()`)
+- State file inventory: PRD Appendix A (18 files, 13 migrated to SQLite, 5 kept as files)
+- Related issues: #74 (RSM epic), #37 (Write-tool loophole, closed), #105 (bootstrap paradox)
 
 ---
 
