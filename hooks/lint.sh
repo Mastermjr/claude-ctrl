@@ -94,14 +94,22 @@ _emit_findings() {
 
 # --- Shellcheck exclusions matching CI (.github/workflows/validate.yml) ---
 # Hooks use the short exclusion list; tests/scripts use the longer one.
+#
+# IMPORTANT: These exclusion strings are the canonical source of truth for the
+# project's shellcheck configuration. They are mirrored verbatim in:
+#   tests/run-hooks.sh — _SC_HOOKS_EXCLUDE and _SC_TESTS_EXCLUDE variables
+# When changing either list, update BOTH locations to keep --scope lint in sync
+# with CI. See: .github/workflows/validate.yml "shellcheck" job.
 _shellcheck_exclusions() {
     local file="$1"
     # Normalize path relative to project root for comparison
     local rel="${file#"$PROJECT_ROOT/"}"
     if [[ "$rel" == hooks/* ]]; then
+        # _SC_HOOKS_EXCLUDE (mirrors tests/run-hooks.sh _SC_HOOKS_EXCLUDE)
         printf '%s' "SC2034,SC1091,SC2002,SC2012,SC2015,SC2126,SC2317,SC2329"
     else
         # tests/ and scripts/ — full exclusion list from CI
+        # _SC_TESTS_EXCLUDE (mirrors tests/run-hooks.sh _SC_TESTS_EXCLUDE)
         printf '%s' "SC2034,SC1091,SC2155,SC2011,SC2016,SC2030,SC2031,SC2010,SC2005,SC1007,SC2153,SC2064,SC2329,SC2086,SC1090,SC2129,SC2320,SC2188,SC2015,SC2162,SC2045,SC2001,SC2088,SC2012,SC2105,SC2126,SC2295,SC2002,SC2317,SC2164"
     fi
 }

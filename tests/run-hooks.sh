@@ -109,7 +109,7 @@ _print_scope_usage() {
     echo "  concurrency — Concurrency and state management tests (Phase 1 locking, CAS, lattice, registry)"
     echo "  bash32      — Bash 3.2 compatibility (no declare -A in hooks)"
     echo "  validation  — Self-validation tests (version sentinels, consistency, bash -n preflight, hooks-gen)"
-    echo "  lint        — Shellcheck lint scope: lint.sh behavior + shellcheck on all hooks/*.sh"
+    echo "  lint        — Shellcheck lint scope: lint.sh behavior + shellcheck on hooks/*.sh, tests/*.sh, tests/lib/*.sh, scripts/*.sh (matches CI exactly)"
     echo ""
     echo "No --scope = run all tests (default, backward compatible)."
 }
@@ -158,7 +158,7 @@ _scope_pattern() {
         gaps)        echo "gaps-report\.sh" ;;
         concurrency) echo "Concurrency and state management" ;;
         bash32)      echo "Bash 3\.2 compatibility" ;;
-        lint)        echo "lint\.sh|shellcheck.*hooks" ;;
+        lint)        echo "lint\.sh|shellcheck.*(hooks|tests|scripts)" ;;
         *)           echo "" ;;
     esac
 }
@@ -2692,7 +2692,16 @@ fi # end: bash32-compat
 # (Self-validation tests removed from inline delegation — they run as
 # standalone test files in CI step 2.)
 
-# --- Lint scope: lint.sh behavior + shellcheck on all hooks/*.sh ---
+# --- Lint scope: lint.sh behavior + shellcheck on hooks/, tests/, scripts/ ---
+#
+# Exclusion sets defined once here — source of truth for local lint parity with CI.
+# When .github/workflows/validate.yml changes its -e flags, update these two vars.
+#
+# _SC_HOOKS_EXCLUDE: CI "shellcheck on hooks" job exclusions (short list)
+# _SC_TESTS_EXCLUDE: CI "shellcheck on tests and scripts" job exclusions (broad list)
+_SC_HOOKS_EXCLUDE="SC2034,SC1091,SC2002,SC2012,SC2015,SC2126,SC2317,SC2329"
+_SC_TESTS_EXCLUDE="SC2034,SC1091,SC2155,SC2011,SC2016,SC2030,SC2031,SC2010,SC2005,SC1007,SC2153,SC2064,SC2329,SC2086,SC1090,SC2129,SC2320,SC2188,SC2015,SC2162,SC2045,SC2001,SC2088,SC2012,SC2105,SC2126,SC2295,SC2002,SC2317,SC2164"
+
 if should_run_section "lint.sh"; then
 echo ""
 echo "--- lint.sh behavior tests ---"
@@ -2745,7 +2754,7 @@ else
     fi
 fi
 
-# Test 5: shellcheck on all hooks/*.sh with CI exclusion set
+# Test 5: shellcheck on all hooks/*.sh — CI exclusion set (hooks job)
 echo ""
 echo "--- shellcheck: all hooks/*.sh (CI exclusion set) ---"
 _SC_FAILED=0
@@ -2755,9 +2764,7 @@ for _sc_h in "$HOOKS_DIR"/*.sh; do
     _sc_name=$(basename "$_sc_h")
     _SC_FILES_CHECKED=$((_SC_FILES_CHECKED + 1))
     if command -v shellcheck >/dev/null 2>&1; then
-        _sc_out=$(shellcheck \
-            -e SC2034,SC1091,SC2002,SC2012,SC2015,SC2126,SC2317,SC2329 \
-            "$_sc_h" 2>&1) || {
+        _sc_out=$(shellcheck -e "$_SC_HOOKS_EXCLUDE" "$_sc_h" 2>&1) || {
             fail "shellcheck: $_sc_name" "$(echo "$_sc_out" | head -3 | tr '\n' ' ')"
             _SC_FAILED=$((_SC_FAILED + 1))
             continue
@@ -2771,8 +2778,64 @@ if [[ "$_SC_FAILED" -eq 0 ]] && command -v shellcheck >/dev/null 2>&1; then
     echo "  (${_SC_FILES_CHECKED} hooks checked, all clean)"
 fi
 
+fi # end: lint scope (hooks subsection)
+
+# Test 6: shellcheck on all tests/*.sh + tests/lib/*.sh — CI exclusion set (tests+scripts job)
+if should_run_section "shellcheck: all tests/*.sh + tests/lib/*.sh"; then
 echo ""
-fi # end: lint scope
+echo "--- shellcheck: all tests/*.sh + tests/lib/*.sh (CI exclusion set) ---"
+_SC_FAILED=0
+_SC_FILES_CHECKED=0
+for _sc_t in "$SCRIPT_DIR"/*.sh "$SCRIPT_DIR"/lib/*.sh; do
+    [[ -f "$_sc_t" ]] || continue
+    _sc_name=$(basename "$_sc_t")
+    _SC_FILES_CHECKED=$((_SC_FILES_CHECKED + 1))
+    if command -v shellcheck >/dev/null 2>&1; then
+        _sc_out=$(shellcheck -e "$_SC_TESTS_EXCLUDE" "$_sc_t" 2>&1) || {
+            fail "shellcheck: $_sc_name" "$(echo "$_sc_out" | head -3 | tr '\n' ' ')"
+            _SC_FAILED=$((_SC_FAILED + 1))
+            continue
+        }
+        pass "shellcheck: $_sc_name — clean"
+    else
+        skip "shellcheck: $_sc_name" "shellcheck not installed"
+    fi
+done
+if [[ "$_SC_FAILED" -eq 0 ]] && command -v shellcheck >/dev/null 2>&1; then
+    echo "  (${_SC_FILES_CHECKED} test files checked, all clean)"
+fi
+
+fi # end: shellcheck tests subsection
+
+# Test 7: shellcheck on all scripts/*.sh — CI exclusion set (tests+scripts job)
+if should_run_section "shellcheck: all scripts/*.sh"; then
+echo ""
+echo "--- shellcheck: all scripts/*.sh (CI exclusion set) ---"
+_SC_FAILED=0
+_SC_FILES_CHECKED=0
+_SC_SCRIPTS_DIR="$(dirname "$SCRIPT_DIR")/scripts"
+for _sc_s in "$_SC_SCRIPTS_DIR"/*.sh; do
+    [[ -f "$_sc_s" ]] || continue
+    _sc_name=$(basename "$_sc_s")
+    _SC_FILES_CHECKED=$((_SC_FILES_CHECKED + 1))
+    if command -v shellcheck >/dev/null 2>&1; then
+        _sc_out=$(shellcheck -e "$_SC_TESTS_EXCLUDE" "$_sc_s" 2>&1) || {
+            fail "shellcheck: $_sc_name" "$(echo "$_sc_out" | head -3 | tr '\n' ' ')"
+            _SC_FAILED=$((_SC_FAILED + 1))
+            continue
+        }
+        pass "shellcheck: $_sc_name — clean"
+    else
+        skip "shellcheck: $_sc_name" "shellcheck not installed"
+    fi
+done
+if [[ "$_SC_FAILED" -eq 0 ]] && command -v shellcheck >/dev/null 2>&1; then
+    echo "  (${_SC_FILES_CHECKED} scripts checked, all clean)"
+fi
+
+fi # end: shellcheck scripts subsection
+
+echo ""
 
 # --- Summary ---
 echo "==========================="
