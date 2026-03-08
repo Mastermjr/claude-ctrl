@@ -67,20 +67,12 @@ flowchart TD
 
     subgraph D["**Implementer codes**"]
         direction TB
-        W1[write src/] --> TG{test-gate:\ntests passing?}
-        TG -- no: warn, then block --> FT[fix tests]
-        FT --> W1
-
-        W2[write src/] --> PC{plan-check:\nplan stale?}
-        PC -- yes: block --> UP[update plan]
-        UP --> W2
-
-        W3[write src/] --> DG{doc-gate:\ndocumented?}
-        DG -- no: block --> AH[add headers + @decision]
-        AH --> W3
-
-        TG -- yes --> W2
-        PC -- no --> W3
+        W[write src/] --> TG{tests passing?}
+        TG -- "no → fix" --> W
+        TG -- yes --> PC{plan stale?}
+        PC -- "yes → update" --> W
+        PC -- no --> DG{documented?}
+        DG -- "no → add docs" --> W
         DG -- yes --> DONE_IMPL[ ]
     end
 
