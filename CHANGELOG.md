@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `feature/sqlite-state-store`: SQLite Unified State Store initiative added to MASTER_PLAN.md — 4-wave implementation plan replacing scattered flat-file state with single SQLite WAL database, 8 architectural decisions (DEC-SQLITE-001 through 008), 9 P0 requirements, issues #128-#134
 
 ### Fixed
+- `fix/guardian-stale-marker`: Fix Gate A.0 false blocks in task-track.sh — validate trace manifest status before denying Guardian dispatch, preventing stale markers from blocking legitimate dispatches after session crashes, finalize_trace failures, or pre-dispatch marker orphans (DEC-STALE-MARKER-004); 7-test suite in test-guardian-stale-marker.sh
 - `worktree-agent-ab54ee08`: Fix pre-bash.sh Check 2 bootstrap exception — `git ls-tree` exit code check replaced with output-content check since ls-tree returns exit 0 even for absent paths; new 219-line test suite validates bootstrap allow/deny behavior (#150)
 - `fix/ci-sqlite-tests`: Update 4 failing CI tests for SQLite WAL state backend — verify_library_consistency() updated for per-library version pinning, T02 comment updated, T01/T05 check state.db and SQLite WAL concurrency, T10 checks state.db + sqlite3 presence
 - `fix/lint-full-coverage`: Extend `--scope lint` from 34 hooks to 97 files (hooks + tests + scripts) matching CI's full shellcheck coverage — define `_SC_HOOKS_EXCLUDE` and `_SC_TESTS_EXCLUDE` as single source of truth matching validate.yml exclusion sets; 101 total lint tests (#127)
