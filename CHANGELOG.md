@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `feature/session-label`: Session-specific statusline Line 3 — when agents are dispatched, Line 3 now shows the worktree branch name or agent description instead of the static initiative, letting concurrent sessions display unique identifiers; falls back to initiative when no agent is active; 4 decisions (DEC-SESSION-LABEL-001 through 004), 12 new tests
 - `initiative/governance-efficiency`: Governance Efficiency initiative added to MASTER_PLAN.md — targeted signal noise reduction, caching, and deduplication to address 60-310% governance token overhead on easy tasks; 2-wave plan (W1: advisory demotions + caching, W2: cross-hook deduplication), 7 P0 requirements with safety invariants, 5 architectural decisions (DEC-EFF-001 through DEC-EFF-005), issues #208 and #209
 
 ### Fixed
