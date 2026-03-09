@@ -337,7 +337,7 @@ verify_library_consistency() {
         "_GIT_LIB_VERSION:git-lib.sh"
         "_DOC_LIB_VERSION:doc-lib.sh"
         "_CI_LIB_VERSION:ci-lib.sh"
-        "_DB_SAFETY_LIB_VERSION:db-safety-lib.sh"
+        "_DB_SAFETY_LIB_VERSION:db-safety-lib.sh:3"
     )
 
     for entry in "${lib_vars[@]}"; do

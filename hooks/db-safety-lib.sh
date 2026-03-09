@@ -42,7 +42,7 @@
 # Guard: prevent re-sourcing
 [[ -n "${_DB_SAFETY_LIB_LOADED:-}" ]] && return 0
 _DB_SAFETY_LIB_LOADED=1
-_DB_SAFETY_LIB_VERSION=2
+_DB_SAFETY_LIB_VERSION=3
 
 # ---------------------------------------------------------------------------
 # _db_detect_cli COMMAND
@@ -437,6 +437,44 @@ _db_check_mysql() {
     fi
 
     printf 'safe:'
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _db_mysql_ddl_advisory COMMAND
+#
+# Returns an advisory string when a MySQL DDL operation is detected, or empty
+# string if no DDL is present. Called AFTER _db_check_mysql() to emit additional
+# context about MySQL's auto-commit behavior for DDL statements.
+#
+# MySQL auto-commits DDL: Unlike Postgres, MySQL does NOT support transactional DDL.
+# ALTER TABLE, DROP TABLE, CREATE TABLE are committed immediately and cannot be
+# rolled back via ROLLBACK — even if executed inside an explicit transaction.
+#
+# Returns: advisory message string or empty string
+#
+# @decision DEC-DBSAFE-B12-001
+# @title MySQL DDL advisory is a separate function, not embedded in _db_check_mysql
+# @status accepted
+# @rationale _db_check_mysql() returns a single "level:reason" string. Adding
+#   an advisory alongside a deny or safe result would require changing the return
+#   protocol for all callers. A companion function emitting the advisory is cleaner:
+#   pre-bash.sh calls it immediately after _db_check_mysql() and emits the advisory
+#   independently. This follows the pattern of _db_detect_migration_advisory().
+# ---------------------------------------------------------------------------
+_db_mysql_ddl_advisory() {
+    local cmd="$1"
+
+    local cmd_upper
+    cmd_upper=$(printf '%s' "$cmd" | tr '[:lower:]' '[:upper:]')
+
+    # ALTER TABLE, DROP TABLE, CREATE TABLE — all are auto-committed DDL in MySQL
+    if printf '%s' "$cmd_upper" | grep -qE '\b(ALTER[[:space:]]+TABLE|DROP[[:space:]]+TABLE|CREATE[[:space:]]+TABLE)\b'; then
+        printf 'MySQL auto-commits DDL operations. ALTER/DROP/CREATE cannot be rolled back via transaction. Verify backup before proceeding.'
+        return 0
+    fi
+
+    printf ''
     return 0
 }
 
@@ -1153,5 +1191,301 @@ _db_op_type_from_cli() {
 
     # Default: read query
     printf 'query'
+    return 0
+}
+
+# =============================================================================
+# WAVE 5 — Hook-layer polish (B9, B10, B11, B12, E6 support)
+#
+# @decision DEC-DBSAFE-W5-001
+# @title Wave 5 adds schema change advisory, credential redaction, session stats,
+#        MySQL DDL autocommit warning, and MCP credential partitioning advisory
+# @status accepted
+# @rationale Waves 1-4 handle structural safety (deny/allow/advisory for destructive ops).
+#   Wave 5 adds UX-layer polish:
+#     B9:  Schema changes in non-local environments warrant visibility even when not denied.
+#          ALTER TABLE / CREATE INDEX in production/staging → advisory (not a block).
+#     B10: Credentials in deny/advisory messages expose secrets in logs.
+#          Redact all password-carrying fields before any message emission.
+#     B11: Session-level aggregation lets stop.sh surface a summary ("3 blocked today")
+#          to give the user a daily safety picture without hunting through logs.
+#     B12: MySQL silently auto-commits DDL — unlike Postgres which can wrap DDL in
+#          a transaction for easy rollback. A targeted advisory prevents surprises.
+#     E6:  MCP servers with write access to production databases should use separate
+#          read-only / read-write credentials. One-shot advisory on first DB MCP call.
+#
+# @decision DEC-DBSAFE-W5-002
+# @title Stats file format: one counter per line as "KEY=VALUE", greppable
+# @status accepted
+# @rationale A simple KEY=VALUE format (one per line) allows:
+#   - Atomic reads via grep: grep "^checked=" .db-safety-stats | cut -d= -f2
+#   - Atomic writes: file is rewritten atomically with temp+mv pattern
+#   - Shell parsing without external tools (no jq dependency)
+#   - Portability to bash 3.2 (macOS default) without associative arrays
+#   Counter categories: checked (every DB detection), blocked (every deny),
+#   warned (every advisory emission).
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# _db_detect_schema_change COMMAND
+#
+# Detects schema-modifying SQL in a command string.
+# Returns "schema:<description>" if a schema-altering statement is found,
+# or "none" if no schema change is detected.
+#
+# Detected statements:
+#   ALTER TABLE   — modifies column/index structure
+#   CREATE INDEX  — adds an index (can be slow in prod on large tables)
+#   DROP INDEX    — removes an index (affects query performance)
+#   CREATE TABLE  — adds a new table
+#   RENAME TABLE  — renames an existing table
+#
+# Schema changes in production/staging merit awareness even when the risk
+# classification returns "safe" (they are not destructive, but they affect
+# shared schema state and can cause production incidents).
+#
+# Returns: "schema:<description>" or "none"
+# ---------------------------------------------------------------------------
+_db_detect_schema_change() {
+    local cmd="$1"
+
+    local cmd_upper
+    cmd_upper=$(printf '%s' "$cmd" | tr '[:lower:]' '[:upper:]')
+
+    if printf '%s' "$cmd_upper" | grep -qE '\bALTER[[:space:]]+TABLE\b'; then
+        printf 'schema:ALTER TABLE'; return 0
+    fi
+    if printf '%s' "$cmd_upper" | grep -qE '\bCREATE[[:space:]]+INDEX\b'; then
+        printf 'schema:CREATE INDEX'; return 0
+    fi
+    if printf '%s' "$cmd_upper" | grep -qE '\bDROP[[:space:]]+INDEX\b'; then
+        printf 'schema:DROP INDEX'; return 0
+    fi
+    if printf '%s' "$cmd_upper" | grep -qE '\bCREATE[[:space:]]+TABLE\b'; then
+        printf 'schema:CREATE TABLE'; return 0
+    fi
+    if printf '%s' "$cmd_upper" | grep -qE '\bRENAME[[:space:]]+TABLE\b'; then
+        printf 'schema:RENAME TABLE'; return 0
+    fi
+
+    printf 'none'
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _db_redact_credentials COMMAND_STRING
+#
+# Sanitizes database connection credentials in a command string for safe
+# display in deny/advisory messages and log output.
+#
+# Redaction patterns:
+#   postgresql://user:password@host/db  → postgresql://user:***@host/db
+#   mysql://user:password@host/db       → mysql://user:***@host/db
+#   mongodb://user:password@host/db     → mongodb://user:***@host/db
+#   -p password / -p<password>          → -p ***
+#   --password=secret                   → --password=***
+#   PGPASSWORD=secret                   → PGPASSWORD=***
+#   MYSQL_PWD=secret                    → MYSQL_PWD=***
+#   DATABASE_URL=postgres://u:pass@h    → DATABASE_URL=***
+#
+# @decision DEC-DBSAFE-W5-003
+# @title Redact before emit: always sanitize the command in deny/advisory messages
+# @status accepted
+# @rationale Hook deny messages are captured in shell logs, transcript files, and
+#   potentially sent to remote observability systems. Passwords in those paths are
+#   security incidents. Redaction at the library boundary (before _db_format_deny /
+#   _db_format_advisory) ensures no caller can accidentally emit plaintext credentials.
+#   sed is used (not awk/python) to preserve bash 3.2 portability.
+# ---------------------------------------------------------------------------
+_db_redact_credentials() {
+    local cmd="$1"
+
+    # URI format: protocol://user:password@host → protocol://user:***@host
+    # Handles postgresql://, mysql://, mongodb://, postgres://
+    # Use # delimiter to avoid conflict with | alternation in the pattern on macOS BSD sed.
+    cmd=$(printf '%s' "$cmd" | sed -E 's#(postgresql|postgres|mysql|mongodb)://([^:@]+):[^@]*@#\1://\2:***@#g')
+
+    # -p password (space-separated, mysql/mongosh style)
+    # Matches: -p<space>something but not -p at end of string
+    cmd=$(printf '%s' "$cmd" | sed -E 's/-p[[:space:]]+[^[:space:]]+/-p ***/g')
+
+    # -p<password> (no space, mysql -pmypassword)
+    # Must come AFTER the space-separated form to avoid double-redaction
+    cmd=$(printf '%s' "$cmd" | sed -E 's/-p([^[:space:]-][^[:space:]]*)/-p***/g')
+
+    # --password=secret
+    cmd=$(printf '%s' "$cmd" | sed -E 's/--password=[^[:space:]]*/--password=***/g')
+
+    # PGPASSWORD=secret
+    cmd=$(printf '%s' "$cmd" | sed -E 's/PGPASSWORD=[^[:space:]]*/PGPASSWORD=***/g')
+
+    # MYSQL_PWD=secret
+    cmd=$(printf '%s' "$cmd" | sed -E 's/MYSQL_PWD=[^[:space:]]*/MYSQL_PWD=***/g')
+
+    # DATABASE_URL=... (entire value redacted — may contain embedded credentials)
+    cmd=$(printf '%s' "$cmd" | sed -E 's/DATABASE_URL=[^[:space:]]*/DATABASE_URL=***/g')
+
+    printf '%s' "$cmd"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _db_format_deny REASON SUGGESTION
+#
+# Formats a deny message consistently for database safety denials.
+# Credentials in the reason/suggestion are redacted before formatting.
+# The output is passed to emit_deny() in pre-bash.sh.
+# ---------------------------------------------------------------------------
+_db_format_deny() {
+    local reason="$1"
+    local suggestion="${2:-}"
+
+    # Redact any credentials that may appear in the reason text
+    reason=$(_db_redact_credentials "$reason")
+
+    printf 'DB-SAFETY DENY — %s' "$reason"
+    if [[ -n "$suggestion" ]]; then
+        printf '\n\nSuggestion: %s' "$suggestion"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# _db_format_advisory REASON
+#
+# Formats an advisory message for database safety warnings.
+# Credentials in the reason are redacted before formatting.
+# The output is used in hook advisory emissions.
+# ---------------------------------------------------------------------------
+_db_format_advisory() {
+    local reason="$1"
+
+    # Redact any credentials that may appear in the advisory text
+    reason=$(_db_redact_credentials "$reason")
+
+    printf 'DB-SAFETY ADVISORY — %s' "$reason"
+}
+
+# ---------------------------------------------------------------------------
+# _db_increment_stat CATEGORY
+#
+# Increments a named counter in the db-safety stats file.
+# Creates the file if it does not exist.
+#
+# Categories: checked | blocked | warned
+#   checked — every DB CLI or MCP DB tool detection
+#   blocked — every deny emission
+#   warned  — every advisory emission
+#
+# File format: KEY=VALUE (one per line, grep-friendly)
+# File location: ${CLAUDE_DIR:-$HOME/.claude}/.db-safety-stats
+#
+# Uses atomic temp+mv pattern to avoid partial writes during concurrent hook
+# invocations (multiple tabs, parallel tool calls).
+# ---------------------------------------------------------------------------
+_db_increment_stat() {
+    local category="${1:-checked}"
+    local stats_file="${CLAUDE_DIR:-$HOME/.claude}/.db-safety-stats"
+
+    # Read current values (default to 0)
+    local checked=0 blocked=0 warned=0
+    if [[ -f "$stats_file" ]]; then
+        local _v
+        _v=$(grep "^checked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        [[ "$_v" =~ ^[0-9]+$ ]] && checked="$_v"
+        _v=$(grep "^blocked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        [[ "$_v" =~ ^[0-9]+$ ]] && blocked="$_v"
+        _v=$(grep "^warned=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        [[ "$_v" =~ ^[0-9]+$ ]] && warned="$_v"
+    fi
+
+    # Increment the requested counter
+    case "$category" in
+        checked) checked=$(( checked + 1 )) ;;
+        blocked) blocked=$(( blocked + 1 )) ;;
+        warned)  warned=$(( warned + 1 )) ;;
+    esac
+
+    # Atomic write via temp file + mv (POSIX rename is atomic on same filesystem)
+    local tmp_file="${stats_file}.tmp.$$"
+    {
+        printf 'checked=%d\n' "$checked"
+        printf 'blocked=%d\n' "$blocked"
+        printf 'warned=%d\n'  "$warned"
+    } > "$tmp_file" 2>/dev/null && mv "$tmp_file" "$stats_file" 2>/dev/null || true
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _db_session_summary
+#
+# Reads the db-safety stats file and returns a human-readable summary string.
+# Used by stop.sh (via _db_read_session_stats) to surface daily stats to user.
+#
+# Returns: "Database safety: N commands checked, N blocked, N warnings"
+# Returns empty string if stats file does not exist or has no data.
+#
+# Integration point for stop.sh:
+#   Add to stop.sh's summary block:
+#     require_db_safety
+#     _DB_STAT_SUMMARY=$(_db_session_summary)
+#     if [[ -n "$_DB_STAT_SUMMARY" ]]; then
+#         CONTEXT_PARTS+=("$_DB_STAT_SUMMARY")
+#     fi
+# ---------------------------------------------------------------------------
+_db_session_summary() {
+    local stats_file="${CLAUDE_DIR:-$HOME/.claude}/.db-safety-stats"
+
+    local checked=0 blocked=0 warned=0
+    if [[ -f "$stats_file" ]]; then
+        local _v
+        _v=$(grep "^checked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        [[ "$_v" =~ ^[0-9]+$ ]] && checked="$_v"
+        _v=$(grep "^blocked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        [[ "$_v" =~ ^[0-9]+$ ]] && blocked="$_v"
+        _v=$(grep "^warned=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        [[ "$_v" =~ ^[0-9]+$ ]] && warned="$_v"
+    fi
+
+    # Only emit if there were any database operations this session
+    if [[ "$checked" -eq 0 && "$blocked" -eq 0 && "$warned" -eq 0 ]]; then
+        printf ''
+        return 0
+    fi
+
+    printf 'Database safety: %d commands checked, %d blocked, %d warnings' \
+        "$checked" "$blocked" "$warned"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _db_read_session_stats
+#
+# Returns the raw key=value stats for programmatic consumption.
+# Callers can source the output or use grep to extract individual values.
+#
+# Integration point for stop.sh:
+#   Provides a stable API for reading session stats without coupling to
+#   the internal file format. Call _db_session_summary() for display.
+# ---------------------------------------------------------------------------
+_db_read_session_stats() {
+    local stats_file="${CLAUDE_DIR:-$HOME/.claude}/.db-safety-stats"
+
+    if [[ ! -f "$stats_file" ]]; then
+        printf 'checked=0\nblocked=0\nwarned=0\n'
+        return 0
+    fi
+
+    # Return the file contents, defaulting missing keys to 0
+    local checked=0 blocked=0 warned=0
+    local _v
+    _v=$(grep "^checked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+    [[ "$_v" =~ ^[0-9]+$ ]] && checked="$_v"
+    _v=$(grep "^blocked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+    [[ "$_v" =~ ^[0-9]+$ ]] && blocked="$_v"
+    _v=$(grep "^warned=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+    [[ "$_v" =~ ^[0-9]+$ ]] && warned="$_v"
+
+    printf 'checked=%d\nblocked=%d\nwarned=%d\n' "$checked" "$blocked" "$warned"
     return 0
 }

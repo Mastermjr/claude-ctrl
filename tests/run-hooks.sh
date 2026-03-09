@@ -119,6 +119,7 @@ _print_scope_usage() {
     echo "  dbsafe-w3a  — DB Guardian Wave 3a: agent definition + JSON handoff protocol (D1/D2)"
     echo "  dbsafe-w3b  — DB Guardian Wave 3b: policy engine, simulation helpers, approval gate (D3/D4/D5)"
     echo "  dbsafe-w4   — MCP Governance (Wave 4 Task E): E1 tool ID, E2 SQL validation, E3 capability filter, E4 rate limit"
+    echo "  dbsafe-w5   — DB Safety Wave 5 polish: schema gate (B9), credential redact (B10), session stats (B11), MySQL DDL (B12), MCP advisory (E6)"
     echo ""
     echo "No --scope = run all tests (default, backward compatible)."
 }
@@ -177,6 +178,7 @@ _scope_pattern() {
         dbsafe-w3a)        echo "db-guardian-lib\.sh unit tests.*Wave 3a" ;;
         dbsafe-w3b)        echo "DB Guardian Wave 3b" ;;
         dbsafe-w4)         echo "MCP Governance Wave 4" ;;
+        dbsafe-w5)         echo "DB Safety Wave 5" ;;
         *)                 echo "" ;;
     esac
 }
@@ -3174,6 +3176,39 @@ fi
 
 echo ""
 fi # end: dbsafe-w4
+
+# =============================================================================
+# DB Safety Wave 5 (B9, B10, B11, B12, E6): Hook-layer polish
+# Delegates to test-db-safety-w5.sh and aggregates results.
+# Registered as --scope dbsafe-w5.
+# Tests: B9 schema change gate (9), B10 credential redaction (20),
+#        B11 session stats (12), B12 MySQL DDL warning (9), E6 MCP advisory (6)
+# Total: 56 tests.
+# =============================================================================
+if should_run_section "DB Safety Wave 5"; then
+echo ""
+echo "--- DB Safety Wave 5 (B9/B10/B11/B12/E6): schema gate, credential redact, stats, MySQL DDL, MCP advisory ---"
+
+_DBSAFE_W5_TEST="$SCRIPT_DIR/test-db-safety-w5.sh"
+if [[ ! -f "$_DBSAFE_W5_TEST" ]]; then
+    skip "dbsafe-w5 tests" "test-db-safety-w5.sh not found at $_DBSAFE_W5_TEST"
+else
+    _DBSAFE_W5_OUTPUT=$(bash "$_DBSAFE_W5_TEST" 2>/dev/null) || true
+    _DBSAFE_W5_EXIT=$?
+    _DBSAFE_W5_PASSED=$(echo "$_DBSAFE_W5_OUTPUT" | grep -c "^  PASS:" 2>/dev/null || true)
+    _DBSAFE_W5_FAILED=$(echo "$_DBSAFE_W5_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _DBSAFE_W5_TOTAL=$(echo "$_DBSAFE_W5_OUTPUT" | grep -E "^Results:" | grep -oE "[0-9]+ total" | grep -oE "[0-9]+" || true)
+    if [[ "$_DBSAFE_W5_FAILED" -eq 0 && -n "$_DBSAFE_W5_TOTAL" ]]; then
+        pass "dbsafe-w5: all ${_DBSAFE_W5_TOTAL} tests passed (${_DBSAFE_W5_PASSED} assertions)"
+    else
+        _DBSAFE_W5_FAIL_DETAILS=$(echo "$_DBSAFE_W5_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "dbsafe-w5" "${_DBSAFE_W5_FAILED} failed (${_DBSAFE_W5_PASSED}/${_DBSAFE_W5_TOTAL:-?} passed): ${_DBSAFE_W5_FAIL_DETAILS}"
+        echo "$_DBSAFE_W5_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-w5
 
 # --- Summary ---
 echo "==========================="

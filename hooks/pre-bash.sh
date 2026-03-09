@@ -447,6 +447,9 @@ if echo "$_stripped_cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()(psql|mysql|sq
     if [[ "$_DB_CLI" != "none" ]]; then
         _DB_ENV=$(_db_detect_environment)
 
+        # Wave 5 B11: count every DB CLI detection
+        _db_increment_stat "checked"
+
         # Wave 2a: dispatch to per-CLI handler instead of generic _db_classify_risk.
         # Each handler calls _db_classify_risk first (common patterns), then adds
         # CLI-specific RCE/code-execution checks (DEC-DBSAFE-004).
@@ -460,6 +463,17 @@ if echo "$_stripped_cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()(psql|mysql|sq
         esac
         _DB_RISK_LEVEL="${_DB_RISK_RESULT%%:*}"
         _DB_RISK_REASON="${_DB_RISK_RESULT#*:}"
+
+        # Wave 5 B12: MySQL DDL autocommit advisory — emitted alongside normal classification.
+        # MySQL silently commits DDL (ALTER/DROP/CREATE TABLE) even inside explicit transactions.
+        # This advisory fires when any MySQL DDL is detected, regardless of risk level.
+        if [[ "$_DB_CLI" == "mysql" ]]; then
+            _DB_MYSQL_DDL_ADV=$(_db_mysql_ddl_advisory "$COMMAND")
+            if [[ -n "$_DB_MYSQL_DDL_ADV" ]]; then
+                emit_advisory "DB-SAFETY MYSQL DDL — ${_DB_MYSQL_DDL_ADV}"
+                _db_increment_stat "warned"
+            fi
+        fi
 
         # Wave 2a B3: TTY fail-safe — non-interactive + deny → hard deny regardless of env tier.
         # AI agents pipe commands non-interactively, bypassing human confirmation prompts.
@@ -484,6 +498,7 @@ if echo "$_stripped_cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()(psql|mysql|sq
                 "$COMMAND" \
                 "${_DB_TTY_DENY#deny:}" \
                 "$_DB_ENV")
+            _db_increment_stat "blocked"
             emit_deny "$(_db_format_deny "${_DB_TTY_DENY#deny:}" "Route through Database Guardian for human approval, or run interactively at a terminal.")${_DBG_SIGNAL}"
         fi
 
@@ -503,6 +518,7 @@ if echo "$_stripped_cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()(psql|mysql|sq
                         "$COMMAND" \
                         "$_DB_RISK_REASON" \
                         "$_DB_ENV")
+                    _db_increment_stat "blocked"
                     emit_deny "$(_db_format_deny "$_DB_RISK_REASON" "Connect to a development database to run destructive operations. If this is intentional, route through Database Guardian for human approval.")${_DBG_SIGNAL}"
                 elif [[ "$_DB_RISK_LEVEL" == "advisory" ]]; then
                     require_db_guardian
@@ -511,6 +527,7 @@ if echo "$_stripped_cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()(psql|mysql|sq
                         "$COMMAND" \
                         "$_DB_RISK_REASON (environment: $_DB_ENV — treating as production)" \
                         "$_DB_ENV")
+                    _db_increment_stat "blocked"
                     emit_deny "$(_db_format_deny "$_DB_RISK_REASON (environment: $_DB_ENV — treating as production)" "Verify the target environment. Run with an explicit WHERE clause or on a development database.")${_DBG_SIGNAL}"
                 fi
                 ;;
@@ -522,15 +539,18 @@ if echo "$_stripped_cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()(psql|mysql|sq
                         "$COMMAND" \
                         "$_DB_RISK_REASON" \
                         "$_DB_ENV")
+                    _db_increment_stat "blocked"
                     emit_deny "$(_db_format_deny "$_DB_RISK_REASON" "Connect to a development database to run destructive operations.")${_DBG_SIGNAL}"
                 elif [[ "$_DB_RISK_LEVEL" == "advisory" ]]; then
                     log_warn "DB-SAFETY" "$(_db_format_advisory "$_DB_RISK_REASON (environment: staging)")"
+                    _db_increment_stat "warned"
                     # Allow — staging advisory is a warning only
                 fi
                 ;;
             development|local)
                 if [[ "$_DB_RISK_LEVEL" == "deny" ]]; then
                     log_warn "DB-SAFETY" "$(_db_format_advisory "$_DB_RISK_REASON (environment: $_DB_ENV — allowing with warning)")"
+                    _db_increment_stat "warned"
                     # Allow — destructive ops on dev/local are the developer's prerogative
                 fi
                 # advisory + dev/local = allow silently
@@ -545,8 +565,26 @@ if echo "$_stripped_cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()(psql|mysql|sq
         if [[ "$_DB_RISK_LEVEL" == "safe" ]]; then
             _DB_FLAG_DENY=$(_db_inject_safety_flags "$COMMAND")
             if [[ -n "$_DB_FLAG_DENY" ]]; then
+                _db_increment_stat "blocked"
                 emit_deny "${_DB_FLAG_DENY#deny:}"
             fi
+        fi
+
+        # Wave 5 B9: Schema change advisory for non-local environments.
+        # Schema changes (ALTER TABLE, CREATE/DROP INDEX, CREATE TABLE, RENAME TABLE)
+        # are not destructive enough to deny, but in production/staging they warrant
+        # visibility. Applied AFTER environment tiering so only non-denied commands reach here.
+        # (Denied commands already exited via emit_deny above.)
+        _DB_SCHEMA_RESULT=$(_db_detect_schema_change "$COMMAND")
+        if [[ "$_DB_SCHEMA_RESULT" != "none" ]]; then
+            _DB_SCHEMA_TYPE="${_DB_SCHEMA_RESULT#schema:}"
+            case "$_DB_ENV" in
+                production|unknown|staging)
+                    emit_advisory "DB-SAFETY SCHEMA ADVISORY — Schema change detected: ${_DB_SCHEMA_TYPE}. Verify this is intentional."
+                    _db_increment_stat "warned"
+                    ;;
+                # development|local: silent allow
+            esac
         fi
     fi
 fi

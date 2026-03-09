@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# pre-mcp.sh -- PreToolUse hook for MCP tool governance (Wave 4: Task E)
+# pre-mcp.sh -- PreToolUse hook for MCP tool governance (Wave 4: Task E, Wave 5: E6)
 #
 # Intercepts database ops via MCP servers that bypass pre-bash.sh.
 # MCP tools use JSON-RPC over stdio; the Bash hook never fires for them.
@@ -21,6 +21,15 @@
 # @status accepted
 # @rationale Read-only: always allowed. DDL/DROP TABLE/admin: always denied.
 #   Write/unknown: proceeds to SQL content inspection.
+#
+# @decision DEC-MCP-E6-001
+# @title Credential partitioning advisory fires once per session via sentinel file
+# @status accepted
+# @rationale MCP database servers with write access should use separate read-only
+#   and read-write credentials to limit blast radius. A per-session advisory (not
+#   per-call) avoids noise — the sentinel file is created on first DB MCP call and
+#   prevents repeat emissions. Server names with _read/_readonly suffix already have
+#   partitioned credentials and are exempt from the advisory.
 
 set -euo pipefail
 
@@ -40,6 +49,7 @@ enable_fail_closed "pre-mcp"
 
 if [[ "${HOOK_GATE_SCAN:-}" == "1" ]]; then
     declare_gate "mcp-db-tool-identify" "Identify database MCP tools; early-exit for non-db" "side-effect"
+    declare_gate "mcp-credential-advisory" "Credential partitioning advisory (once per session)" "advisory"
     declare_gate "mcp-capability-filter" "Per-tool capability filtering (read-only/DDL/admin)" "deny"
     declare_gate "mcp-sql-injection" "SQL injection detection (semicolon stacking, CVE-2025-53109)" "deny"
     declare_gate "mcp-sql-risk" "SQL risk classification via _db_classify_risk()" "deny"
@@ -109,6 +119,8 @@ _mcp_deny() {
     require_db_guardian
     local sig
     sig=$(_dbg_emit_guardian_required "$op_type" "$TOOL_NAME: $sql" "$reason" "unknown")
+    # Wave 5 B11: count every MCP deny (require_db_safety loaded above when db tool detected)
+    _db_increment_stat "blocked" 2>/dev/null || true
     emit_deny "${reason}${sig}"
 }
 
@@ -117,9 +129,31 @@ if ! _mcp_is_db_tool "$TOOL_NAME"; then
     _HOOK_COMPLETED=true; exit 0
 fi
 
+# Wave 5 B11: count every DB MCP tool detection
+require_db_safety
+_db_increment_stat "checked"
+
 TOOL_INPUT_JSON=$(echo "$HOOK_INPUT" | jq -r '.tool_input // {}' 2>/dev/null || echo '{}')
 CAPABILITY=$(_mcp_get_capability "$TOOL_NAME")
 SQL=$(_mcp_extract_sql "$TOOL_INPUT_JSON")
+
+# Wave 5 E6: credential partitioning advisory (once per session).
+# Fires on first DB MCP call when the server has no _read/_readonly suffix,
+# suggesting the server may have unrestricted write access. A sentinel file
+# prevents repeat emissions so the advisory appears exactly once.
+declare_gate "mcp-credential-advisory" "Credential partitioning advisory (once per session)" "advisory"
+_MCP_CRED_SENTINEL="${CLAUDE_DIR:-$HOME/.claude}/.mcp-credential-advisory-emitted"
+if [[ ! -f "$_MCP_CRED_SENTINEL" ]]; then
+    # Extract server name from mcp__SERVER_NAME__tool_name format
+    _MCP_SERVER_PART="${TOOL_NAME#mcp__}"
+    _MCP_SERVER_NAME="${_MCP_SERVER_PART%%__*}"
+    # Only emit if server name does NOT already have a read-only suffix
+    if ! printf '%s' "$_MCP_SERVER_NAME" | grep -qiE '(_read|_readonly)$'; then
+        touch "$_MCP_CRED_SENTINEL" 2>/dev/null || true
+        emit_advisory "MCP credential advisory: Consider configuring separate read-only and read-write MCP servers for credential isolation (e.g., postgres_read and postgres_write). Server: ${_MCP_SERVER_NAME}"
+        _db_increment_stat "warned"
+    fi
+fi
 
 declare_gate "mcp-capability-filter" "Per-tool capability filtering (read-only/DDL/admin)" "deny"
 case "$CAPABILITY" in
@@ -161,6 +195,7 @@ if [[ -n "$SQL" ]]; then
         deny)
             _mcp_deny "MCP governance: ${RISK_REASON}. Tool: ${TOOL_NAME}" "data_mutation" "$SQL" ;;
         advisory)
+            _db_increment_stat "warned" 2>/dev/null || true
             emit_advisory "MCP advisory: ${RISK_REASON}. Tool: ${TOOL_NAME}" ;;
         *) ;;
     esac
