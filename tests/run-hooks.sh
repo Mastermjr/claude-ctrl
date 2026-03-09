@@ -111,6 +111,7 @@ _print_scope_usage() {
     echo "  bash32      — Bash 3.2 compatibility (no declare -A in hooks)"
     echo "  validation  — Self-validation tests (version sentinels, consistency, bash -n preflight, hooks-gen)"
     echo "  lint        — Shellcheck lint scope: lint.sh behavior + shellcheck on hooks/*.sh, tests/*.sh, tests/lib/*.sh, scripts/*.sh (matches CI exactly)"
+    echo "  dbsafe-fixtures — db-safety fixture infrastructure (mock CLIs, setup-test-env, sample-commands, env-profiles)"
     echo ""
     echo "No --scope = run all tests (default, backward compatible)."
 }
@@ -160,8 +161,9 @@ _scope_pattern() {
         concurrency) echo "Concurrency and state management" ;;
         sqlite)      echo "SQLite state operations" ;;
         bash32)      echo "Bash 3\.2 compatibility" ;;
-        lint)        echo "lint\.sh|shellcheck.*(hooks|tests|scripts)" ;;
-        *)           echo "" ;;
+        lint)              echo "lint\.sh|shellcheck.*(hooks|tests|scripts)" ;;
+        dbsafe-fixtures)   echo "db-safety fixture infrastructure" ;;
+        *)                 echo "" ;;
     esac
 }
 
@@ -2878,6 +2880,50 @@ fi
 
 echo ""
 fi # end: sqlite
+
+# =============================================================================
+# --- db-safety fixture infrastructure tests ---
+# Delegates to test-db-safety-fixtures.sh and aggregates results.
+# Registered as --scope dbsafe-fixtures.
+# =============================================================================
+if should_run_section "db-safety fixture infrastructure"; then
+echo ""
+echo "--- db-safety fixture infrastructure (test-db-safety-fixtures.sh) ---"
+
+_DBSAFE_FIXTURES_TEST="$SCRIPT_DIR/test-db-safety-fixtures.sh"
+if [[ ! -f "$_DBSAFE_FIXTURES_TEST" ]]; then
+    skip "db-safety fixture tests" "test-db-safety-fixtures.sh not found"
+else
+    _DBSAFE_OUTPUT=$(bash "$_DBSAFE_FIXTURES_TEST" 2>/dev/null) || _DBSAFE_EC=$?
+    _DBSAFE_EC="${_DBSAFE_EC:-0}"
+    # Parse results from summary line
+    _DBSAFE_PASSED=$(echo "$_DBSAFE_OUTPUT" | grep "^Passed:" | grep -oE "[0-9]+" | head -1 || true)
+    _DBSAFE_FAILED=$(echo "$_DBSAFE_OUTPUT" | grep "^Failed:" | grep -oE "[0-9]+" | head -1 || true)
+    _DBSAFE_TOTAL=$(echo "$_DBSAFE_OUTPUT" | grep "^Total:" | grep -oE "^[0-9]+" | head -1 || true)
+    # Parse from Results line format: "Total: N | Passed: N | Failed: N | Skipped: N"
+    if [[ -z "$_DBSAFE_PASSED" ]]; then
+        _DBSAFE_PASSED=$(echo "$_DBSAFE_OUTPUT" | grep "Passed:" | grep -oE "Passed: [0-9]+" | grep -oE "[0-9]+" | head -1 || echo "0")
+    fi
+    if [[ -z "$_DBSAFE_FAILED" ]]; then
+        _DBSAFE_FAILED=$(echo "$_DBSAFE_OUTPUT" | grep "Failed:" | grep -oE "Failed: [0-9]+" | grep -oE "[0-9]+" | head -1 || echo "0")
+    fi
+    if [[ -z "$_DBSAFE_TOTAL" ]]; then
+        _DBSAFE_TOTAL=$(echo "$_DBSAFE_OUTPUT" | grep "Total:" | grep -oE "Total: [0-9]+" | grep -oE "[0-9]+" | head -1 || echo "0")
+    fi
+    _DBSAFE_PASSED="${_DBSAFE_PASSED:-0}"
+    _DBSAFE_FAILED="${_DBSAFE_FAILED:-0}"
+    _DBSAFE_TOTAL="${_DBSAFE_TOTAL:-0}"
+
+    if [[ "$_DBSAFE_FAILED" -eq 0 && "$_DBSAFE_EC" -eq 0 ]]; then
+        pass "db-safety fixture infrastructure — ${_DBSAFE_PASSED}/${_DBSAFE_TOTAL} tests passed"
+    else
+        fail "db-safety fixture infrastructure" "${_DBSAFE_FAILED} failed (${_DBSAFE_PASSED}/${_DBSAFE_TOTAL} passed)"
+        echo "$_DBSAFE_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-fixtures
 
 # --- Summary ---
 echo "==========================="
