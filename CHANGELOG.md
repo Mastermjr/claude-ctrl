@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `initiative/governance-efficiency`: Governance Efficiency initiative added to MASTER_PLAN.md — targeted signal noise reduction, caching, and deduplication to address 60-310% governance token overhead on easy tasks; 2-wave plan (W1: advisory demotions + caching, W2: cross-hook deduplication), 7 P0 requirements with safety invariants, 5 architectural decisions (DEC-EFF-001 through DEC-EFF-005), issues #208 and #209
+- `feature/governance-efficiency-w1`: Signal noise reduction Wave 1 — 6 optimizations: demote 2 pre-write.sh advisories to debug log with churn cache, doc-freshness fire-once-per-session in pre-bash.sh, keyword match caching in prompt-submit.sh, trajectory narrative caching in stop.sh, session-end.sh cleanup for 4 new cache patterns; 27 new tests, all deny gates preserved unconditionally (DEC-EFF-006 through DEC-EFF-011, #208)
 
 ### Fixed
 - `feature/shellcheck-fixes`: Shellcheck cleanup in test-token-history-format.sh (remove unused vars, fix compute_phash subshell reference) and gate-denied trace records in task-track.sh — blocked agent dispatches now write `outcome: "gate-denied"` traces instead of phantom 0-duration crashed/unknown entries that skewed observatory metrics (DEC-GATE-DENIED-001, #174)
