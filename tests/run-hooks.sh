@@ -114,6 +114,7 @@ _print_scope_usage() {
     echo "  validation  — Self-validation tests (version sentinels, consistency, bash -n preflight, hooks-gen)"
     echo "  lint        — Shellcheck lint scope: lint.sh behavior + shellcheck on hooks/*.sh, tests/*.sh, tests/lib/*.sh, scripts/*.sh (matches CI exactly)"
     echo "  dbsafe-fixtures — db-safety fixture infrastructure (mock CLIs, setup-test-env, sample-commands, env-profiles)"
+    echo "  dbsafe-w2b  — DB safety Wave 2b: migration allowlist, IaC/container/ORM interception (B5/B6/B7/B8)"
     echo ""
     echo "No --scope = run all tests (default, backward compatible)."
 }
@@ -167,6 +168,7 @@ _scope_pattern() {
         dbsafe-w1b)  echo "db-safety-lib\.sh unit tests" ;;
         lint)              echo "lint\.sh|shellcheck.*(hooks|tests|scripts)" ;;
         dbsafe-fixtures)   echo "db-safety fixture infrastructure" ;;
+        dbsafe-w2b)        echo "db-safety-lib\.sh unit tests.*Wave 2b" ;;
         *)                 echo "" ;;
     esac
 }
@@ -2991,6 +2993,39 @@ fi
 
 echo ""
 fi # end: dbsafe-fixtures
+
+# =============================================================================
+# --- DB safety Wave 2b unit tests ---
+# Delegates to test-db-safety-w2b.sh and aggregates results.
+# Registered as --scope dbsafe-w2b.
+# Tests: B5 migration allowlist, B6 IaC interception, B7 container/volume,
+#        B8 ORM patterns. Minimum 40 tests.
+# =============================================================================
+if should_run_section "db-safety-lib.sh unit tests.*Wave 2b"; then
+echo ""
+echo "--- db-safety-lib.sh unit tests (Wave 2b: migration/IaC/container/ORM) ---"
+
+_DBSAFE_W2B_TEST="$SCRIPT_DIR/test-db-safety-w2b.sh"
+if [[ ! -f "$_DBSAFE_W2B_TEST" ]]; then
+    skip "db-safety-w2b tests" "test-db-safety-w2b.sh not found at $_DBSAFE_W2B_TEST"
+else
+    _DBSAFE_W2B_OUTPUT=$(bash "$_DBSAFE_W2B_TEST" 2>/dev/null) || true
+    _DBSAFE_W2B_EXIT=$?
+    # Parse results from the test output
+    _DBSAFE_W2B_PASSED=$(echo "$_DBSAFE_W2B_OUTPUT" | grep -c "^  PASS:" 2>/dev/null || true)
+    _DBSAFE_W2B_FAILED=$(echo "$_DBSAFE_W2B_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _DBSAFE_W2B_TOTAL=$(echo "$_DBSAFE_W2B_OUTPUT" | grep -E "^Results:" | grep -oE "[0-9]+ total" | grep -oE "[0-9]+" || true)
+    if [[ "$_DBSAFE_W2B_FAILED" -eq 0 && -n "$_DBSAFE_W2B_TOTAL" ]]; then
+        pass "db-safety-w2b: all ${_DBSAFE_W2B_TOTAL} tests passed (${_DBSAFE_W2B_PASSED} assertions)"
+    else
+        _DBSAFE_W2B_FAIL_DETAILS=$(echo "$_DBSAFE_W2B_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "db-safety-w2b" "${_DBSAFE_W2B_FAILED} failed (${_DBSAFE_W2B_PASSED}/${_DBSAFE_W2B_TOTAL:-?} passed): ${_DBSAFE_W2B_FAIL_DETAILS}"
+        echo "$_DBSAFE_W2B_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-w2b
 
 # --- Summary ---
 echo "==========================="

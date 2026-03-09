@@ -376,7 +376,7 @@ echo ""
 # =============================================================================
 echo "--- Library sentinel ---"
 
-assert_eq "DB_SAFETY_LIB_VERSION sentinel" "1" "$_DB_SAFETY_LIB_VERSION"
+assert_eq "DB_SAFETY_LIB_VERSION sentinel" "2" "$_DB_SAFETY_LIB_VERSION"
 
 echo ""
 
