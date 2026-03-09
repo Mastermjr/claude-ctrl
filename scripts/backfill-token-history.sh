@@ -155,16 +155,47 @@ while IFS='|' read -r ts total_tok main_tok sub_tok sid rest; do
     best_pname="unknown"
     n_traces=${#trace_epochs[@]}
 
+    # @decision DEC-BACKFILL-NULL-FALLBACK-001
+    # @title Two-tier trace matching: use nearest named trace when closest is "unknown"
+    # @status accepted
+    # @rationale Failed tester dispatches (and some orchestrator sub-agents) always
+    # record null/unknown project_name in the trace index. When a history entry is
+    # closest in time to one of these failed traces, the single-best-match algorithm
+    # assigns "unknown" — even when a real implementer trace 5 minutes away clearly
+    # identifies the project. Fix: track two parallel bests:
+    #   best_diff / best_pname         — absolute closest (any project_name)
+    #   best_named_diff / best_named_pname — closest with a non-"unknown" name
+    # After the loop, if the absolute-closest yields "unknown" AND a named match
+    # is within the window, use the named match. This removes the "unknown" bias
+    # without changing the result when the closest trace already has a real name.
+    # See issue #175.
+    best_named_diff=999999999
+    best_named_pname=""
+
     if [[ "$n_traces" -gt 0 && "$ts_epoch" -gt 0 ]]; then
         for (( idx=0; idx<n_traces; idx++ )); do
             t_epoch="${trace_epochs[$idx]}"
             diff=$(( ts_epoch - t_epoch ))
             (( diff < 0 )) && diff=$(( -diff ))
+            # Tier 1: absolute closest (any project_name, including "unknown")
             if (( diff < best_diff )); then
                 best_diff=$diff
                 best_pname="${trace_project_names[$idx]}"
             fi
+            # Tier 2: closest with a real (non-unknown, non-empty) project_name
+            _pn="${trace_project_names[$idx]}"
+            if [[ "$_pn" != "unknown" && -n "$_pn" ]] && (( diff < best_named_diff )); then
+                best_named_diff=$diff
+                best_named_pname="$_pn"
+            fi
         done
+    fi
+
+    # Apply fallback: if best match is "unknown" and a named match is within the window, use it
+    if [[ "$best_pname" == "unknown" && -n "$best_named_pname" ]] \
+       && (( best_named_diff <= MATCH_WINDOW )); then
+        best_pname="$best_named_pname"
+        best_diff="$best_named_diff"
     fi
 
     if (( best_diff <= MATCH_WINDOW )); then

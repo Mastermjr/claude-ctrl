@@ -372,6 +372,104 @@ test_backfill_unmatched_uses_unknown() {
 }
 
 # ============================================================================
+# Test group 3b: Two-tier null-project fallback (issue #175)
+# ============================================================================
+# When the closest trace has "unknown" project_name, the backfill should fall
+# back to the nearest trace that has a real name — as long as it's within the
+# 30-minute match window. This prevents failed tester dispatches (which always
+# produce null/unknown project_name) from masking the real project identity.
+
+test_backfill_null_fallback_uses_nearest_named_trace() {
+    run_test
+    # Setup: history entry at T=0
+    #   Trace A at T+2min: project_name="unknown"  (closest)
+    #   Trace B at T+5min: project_name="my-project" (slightly farther but named)
+    # Expected: backfill uses "my-project" (not "unknown")
+    local tmpdir
+    tmpdir=$(mktemp -d /Users/turla/.claude/tmp/test-backfill-XXXXXX)
+    _CLEANUP_DIRS+=("$tmpdir")
+
+    local history_file="${tmpdir}/.session-token-history"
+    # Base time: 2026-06-01T10:00:00Z
+    printf '2026-06-01T10:00:00Z|150000|150000|0|sess-175-fallback\n' > "$history_file"
+
+    local trace_index="${tmpdir}/traces/index.jsonl"
+    mkdir -p "${tmpdir}/traces"
+    # Trace A: 2 minutes after — closest but unknown
+    printf '{"trace_id":"tester-001","project_name":"unknown","started_at":"2026-06-01T10:02:00Z"}\n' > "$trace_index"
+    # Trace B: 5 minutes after — slightly farther but has real name
+    printf '{"trace_id":"impl-001","project_name":"my-project","started_at":"2026-06-01T10:05:00Z"}\n' >> "$trace_index"
+
+    bash "$BACKFILL" "$history_file" "$trace_index" >/dev/null 2>&1 || true
+
+    local project_name
+    project_name=$(awk -F'|' '{print $7}' "$history_file" | head -1)
+    if [[ "$project_name" == "my-project" ]]; then
+        pass_test "Null fallback: closest trace 'unknown' overridden by nearest named trace 'my-project'"
+    else
+        fail_test "Null fallback: expected 'my-project', got project_name='$project_name'" \
+                  "closest='unknown'@+2min, named='my-project'@+5min, both within window"
+    fi
+}
+
+test_backfill_null_fallback_all_unknown_stays_unknown() {
+    run_test
+    # When ALL traces in the window are "unknown", result must remain "unknown"
+    local tmpdir
+    tmpdir=$(mktemp -d /Users/turla/.claude/tmp/test-backfill-XXXXXX)
+    _CLEANUP_DIRS+=("$tmpdir")
+
+    local history_file="${tmpdir}/.session-token-history"
+    printf '2026-06-02T10:00:00Z|200000|200000|0|sess-175-allunk\n' > "$history_file"
+
+    local trace_index="${tmpdir}/traces/index.jsonl"
+    mkdir -p "${tmpdir}/traces"
+    # Both traces within window are "unknown"
+    printf '{"trace_id":"tester-a","project_name":"unknown","started_at":"2026-06-02T10:03:00Z"}\n' > "$trace_index"
+    printf '{"trace_id":"tester-b","project_name":"unknown","started_at":"2026-06-02T10:08:00Z"}\n' >> "$trace_index"
+
+    bash "$BACKFILL" "$history_file" "$trace_index" >/dev/null 2>&1 || true
+
+    local project_name
+    project_name=$(awk -F'|' '{print $7}' "$history_file" | head -1)
+    if [[ "$project_name" == "unknown" ]]; then
+        pass_test "Null fallback: all-unknown window correctly results in 'unknown' project_name"
+    else
+        fail_test "Null fallback: expected 'unknown' (all traces unknown), got '$project_name'" \
+                  "no named trace exists in window — should stay unknown"
+    fi
+}
+
+test_backfill_null_fallback_real_name_closest_no_regression() {
+    run_test
+    # When the closest trace already has a real name, it must still be used (no regression)
+    local tmpdir
+    tmpdir=$(mktemp -d /Users/turla/.claude/tmp/test-backfill-XXXXXX)
+    _CLEANUP_DIRS+=("$tmpdir")
+
+    local history_file="${tmpdir}/.session-token-history"
+    printf '2026-06-03T10:00:00Z|300000|300000|0|sess-175-noreg\n' > "$history_file"
+
+    local trace_index="${tmpdir}/traces/index.jsonl"
+    mkdir -p "${tmpdir}/traces"
+    # Closest trace has real name — should be used directly
+    printf '{"trace_id":"impl-closest","project_name":"real-project","started_at":"2026-06-03T10:01:00Z"}\n' > "$trace_index"
+    # Farther trace also has real name — should NOT override the closest
+    printf '{"trace_id":"impl-far","project_name":"other-project","started_at":"2026-06-03T10:20:00Z"}\n' >> "$trace_index"
+
+    bash "$BACKFILL" "$history_file" "$trace_index" >/dev/null 2>&1 || true
+
+    local project_name
+    project_name=$(awk -F'|' '{print $7}' "$history_file" | head -1)
+    if [[ "$project_name" == "real-project" ]]; then
+        pass_test "Null fallback no-regression: closest named trace 'real-project' used (not overridden)"
+    else
+        fail_test "Null fallback no-regression: expected 'real-project', got '$project_name'" \
+                  "closest trace had real name — original behavior must hold"
+    fi
+}
+
+# ============================================================================
 # Test group 4: Global lifetime sum
 # ============================================================================
 
@@ -423,6 +521,12 @@ test_backfill_creates_backup
 test_backfill_idempotent_on_new_format
 test_backfill_adds_columns_to_5col_entries
 test_backfill_unmatched_uses_unknown
+
+echo ""
+echo "--- Backfill null-project fallback (issue #175) ---"
+test_backfill_null_fallback_uses_nearest_named_trace
+test_backfill_null_fallback_all_unknown_stays_unknown
+test_backfill_null_fallback_real_name_closest_no_regression
 
 echo ""
 echo "--- Global lifetime sum ---"
