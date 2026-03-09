@@ -314,12 +314,14 @@ build_context_bar() {
 
     # Build three regions
     local bar_sys="" bar_conv="" bar_empty="" i
-    for (( i=0; i<sys_blocks;   i++ )); do bar_sys+="▓"; done
+    for (( i=0; i<sys_blocks;   i++ )); do bar_sys+="█"; done
     for (( i=0; i<conv_blocks;  i++ )); do bar_conv+="█"; done
     for (( i=0; i<empty;        i++ )); do bar_empty+="░"; done
 
-    # Render: [cyan_sys severity_conv dim_empty] pct%
-    printf '\033[1;36m[\033[0m\033[36m%s\033[0m\033[%sm%s\033[2m%s\033[0m\033[1;36m]\033[0m \033[%sm%d%%\033[0m' \
+    # Render: [dim_sys severity_conv dim_empty] pct%
+    # System: dim full blocks (filled but muted). Conversation: severity-colored full blocks.
+    # Empty: dim light shade. All filled regions use █ — color alone distinguishes them.
+    printf '\033[2m[%s\033[0m\033[%sm%s\033[2m%s]\033[0m \033[%sm%d%%\033[0m' \
       "$bar_sys" "$color" "$bar_conv" "$bar_empty" "$color" "$pct_int"
   else
     # Single-color fallback (no baseline)
