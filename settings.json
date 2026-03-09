@@ -151,6 +151,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/pre-mcp.sh",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [

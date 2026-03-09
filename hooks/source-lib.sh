@@ -282,9 +282,36 @@ require_state() {
     source "${_SRCLIB_DIR}/state-lib.sh"
 }
 # require_state is intentionally not called from production hooks.
+
+require_db_safety() {
+    [[ -n "${_DB_SAFETY_LIB_LOADED:-}" ]] && return 0
+    source "${_SRCLIB_DIR}/db-safety-lib.sh"
+}
+# require_db_safety is called from the Database Safety Checks section of pre-bash.sh.
+# It is loaded lazily — non-database commands never pay the parse cost.
+# See hooks/db-safety-lib.sh for DEC-DBSAFE-001 (modular architecture rationale).
+
+require_db_guardian() {
+    [[ -n "${_DB_GUARDIAN_LIB_LOADED:-}" ]] && return 0
+    source "${_SRCLIB_DIR}/db-guardian-lib.sh"
+}
+# require_db_guardian is called from the Database Safety Checks section of pre-bash.sh
+# when a destructive DB command is denied and the DB-GUARDIAN-REQUIRED signal needs to
+# be emitted. It is loaded lazily — only fired when an actual deny triggers handoff.
+# See hooks/db-guardian-lib.sh for DEC-DBGUARD-002 (JSON marshalling rationale).
 # state_update/state_read are used optionally via: type state_update &>/dev/null && ...
 # (in log.sh and session-lib.sh). Tests call require_state directly.
 # See test-proof-lifecycle.sh:T09 for the test coverage of this loader.
+
+require_db_guardian() {
+    [[ -n "${_DB_GUARDIAN_LIB_LOADED:-}" ]] && return 0
+    source "${_SRCLIB_DIR}/db-guardian-lib.sh"
+}
+# require_db_guardian is called by the DB Guardian agent at the start of every
+# database operation assessment. It loads the policy engine (D3), simulation
+# helpers (D4), and approval gate (D5). This is NOT loaded by pre-bash.sh —
+# it is an agent-layer library, not a hook-layer library.
+# See hooks/db-guardian-lib.sh for DEC-DBGUARD-001 (separation rationale).
 
 # verify_library_consistency
 #   Checks that all loaded library versions match the expected version.
@@ -323,6 +350,7 @@ verify_library_consistency() {
         "_GIT_LIB_VERSION:git-lib.sh"
         "_DOC_LIB_VERSION:doc-lib.sh"
         "_CI_LIB_VERSION:ci-lib.sh"
+        "_DB_SAFETY_LIB_VERSION:db-safety-lib.sh:3"
     )
 
     for entry in "${lib_vars[@]}"; do

@@ -108,9 +108,18 @@ _print_scope_usage() {
     echo "  gaps        — gaps-report.sh accountability report unit tests"
     echo "  concurrency — Concurrency and state management tests (Phase 1 locking, CAS, lattice, registry)"
     echo "  sqlite      — SQLite state operations (schema, CRUD, CAS, lattice, concurrency, injection)"
+    echo "  dbsafe-w1a  — DB safety Wave 1a: sqlite3 block, state-diag.sh, backup, integrity check"
     echo "  bash32      — Bash 3.2 compatibility (no declare -A in hooks)"
+    echo "  dbsafe-w1b  — Database safety library unit tests (Wave 1b: modular architecture)"
+    echo "  dbsafe-w2a  — DB safety Wave 2a: CLI hardening, TTY fail-safe, forced safety flags (B1/B3/B4)"
     echo "  validation  — Self-validation tests (version sentinels, consistency, bash -n preflight, hooks-gen)"
     echo "  lint        — Shellcheck lint scope: lint.sh behavior + shellcheck on hooks/*.sh, tests/*.sh, tests/lib/*.sh, scripts/*.sh (matches CI exactly)"
+    echo "  dbsafe-fixtures — db-safety fixture infrastructure (mock CLIs, setup-test-env, sample-commands, env-profiles)"
+    echo "  dbsafe-w2b  — DB safety Wave 2b: migration allowlist, IaC/container/ORM interception (B5/B6/B7/B8)"
+    echo "  dbsafe-w3a  — DB Guardian Wave 3a: agent definition + JSON handoff protocol (D1/D2)"
+    echo "  dbsafe-w3b  — DB Guardian Wave 3b: policy engine, simulation helpers, approval gate (D3/D4/D5)"
+    echo "  dbsafe-w4   — MCP Governance (Wave 4 Task E): E1 tool ID, E2 SQL validation, E3 capability filter, E4 rate limit"
+    echo "  dbsafe-w5   — DB Safety Wave 5 polish: schema gate (B9), credential redact (B10), session stats (B11), MySQL DDL (B12), MCP advisory (E6)"
     echo ""
     echo "No --scope = run all tests (default, backward compatible)."
 }
@@ -159,9 +168,18 @@ _scope_pattern() {
         gaps)        echo "gaps-report\.sh" ;;
         concurrency) echo "Concurrency and state management" ;;
         sqlite)      echo "SQLite state operations" ;;
+        dbsafe-w1a)  echo "DB safety Wave 1a" ;;
         bash32)      echo "Bash 3\.2 compatibility" ;;
-        lint)        echo "lint\.sh|shellcheck.*(hooks|tests|scripts)" ;;
-        *)           echo "" ;;
+        dbsafe-w1b)  echo "db-safety-lib\.sh unit tests" ;;
+        dbsafe-w2a)  echo "DB safety Wave 2a" ;;
+        lint)              echo "lint\.sh|shellcheck.*(hooks|tests|scripts)" ;;
+        dbsafe-fixtures)   echo "db-safety fixture infrastructure" ;;
+        dbsafe-w2b)        echo "db-safety-lib\.sh unit tests.*Wave 2b" ;;
+        dbsafe-w3a)        echo "db-guardian-lib\.sh unit tests.*Wave 3a" ;;
+        dbsafe-w3b)        echo "DB Guardian Wave 3b" ;;
+        dbsafe-w4)         echo "MCP Governance Wave 4" ;;
+        dbsafe-w5)         echo "DB Safety Wave 5" ;;
+        *)                 echo "" ;;
     esac
 }
 
@@ -865,7 +883,8 @@ while IFS= read -r hook; do
         # Exempt utility libraries (not hooks) — domain libs added during metanoia consolidation
         case "$hook" in
             log.sh|source-lib.sh|state-registry.sh|state-lib.sh|\
-            ci-lib.sh|core-lib.sh|doc-lib.sh|git-lib.sh|plan-lib.sh|session-lib.sh|trace-lib.sh)
+            ci-lib.sh|core-lib.sh|doc-lib.sh|git-lib.sh|plan-lib.sh|session-lib.sh|trace-lib.sh|\
+            db-safety-lib.sh)
                 ;;
             *)
                 UNREGISTERED_HOOKS+="$hook "
@@ -2839,6 +2858,41 @@ fi # end: shellcheck scripts subsection
 
 echo ""
 
+# --- DB safety Wave 1a ---
+if should_run_section "DB safety Wave 1a"; then
+echo ""
+echo "--- DB safety Wave 1a (test-db-safety-w1a.sh) ---"
+
+_DBSAFE_TEST="$SCRIPT_DIR/test-db-safety-w1a.sh"
+if [[ ! -f "$_DBSAFE_TEST" ]]; then
+    skip "DB safety Wave 1a tests" "test-db-safety-w1a.sh not found at $_DBSAFE_TEST"
+elif ! command -v sqlite3 >/dev/null 2>&1; then
+    skip "DB safety Wave 1a tests" "sqlite3 not installed"
+else
+    _DBSAFE_OUTPUT=$(bash "$_DBSAFE_TEST" 2>/dev/null) || true
+    _DBSAFE_EXIT=$?
+    _DBSAFE_PASSED=$(echo "$_DBSAFE_OUTPUT" | grep -c "^  PASS$" 2>/dev/null || true)
+    _DBSAFE_FAILED=$(echo "$_DBSAFE_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _DBSAFE_TOTAL=$(echo "$_DBSAFE_OUTPUT" | grep -E "^Results:" | grep -oE "[0-9]+ total" | grep -oE "[0-9]+" || true)
+    _DBSAFE_PASSED="${_DBSAFE_PASSED//[[:space:]]/}"
+    _DBSAFE_FAILED="${_DBSAFE_FAILED//[[:space:]]/}"
+    _DBSAFE_TOTAL="${_DBSAFE_TOTAL//[[:space:]]/}"
+    _DBSAFE_PASSED="${_DBSAFE_PASSED:-0}"
+    _DBSAFE_FAILED="${_DBSAFE_FAILED:-0}"
+    _DBSAFE_TOTAL="${_DBSAFE_TOTAL:-0}"
+
+    if [[ "$_DBSAFE_FAILED" -eq 0 && "$_DBSAFE_EXIT" -eq 0 ]]; then
+        pass "DB safety Wave 1a — ${_DBSAFE_PASSED}/${_DBSAFE_TOTAL} tests passed"
+    else
+        _DBSAFE_FAIL_DETAILS=$(echo "$_DBSAFE_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "DB safety Wave 1a" "${_DBSAFE_FAILED} failed (${_DBSAFE_PASSED}/${_DBSAFE_TOTAL} passed): ${_DBSAFE_FAIL_DETAILS}"
+        echo "$_DBSAFE_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-w1a
+
 # --- SQLite state operations ---
 if should_run_section "SQLite state operations"; then
 echo ""
@@ -2878,6 +2932,283 @@ fi
 
 echo ""
 fi # end: sqlite
+
+# --- Database safety library unit tests (Wave 1b) ---
+if should_run_section "db-safety-lib.sh unit tests"; then
+echo ""
+echo "--- db-safety-lib.sh unit tests (Wave 1b) ---"
+
+_DBSAFE_TEST="$SCRIPT_DIR/test-db-safety-w1b.sh"
+if [[ ! -f "$_DBSAFE_TEST" ]]; then
+    skip "db-safety-w1b tests" "test-db-safety-w1b.sh not found at $_DBSAFE_TEST"
+else
+    _DBSAFE_OUTPUT=$(bash "$_DBSAFE_TEST" 2>/dev/null) || true
+    _DBSAFE_EXIT=$?
+    # Parse results from the test output
+    _DBSAFE_PASSED=$(echo "$_DBSAFE_OUTPUT" | grep -c "^  PASS:" 2>/dev/null || true)
+    _DBSAFE_FAILED=$(echo "$_DBSAFE_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _DBSAFE_TOTAL=$(echo "$_DBSAFE_OUTPUT" | grep -E "^Results:" | grep -oE "[0-9]+ total" | grep -oE "[0-9]+" || true)
+    if [[ "$_DBSAFE_FAILED" -eq 0 && -n "$_DBSAFE_TOTAL" ]]; then
+        pass "db-safety-w1b: all ${_DBSAFE_TOTAL} tests passed (${_DBSAFE_PASSED} assertions)"
+    else
+        _DBSAFE_FAIL_DETAILS=$(echo "$_DBSAFE_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "db-safety-w1b" "${_DBSAFE_FAILED} failed (${_DBSAFE_PASSED}/${_DBSAFE_TOTAL:-?} passed): ${_DBSAFE_FAIL_DETAILS}"
+        echo "$_DBSAFE_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-w1b
+
+# =============================================================================
+# --- DB safety Wave 2a: CLI hardening, TTY fail-safe, forced safety flags ---
+# Delegates to test-db-safety-w2a.sh and aggregates results.
+# Registered as --scope dbsafe-w2a.
+# =============================================================================
+if should_run_section "DB safety Wave 2a"; then
+echo ""
+echo "--- DB safety Wave 2a: CLI hardening, TTY fail-safe, forced safety flags ---"
+
+_DBSAFE_W2A_TEST="$SCRIPT_DIR/test-db-safety-w2a.sh"
+if [[ ! -f "$_DBSAFE_W2A_TEST" ]]; then
+    skip "db-safety-w2a tests" "test-db-safety-w2a.sh not found at $_DBSAFE_W2A_TEST"
+else
+    _DBSAFE_W2A_OUTPUT=$(bash "$_DBSAFE_W2A_TEST" 2>/dev/null) || true
+    _DBSAFE_W2A_EXIT=$?
+    # Parse results from the test output
+    _DBSAFE_W2A_PASSED=$(echo "$_DBSAFE_W2A_OUTPUT" | grep -c "^  PASS:" 2>/dev/null || true)
+    _DBSAFE_W2A_FAILED=$(echo "$_DBSAFE_W2A_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _DBSAFE_W2A_TOTAL=$(echo "$_DBSAFE_W2A_OUTPUT" | grep -E "^Results:" | grep -oE "[0-9]+ total" | grep -oE "[0-9]+" || true)
+    # Strip whitespace/newlines (grep -c can output "N\n")
+    _DBSAFE_W2A_PASSED="${_DBSAFE_W2A_PASSED//[[:space:]]/}"
+    _DBSAFE_W2A_FAILED="${_DBSAFE_W2A_FAILED//[[:space:]]/}"
+    _DBSAFE_W2A_TOTAL="${_DBSAFE_W2A_TOTAL//[[:space:]]/}"
+    _DBSAFE_W2A_PASSED="${_DBSAFE_W2A_PASSED:-0}"
+    _DBSAFE_W2A_FAILED="${_DBSAFE_W2A_FAILED:-0}"
+    _DBSAFE_W2A_TOTAL="${_DBSAFE_W2A_TOTAL:-0}"
+
+    if [[ "$_DBSAFE_W2A_FAILED" -eq 0 && "$_DBSAFE_W2A_EXIT" -eq 0 ]]; then
+        pass "DB safety Wave 2a — ${_DBSAFE_W2A_PASSED}/${_DBSAFE_W2A_TOTAL} tests passed"
+    else
+        _DBSAFE_W2A_FAIL_DETAILS=$(echo "$_DBSAFE_W2A_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "DB safety Wave 2a" "${_DBSAFE_W2A_FAILED} failed (${_DBSAFE_W2A_PASSED}/${_DBSAFE_W2A_TOTAL} passed): ${_DBSAFE_W2A_FAIL_DETAILS}"
+        echo "$_DBSAFE_W2A_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-w2a
+
+# =============================================================================
+# --- db-safety fixture infrastructure tests ---
+# Delegates to test-db-safety-fixtures.sh and aggregates results.
+# Registered as --scope dbsafe-fixtures.
+# =============================================================================
+if should_run_section "db-safety fixture infrastructure"; then
+echo ""
+echo "--- db-safety fixture infrastructure (test-db-safety-fixtures.sh) ---"
+
+_DBSAFE_FIXTURES_TEST="$SCRIPT_DIR/test-db-safety-fixtures.sh"
+if [[ ! -f "$_DBSAFE_FIXTURES_TEST" ]]; then
+    skip "db-safety fixture tests" "test-db-safety-fixtures.sh not found"
+else
+    _DBSAFE_OUTPUT=$(bash "$_DBSAFE_FIXTURES_TEST" 2>/dev/null) || _DBSAFE_EC=$?
+    _DBSAFE_EC="${_DBSAFE_EC:-0}"
+    # Parse results from summary line
+    _DBSAFE_PASSED=$(echo "$_DBSAFE_OUTPUT" | grep "^Passed:" | grep -oE "[0-9]+" | head -1 || true)
+    _DBSAFE_FAILED=$(echo "$_DBSAFE_OUTPUT" | grep "^Failed:" | grep -oE "[0-9]+" | head -1 || true)
+    _DBSAFE_TOTAL=$(echo "$_DBSAFE_OUTPUT" | grep "^Total:" | grep -oE "^[0-9]+" | head -1 || true)
+    # Parse from Results line format: "Total: N | Passed: N | Failed: N | Skipped: N"
+    if [[ -z "$_DBSAFE_PASSED" ]]; then
+        _DBSAFE_PASSED=$(echo "$_DBSAFE_OUTPUT" | grep "Passed:" | grep -oE "Passed: [0-9]+" | grep -oE "[0-9]+" | head -1 || echo "0")
+    fi
+    if [[ -z "$_DBSAFE_FAILED" ]]; then
+        _DBSAFE_FAILED=$(echo "$_DBSAFE_OUTPUT" | grep "Failed:" | grep -oE "Failed: [0-9]+" | grep -oE "[0-9]+" | head -1 || echo "0")
+    fi
+    if [[ -z "$_DBSAFE_TOTAL" ]]; then
+        _DBSAFE_TOTAL=$(echo "$_DBSAFE_OUTPUT" | grep "Total:" | grep -oE "Total: [0-9]+" | grep -oE "[0-9]+" | head -1 || echo "0")
+    fi
+    _DBSAFE_PASSED="${_DBSAFE_PASSED:-0}"
+    _DBSAFE_FAILED="${_DBSAFE_FAILED:-0}"
+    _DBSAFE_TOTAL="${_DBSAFE_TOTAL:-0}"
+
+    if [[ "$_DBSAFE_FAILED" -eq 0 && "$_DBSAFE_EC" -eq 0 ]]; then
+        pass "db-safety fixture infrastructure — ${_DBSAFE_PASSED}/${_DBSAFE_TOTAL} tests passed"
+    else
+        fail "db-safety fixture infrastructure" "${_DBSAFE_FAILED} failed (${_DBSAFE_PASSED}/${_DBSAFE_TOTAL} passed)"
+        echo "$_DBSAFE_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-fixtures
+
+# =============================================================================
+# --- DB safety Wave 2b unit tests ---
+# Delegates to test-db-safety-w2b.sh and aggregates results.
+# Registered as --scope dbsafe-w2b.
+# Tests: B5 migration allowlist, B6 IaC interception, B7 container/volume,
+#        B8 ORM patterns. Minimum 40 tests.
+# =============================================================================
+if should_run_section "db-safety-lib.sh unit tests.*Wave 2b"; then
+echo ""
+echo "--- db-safety-lib.sh unit tests (Wave 2b: migration/IaC/container/ORM) ---"
+
+_DBSAFE_W2B_TEST="$SCRIPT_DIR/test-db-safety-w2b.sh"
+if [[ ! -f "$_DBSAFE_W2B_TEST" ]]; then
+    skip "db-safety-w2b tests" "test-db-safety-w2b.sh not found at $_DBSAFE_W2B_TEST"
+else
+    _DBSAFE_W2B_OUTPUT=$(bash "$_DBSAFE_W2B_TEST" 2>/dev/null) || true
+    _DBSAFE_W2B_EXIT=$?
+    # Parse results from the test output
+    _DBSAFE_W2B_PASSED=$(echo "$_DBSAFE_W2B_OUTPUT" | grep -c "^  PASS:" 2>/dev/null || true)
+    _DBSAFE_W2B_FAILED=$(echo "$_DBSAFE_W2B_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _DBSAFE_W2B_TOTAL=$(echo "$_DBSAFE_W2B_OUTPUT" | grep -E "^Results:" | grep -oE "[0-9]+ total" | grep -oE "[0-9]+" || true)
+    if [[ "$_DBSAFE_W2B_FAILED" -eq 0 && -n "$_DBSAFE_W2B_TOTAL" ]]; then
+        pass "db-safety-w2b: all ${_DBSAFE_W2B_TOTAL} tests passed (${_DBSAFE_W2B_PASSED} assertions)"
+    else
+        _DBSAFE_W2B_FAIL_DETAILS=$(echo "$_DBSAFE_W2B_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "db-safety-w2b" "${_DBSAFE_W2B_FAILED} failed (${_DBSAFE_W2B_PASSED}/${_DBSAFE_W2B_TOTAL:-?} passed): ${_DBSAFE_W2B_FAIL_DETAILS}"
+        echo "$_DBSAFE_W2B_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-w2b
+
+# =============================================================================
+# --- DB Guardian Wave 3a unit tests ---
+# Delegates to test-db-guardian-w3a.sh and aggregates results.
+# Registered as --scope dbsafe-w3a.
+# Tests: D1 agent definition (validate/format/parse), D2 JSON handoff protocol,
+#        DB-GUARDIAN-REQUIRED signal emission, op_type detection. Minimum 25 tests.
+# =============================================================================
+if should_run_section "db-guardian-lib.sh unit tests.*Wave 3a"; then
+echo ""
+echo "--- db-guardian-lib.sh unit tests (Wave 3a: Database Guardian agent + JSON handoff) ---"
+
+_DBSAFE_W3A_TEST="$SCRIPT_DIR/test-db-guardian-w3a.sh"
+if [[ ! -f "$_DBSAFE_W3A_TEST" ]]; then
+    skip "db-guardian-w3a tests" "test-db-guardian-w3a.sh not found at $_DBSAFE_W3A_TEST"
+else
+    _DBSAFE_W3A_OUTPUT=$(bash "$_DBSAFE_W3A_TEST" 2>/dev/null) || true
+    _DBSAFE_W3A_EXIT=$?
+    # Parse results from the test output
+    _DBSAFE_W3A_PASSED=$(echo "$_DBSAFE_W3A_OUTPUT" | grep -c "^  PASS:" 2>/dev/null || true)
+    _DBSAFE_W3A_FAILED=$(echo "$_DBSAFE_W3A_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _DBSAFE_W3A_TOTAL=$(echo "$_DBSAFE_W3A_OUTPUT" | grep -E "^Results:" | grep -oE "[0-9]+ total" | grep -oE "[0-9]+" || true)
+    if [[ "$_DBSAFE_W3A_FAILED" -eq 0 && -n "$_DBSAFE_W3A_TOTAL" ]]; then
+        pass "db-guardian-w3a: all ${_DBSAFE_W3A_TOTAL} tests passed (${_DBSAFE_W3A_PASSED} assertions)"
+    else
+        _DBSAFE_W3A_FAIL_DETAILS=$(echo "$_DBSAFE_W3A_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "db-guardian-w3a" "${_DBSAFE_W3A_FAILED} failed (${_DBSAFE_W3A_PASSED}/${_DBSAFE_W3A_TOTAL:-?} passed): ${_DBSAFE_W3A_FAIL_DETAILS}"
+        echo "$_DBSAFE_W3A_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-w3a
+
+# =============================================================================
+# DB Guardian Wave 3b: D3/D4/D5 — Policy engine, simulation helpers, approval gate
+# Delegates to test-db-guardian-w3b.sh and aggregates results.
+# Registered as --scope dbsafe-w3b.
+# Tests: D3 classify_operation, detect_cascade_risk, detect_unbounded, evaluate_policy (9 rules)
+#        D4 simulate_explain, simulate_rollback, simulate_dryrun (5 CLI types)
+#        D5 request_approval, check_approval (state store integration)
+# Minimum 35 tests; file provides 58 tests.
+# =============================================================================
+if should_run_section "DB Guardian Wave 3b"; then
+echo ""
+echo "--- DB Guardian Wave 3b: deterministic policy engine, simulation helpers, approval gate ---"
+
+_DBSAFE_W3B_TEST="$SCRIPT_DIR/test-db-guardian-w3b.sh"
+if [[ ! -f "$_DBSAFE_W3B_TEST" ]]; then
+    skip "dbsafe-w3b tests" "test-db-guardian-w3b.sh not found at $_DBSAFE_W3B_TEST"
+else
+    _DBSAFE_W3B_OUTPUT=$(bash "$_DBSAFE_W3B_TEST" 2>/dev/null) || true
+    _DBSAFE_W3B_EXIT=$?
+    # Parse results from the test output
+    _DBSAFE_W3B_PASSED=$(echo "$_DBSAFE_W3B_OUTPUT" | grep -c "^  PASS:" 2>/dev/null || true)
+    _DBSAFE_W3B_FAILED=$(echo "$_DBSAFE_W3B_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _DBSAFE_W3B_TOTAL=$(echo "$_DBSAFE_W3B_OUTPUT" | grep -E "^Results:" | grep -oE "[0-9]+ total" | grep -oE "[0-9]+" || true)
+    if [[ "$_DBSAFE_W3B_FAILED" -eq 0 && -n "$_DBSAFE_W3B_TOTAL" ]]; then
+        pass "dbsafe-w3b: all ${_DBSAFE_W3B_TOTAL} tests passed (${_DBSAFE_W3B_PASSED} assertions)"
+    else
+        _DBSAFE_W3B_FAIL_DETAILS=$(echo "$_DBSAFE_W3B_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "dbsafe-w3b" "${_DBSAFE_W3B_FAILED} failed (${_DBSAFE_W3B_PASSED}/${_DBSAFE_W3B_TOTAL:-?} passed): ${_DBSAFE_W3B_FAIL_DETAILS}"
+        echo "$_DBSAFE_W3B_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-w3b
+
+# =============================================================================
+# MCP Governance Wave 4 (Task E): E1-E4
+# Delegates to test-mcp-w4.sh and aggregates results.
+# Registered as --scope dbsafe-w4.
+# Tests: E1 tool identification (12), E2 SQL validation (8), E3 capability filter (11),
+#        E4 rate limiting (2), Integration signals (5)
+# Total: 42 tests.
+# =============================================================================
+if should_run_section "MCP Governance Wave 4"; then
+echo ""
+echo "--- MCP Governance Wave 4 (Task E): E1 tool ID, E2 SQL validation, E3 capability, E4 rate limit ---"
+
+_DBSAFE_W4_TEST="$SCRIPT_DIR/test-mcp-w4.sh"
+if [[ ! -f "$_DBSAFE_W4_TEST" ]]; then
+    skip "dbsafe-w4 tests" "test-mcp-w4.sh not found at $_DBSAFE_W4_TEST"
+else
+    _DBSAFE_W4_OUTPUT=$(bash "$_DBSAFE_W4_TEST" 2>/dev/null) || true
+    _DBSAFE_W4_EXIT=$?
+    _DBSAFE_W4_PASSED=$(echo "$_DBSAFE_W4_OUTPUT" | grep -c "^  PASS:" 2>/dev/null || true)
+    _DBSAFE_W4_FAILED=$(echo "$_DBSAFE_W4_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _DBSAFE_W4_TOTAL=$(echo "$_DBSAFE_W4_OUTPUT" | grep -E "^Results:" | grep -oE "[0-9]+ total" | grep -oE "[0-9]+" || true)
+    if [[ "$_DBSAFE_W4_FAILED" -eq 0 && -n "$_DBSAFE_W4_TOTAL" ]]; then
+        pass "dbsafe-w4: all ${_DBSAFE_W4_TOTAL} tests passed (${_DBSAFE_W4_PASSED} assertions)"
+    else
+        _DBSAFE_W4_FAIL_DETAILS=$(echo "$_DBSAFE_W4_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "dbsafe-w4" "${_DBSAFE_W4_FAILED} failed (${_DBSAFE_W4_PASSED}/${_DBSAFE_W4_TOTAL:-?} passed): ${_DBSAFE_W4_FAIL_DETAILS}"
+        echo "$_DBSAFE_W4_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-w4
+
+# =============================================================================
+# DB Safety Wave 5 (B9, B10, B11, B12, E6): Hook-layer polish
+# Delegates to test-db-safety-w5.sh and aggregates results.
+# Registered as --scope dbsafe-w5.
+# Tests: B9 schema change gate (9), B10 credential redaction (20),
+#        B11 session stats (12), B12 MySQL DDL warning (9), E6 MCP advisory (6)
+# Total: 56 tests.
+# =============================================================================
+if should_run_section "DB Safety Wave 5"; then
+echo ""
+echo "--- DB Safety Wave 5 (B9/B10/B11/B12/E6): schema gate, credential redact, stats, MySQL DDL, MCP advisory ---"
+
+_DBSAFE_W5_TEST="$SCRIPT_DIR/test-db-safety-w5.sh"
+if [[ ! -f "$_DBSAFE_W5_TEST" ]]; then
+    skip "dbsafe-w5 tests" "test-db-safety-w5.sh not found at $_DBSAFE_W5_TEST"
+else
+    _DBSAFE_W5_OUTPUT=$(bash "$_DBSAFE_W5_TEST" 2>/dev/null) || true
+    _DBSAFE_W5_EXIT=$?
+    _DBSAFE_W5_PASSED=$(echo "$_DBSAFE_W5_OUTPUT" | grep -c "^  PASS:" 2>/dev/null || true)
+    _DBSAFE_W5_FAILED=$(echo "$_DBSAFE_W5_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _DBSAFE_W5_TOTAL=$(echo "$_DBSAFE_W5_OUTPUT" | grep -E "^Results:" | grep -oE "[0-9]+ total" | grep -oE "[0-9]+" || true)
+    if [[ "$_DBSAFE_W5_FAILED" -eq 0 && -n "$_DBSAFE_W5_TOTAL" ]]; then
+        pass "dbsafe-w5: all ${_DBSAFE_W5_TOTAL} tests passed (${_DBSAFE_W5_PASSED} assertions)"
+    else
+        _DBSAFE_W5_FAIL_DETAILS=$(echo "$_DBSAFE_W5_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "dbsafe-w5" "${_DBSAFE_W5_FAILED} failed (${_DBSAFE_W5_PASSED}/${_DBSAFE_W5_TOTAL:-?} passed): ${_DBSAFE_W5_FAIL_DETAILS}"
+        echo "$_DBSAFE_W5_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: dbsafe-w5
 
 # --- Summary ---
 echo "==========================="
