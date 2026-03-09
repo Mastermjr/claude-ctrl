@@ -104,6 +104,38 @@ CACHE_FILE="${workspace_dir:+$workspace_dir/.claude/.statusline-cache-${CLAUDE_S
 # Fallback to home .claude if workspace_dir is empty
 [[ -z "$workspace_dir" ]] && CACHE_FILE="$HOME/.claude/.statusline-cache-${CLAUDE_SESSION_ID:-$$}"
 
+# @decision DEC-DUALBAR-004
+# @title Cache file discovery fallback for missing CLAUDE_SESSION_ID
+# @status accepted
+# @rationale CLAUDE_SESSION_ID is not exported to the statusline subprocess (same issue
+# as DEC-DUALBAR-003). Hooks write the cache using the real session ID; the statusline
+# constructs a path using $$ (PID). Discovery fallback: find the most recent
+# .statusline-cache-* file in the workspace .claude/ dir. This works because:
+# (1) typically one active session per workspace, (2) even with multiple sessions,
+# the most recent cache is most relevant.
+if [[ ! -f "$CACHE_FILE" ]]; then
+  _cache_dir="${CACHE_FILE%/*}"
+  if [[ -d "$_cache_dir" ]]; then
+    # ls may return exit 1 when no files match glob; || true prevents set -e from triggering.
+    _latest_cache=$(ls -t "$_cache_dir"/.statusline-cache-* 2>/dev/null | head -1 || true)
+    [[ -n "$_latest_cache" && -f "$_latest_cache" ]] && CACHE_FILE="$_latest_cache"
+  fi
+  unset _cache_dir _latest_cache
+fi
+
+# Prune stale cache files when count exceeds threshold (one-time cleanup for $$ bug).
+# Only triggers when >10 files exist to avoid per-render overhead during normal operation.
+_cache_dir="${CACHE_FILE%/*}"
+if [[ -d "$_cache_dir" ]]; then
+  # ls may return exit 1 when no files match glob; || true prevents set -e from triggering.
+  _cache_count=$(ls "$_cache_dir"/.statusline-cache-* 2>/dev/null | wc -l | tr -d ' ' || true)
+  if (( ${_cache_count:-0} > 10 )); then
+    ls -t "$_cache_dir"/.statusline-cache-* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
+  fi
+  unset _cache_count
+fi
+unset _cache_dir
+
 cache_dirty=0
 cache_wt=0
 cache_agents=0
@@ -516,16 +548,20 @@ if [[ -n "$cache_initiative" ]]; then
 fi
 
 # Terminal width — must be resolved before the responsive layout sections below.
-# @decision DEC-STATUSLINE-TERMWIDTH-002
-# @title Clamp small COLUMNS to 120 — let Claude Code UI handle final clipping
+# @decision DEC-STATUSLINE-TERMWIDTH-003
+# @title Reserve 65 chars for Claude Code right-panel, clamp floor to 60
 # @status accepted
-# @rationale Claude Code provides COLUMNS for the statusline display area, but small
-# values (including 0 from subprocess context) cause aggressive responsive dropping that
-# removes useful segments. At term_w=120 the full metrics line (~94 chars) fits with zero
-# drops. Display order already puts most-important segments first (context bar → tks →
-# cost), so natural UI clipping shows the best content when the area is narrow.
+# @rationale Claude Code renders right-aligned info on the same lines as the custom
+# statusline ("Context left until auto-compact: N% · /model ..."), consuming ~60-70
+# visible characters. Without reserving this space, the responsive drop system uses
+# full COLUMNS, produces segments that overflow into the right panel, and Claude Code's
+# UI clips them — causing the metrics line to collapse to just the context bar.
+# Subtracting 65 chars from COLUMNS gives the responsive system the true available
+# width. Floor of 60 prevents negative/tiny widths from dropping everything.
+# Supersedes DEC-STATUSLINE-TERMWIDTH-002.
 term_w="${COLUMNS:-0}"
-(( term_w < 80 )) && term_w=120
+(( term_w > 65 )) && term_w=$(( term_w - 65 )) || term_w=60
+(( term_w < 60 )) && term_w=60
 (( term_w > 200 )) && term_w=200
 
 # ---------------------------------------------------------------------------
