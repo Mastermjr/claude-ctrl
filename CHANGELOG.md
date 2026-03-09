@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `initiative/governance-efficiency`: Governance Efficiency initiative added to MASTER_PLAN.md — targeted signal noise reduction, caching, and deduplication to address 60-310% governance token overhead on easy tasks; 2-wave plan (W1: advisory demotions + caching, W2: cross-hook deduplication), 7 P0 requirements with safety invariants, 5 architectural decisions (DEC-EFF-001 through DEC-EFF-005), issues #208 and #209
+
 ### Fixed
 - `fix/sourcelib-worktree-path`: Fix source-lib.sh path resolution in worktrees — add fallback to canonical `$HOME/.claude/hooks` when `_SRCLIB_DIR` resolves to a directory without expected sibling files (log.sh), 2 new tests T8/T9 (DEC-SRCLIB-FALLBACK-001, #207)
 - `worktree-agent-a4dd9cf8`: Statusline dark grey system blocks (ESC[90m) for dark terminal visibility; resolve worktree CWD to main repo root in detect_project_root() so project_hash, lifetime tokens, and proof-status lookups work correctly from worktrees (DEC-WORKTREE-RESOLVE-001)
