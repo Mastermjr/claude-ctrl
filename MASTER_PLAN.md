@@ -167,13 +167,22 @@ project's institutional memory.
 | 2026-03-09 | DEC-GOV-HOOK-001 | governor-subagent | Layer A silent return recovery for governor hook | Empty governor response gets trace summary injected into additionalContext; mirrors check-implementer.sh pattern without blocking |
 | 2026-03-09 | DEC-GOV-WIRE-002 | governor-subagent | check-planner.sh emits governor advisory for multi-wave plans | Mechanical trigger ensures governor dispatch isn't forgotten; instruction-compliance alone is insufficient for ephemeral orchestrators |
 | 2026-03-09 | DEC-GOV-WIRE-003 | governor-subagent | session-init.sh surfaces last governor pulse timestamp and verdict | Orchestrator sees staleness at session start; meta-infrastructure recommends pulse if >7 days stale |
+| 2026-03-09 | DEC-EFF-006 | governance-efficiency | Demote fast-mode bypass advisory to .session-events.jsonl | Fast mode is a Claude Code feature, not model-controlled; advisory added no behavioral value |
+| 2026-03-09 | DEC-EFF-007 | governance-efficiency | Demote cold test-gate advisory to .session-events.jsonl | Deny gate (strike 2+) catches real failures; cold-start advisory added no blocking value |
+| 2026-03-09 | DEC-EFF-008 | governance-efficiency | Churn cache with 300s TTL for pre-write.sh Gate 2 | <5% churn is genuinely trivial; cache saves nested git/grep on every source write |
+| 2026-03-09 | DEC-EFF-009 | governance-efficiency | Doc-freshness fire-once-per-session via sentinel file | Model sees warning once (enough to act); deny gate is the real enforcement |
+| 2026-03-09 | DEC-EFF-010 | governance-efficiency | Keyword match cache keyed on git+plan state fingerprint | Technical optimization; same signals produced, served from cache on identical context |
+| 2026-03-09 | DEC-EFF-011 | governance-efficiency | Trajectory narrative cache keyed on git-state fingerprint | If nothing changed, same narrative is correct; stale cache invalidated on any mutation |
+| 2026-03-09 | DEC-EFF-012 | governance-efficiency | Shared git state cache (5s TTL) in git-lib.sh | 5 hooks compute identical git state per event cycle; eliminates redundant subprocess spawns |
+| 2026-03-09 | DEC-EFF-013 | governance-efficiency | Shared plan state cache (10s TTL, 18 vars) in plan-lib.sh | 5 hooks parse MASTER_PLAN.md per event cycle; eliminates redundant awk/grep passes |
+| 2026-03-09 | DEC-EFF-014 | governance-efficiency | Keep prompt-vs-hook overlap (belt and suspenders) | Prompt compliance and hook enforcement serve different failure modes; defense-in-depth preserved |
 
 ---
 
 ## Active Initiatives
 
 ### Initiative: Governance Efficiency
-**Status:** active
+**Status:** completed
 **Started:** 2026-03-09
 **Goal:** Reduce governance overhead (60-310% token excess on easy tasks) through targeted signal noise reduction, caching, and deduplication — without weakening any safety gates.
 
@@ -286,7 +295,7 @@ All P0 requirements pass their acceptance criteria. Every optimization has a doc
 ##### Wave 1 (no dependencies)
 **Parallel dispatches:** 1
 
-**W1-1: Implement signal map optimization proposals (#208)** — Weight: L, Gate: review
+**W1-1: Implement signal map optimization proposals (#208)** — Weight: L, Gate: review — DELIVERED (ce010b8, 2026-03-09)
 - Implement 6 P0 optimizations across 4 hooks:
   1. **pre-write.sh** (REQ-P0-009): Demote fast-mode bypass advisory — replace additionalContext injection with .session-events.jsonl log entry
   2. **pre-write.sh** (REQ-P0-010): Demote cold test-gate advisory — same pattern
@@ -302,7 +311,7 @@ All P0 requirements pass their acceptance criteria. Every optimization has a doc
 **Parallel dispatches:** 1
 **Blocked by:** W1-1
 
-**W2-1: Cross-hook signal deduplication (#209)** — Weight: M, Gate: approve, Deps: W1-1
+**W2-1: Cross-hook signal deduplication (#209)** — Weight: M, Gate: approve, Deps: W1-1 — DELIVERED (608c2c8, 2026-03-09)
 - Address signal map redundancy findings (lines 683-704):
   1. Git state (branch, dirty count, worktree count) injected by 5 hooks — create `_cached_git_state()` in git-lib.sh that writes to a per-event-cycle cache file; all hooks read from cache instead of re-computing
   2. Plan status (existence, active phase, initiative count) injected by 5 hooks — same `_cached_plan_state()` pattern in plan-lib.sh
@@ -342,6 +351,7 @@ Main is sacred. Each wave dispatches parallel worktrees:
 
 | Initiative | Period | Phases | Key Decisions | Archived |
 |-----------|--------|--------|---------------|----------|
+| Governance Efficiency | 2026-03-09 | 2 (W1+W2) | DEC-EFF-001 through DEC-EFF-014 (14 decisions) | No |
 | Production Remediation (Metanoia Suite) | 2026-02-28 to 2026-03-01 | 5 | DEC-HOOKS-001 thru DEC-TEST-006 | No |
 | State Management Reliability | 2026-03-01 to 2026-03-02 | 5 | DEC-STATE-007, DEC-STATE-008 + 8 test decisions | No |
 | Hook Consolidation Testing & Streamlining | 2026-03-02 | 4 | DEC-AUDIT-001, DEC-TIMING-001, DEC-DEDUP-001 | No |
@@ -349,6 +359,10 @@ Main is sacred. Each wave dispatches parallel worktrees:
 | Robust State Management | 2026-03-02 to 2026-03-05 | 2 (of 7 planned) | DEC-RSM-REGISTRY-001 through DEC-RSM-SELFCHECK-001 (6 decisions) | No |
 | Prompt Purpose Restoration | 2026-03-07 to 2026-03-09 | 3 (W1-1, W1-2, W2-1) | DEC-PROMPT-001, DEC-PROMPT-002, DEC-PROMPT-003, DEC-PROMPT-004 | No |
 | Governance Signal Audit | 2026-03-07 to 2026-03-09 | 1 (W1-3) | DEC-AUDIT-002, DEC-RECK-013 | No |
+
+### Governance Efficiency — Summary
+
+Reduced governance overhead (60-310% excess on easy tasks) through 9 targeted optimizations across 2 waves, without weakening any deny gates. W1 (noise reduction): demoted 2 low-value advisories to debug log, added churn/keyword/trajectory caches, doc-freshness fire-once-per-session — 6 optimizations across 4 hooks. W2 (deduplication): created `_cached_git_state()` (5s TTL) and `_cached_plan_state()` (10s TTL, 18 variables) in shared libraries, wired into 8 consumer hooks. Performance: 9.2x speedup on prompt-submit.sh (1.5s to 0.17s cache hit), 21x on stop.sh (6.7s to 0.32s). Safety invariant DEC-EFF-004 held: all deny gate counts preserved (pre-write: 14, pre-bash: 32, task-track: 9). 68/68 tests across 3 suites.
 
 ### Production Remediation (Metanoia Suite) — Summary
 
