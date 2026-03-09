@@ -391,21 +391,57 @@ fi
 
 # --- Sum lifetime tokens from .session-token-history ---
 # @decision DEC-LIFETIME-TOKENS-003
-# @title Sum lifetime tokens from .session-token-history at session start
+# @title Sum per-project lifetime tokens from .session-token-history at session start
 # @status accepted
 # @rationale Mirrors DEC-LIFETIME-COST-001 for tokens. .session-token-history is
-# written by session-end.sh (timestamp|total_tokens|main|subagent|session_id).
-# Summing the total_tokens column with awk at session start is inexpensive
-# (O(N) over ~100 lines) and gives the user a running lifetime token count
-# visible in the statusline as "(Σ1.2M)" next to the current session tokens.
+# written by session-end.sh with format: timestamp|total_tokens|main|subagent|session_id|project_hash|project_name
+# Per-project sum: filter by column 6 (project_hash = _PHASH from line 59). Old-format
+# entries (fewer than 6 columns) lack a project hash and are included in all project sums
+# for backward compatibility. Global sum (all entries, all projects) is also computed
+# and injected into the session context so the user sees cross-project usage. Both sums
+# use awk (O(N) over ~100 lines) — inexpensive at session startup.
 LIFETIME_TOKENS=0
+GLOBAL_LIFETIME_TOKENS=0
 _TOKEN_HISTORY="${CLAUDE_DIR}/.session-token-history"
 if [[ -f "$_TOKEN_HISTORY" ]]; then
-    _LIFETIME_TOK=$(awk -F'|' '{sum += $2} END {print sum+0}' "$_TOKEN_HISTORY" 2>/dev/null || echo "0")
+    # Per-project sum: entries with matching project_hash (col 6) + old-format entries (NF < 6)
+    _LIFETIME_TOK=$(awk -F'|' -v ph="$_PHASH" '(NF < 6) || ($6 == ph) {sum += $2} END {print sum+0}' "$_TOKEN_HISTORY" 2>/dev/null || echo "0")
     LIFETIME_TOKENS="${_LIFETIME_TOK:-0}"
+    # Global sum: all entries regardless of project (for cross-project context)
+    _GLOBAL_LIFETIME_TOK=$(awk -F'|' '{sum += $2} END {print sum+0}' "$_TOKEN_HISTORY" 2>/dev/null || echo "0")
+    GLOBAL_LIFETIME_TOKENS="${_GLOBAL_LIFETIME_TOK:-0}"
 fi
 
 write_statusline_cache "$PROJECT_ROOT"
+
+# --- Inject token lifetime into session context ---
+# @decision DEC-LIFETIME-TOKENS-004
+# @title Inject token lifetime summary into session-init CONTEXT_PARTS
+# @status accepted
+# @rationale The statusline shows per-project token lifetime in the bottom bar,
+# but the session context (system-reminder) has no token lifetime info. Injecting
+# a "Token lifetime: ∑<project> this project | ∑<global> all projects" line gives
+# the agent awareness of cumulative token spend across sessions. Only shown when
+# the project sum > 0 to avoid noise on fresh projects. Uses K/M notation (same
+# as statusline.sh format_tokens) via inline awk for portability — no external
+# script dependency at session startup.
+if (( LIFETIME_TOKENS > 0 || GLOBAL_LIFETIME_TOKENS > 0 )); then
+    _fmt_tok() {
+        local n="$1"
+        if   (( n >= 1000000 )); then awk "BEGIN {printf \"%.1fM\", $n/1000000}"
+        elif (( n >= 1000    )); then printf '%dk' "$(( n / 1000 ))"
+        else                         printf '%d' "$n"
+        fi
+    }
+    _TOK_CTX_LINE="Token lifetime:"
+    if (( LIFETIME_TOKENS > 0 )); then
+        _TOK_CTX_LINE="${_TOK_CTX_LINE} ∑$(_fmt_tok "$LIFETIME_TOKENS") this project"
+    fi
+    if (( GLOBAL_LIFETIME_TOKENS > LIFETIME_TOKENS )); then
+        _TOK_CTX_LINE="${_TOK_CTX_LINE} | ∑$(_fmt_tok "$GLOBAL_LIFETIME_TOKENS") all projects"
+    fi
+    CONTEXT_PARTS+=("$_TOK_CTX_LINE")
+fi
 
 if [[ "$PLAN_EXISTS" == "true" ]]; then
     _PLAN_FILE="$PROJECT_ROOT/MASTER_PLAN.md"
