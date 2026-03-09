@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `feature/autoverify-reliability`: AUTOVERIFY reliability Wave 1 — rewrite tester Auto-Verify Signal section with positive-default framing (emit CLEAN unless blockers apply), fix check-tester.sh Phase 2 audit from misleading `auto_verify_rejected` to accurate `auto_verify_advisory`, add post-task.sh inference check for missed AUTOVERIFY signals on clean assessments (DEC-TESTER-AUTOVERIFY-001, DEC-AV-MISS-001, #194, #195)
 - `feature/dual-color-bar`: Dual-color context pressure bar — statusline now renders three visual regions (system overhead in dim, conversation usage in severity-colored, empty space), with fingerprint-based baseline capture and invalidation on compaction or config drift (DEC-DUALBAR-001, DEC-DUALBAR-002)
 - `docs/readme-mermaid-and-polish`: Replace ASCII pipeline diagram in README.md with Mermaid flowchart; move DEC-ARCH-001 @decision in ARCHITECTURE.md to HTML comment (still grepable, invisible when rendered)
 - `feature/slim-agents`: Slim all 4 agent prompts — remove shared-protocol boilerplate (CWD safety, trace protocol, return message, session-end checklist) now injected at dispatch time via subagent-start.sh; strengthen purpose language at top of each prompt; Guardian gains Merge Presentation section and AUTO-VERIFY-APPROVED bypass; 1,481 to 1,320 lines total (#146)
