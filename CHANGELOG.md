@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `feature/shellcheck-fixes`: Shellcheck cleanup in test-token-history-format.sh (remove unused vars, fix compute_phash subshell reference) and gate-denied trace records in task-track.sh — blocked agent dispatches now write `outcome: "gate-denied"` traces instead of phantom 0-duration crashed/unknown entries that skewed observatory metrics (DEC-GATE-DENIED-001, #174)
 - `fix/governance-self-bypass`: Close governance self-bypass vectors — extend pre-write.sh branch guard to governance-critical markdown (agents/*.md, docs/*.md, CLAUDE.md, ARCHITECTURE.md), narrow task-track.sh @plan-update bypass to plan-only commits, add specific governance-file error messages in pre-bash.sh commit guard, 26 new test cases (DEC-RECK-011)
 - `feature/fix-token-format`: Token formatting consistency — capitalize K in K-notation (145K not 145k) and add space before `tks` suffix in all three display locations (session, subagent, lifetime)
 
