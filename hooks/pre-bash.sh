@@ -343,6 +343,69 @@ if echo "$_stripped_cmd" | grep -qE '\bsqlite3\b'; then
     fi
 fi
 
+# --- Multi-Vector Database Safety Checks (B5/B6/B7/B8) ---
+# @modality database
+#
+# @decision DEC-DBSAFE-W2B-006
+# @title Multi-vector checks fire BEFORE the DB CLI section, catching non-CLI infrastructure threats
+# @status accepted
+# @rationale Migration frameworks, IaC tools, container orchestration, and ORM patterns
+#   can destroy database infrastructure without invoking a database CLI (psql, mysql, etc.).
+#   These checks must fire BEFORE the existing DB CLI section (DEC-DBSAFE-001) so that
+#   commands like "terraform destroy" or "docker-compose down -v" are caught even when
+#   no DB CLI binary appears in the command string. The quick pattern-match gate uses
+#   grep -qiE with a union pattern — if no multi-vector keyword is present, the entire
+#   section exits with zero overhead (same pattern as the DB CLI section below).
+#   Each detector (B5-B8) returns "allow", "deny:<reason>", or "advisory:<reason>".
+#   Migration commands (B5) are always allowed; the advisory function is called separately
+#   to emit production/special-case warnings without blocking.
+#
+# Checks:
+#   B5: _db_detect_migration — migration framework allowlist (12 frameworks)
+#   B6: _db_detect_iac       — IaC destructive command interception
+#   B7: _db_detect_container — container/volume destruction interception
+#   B8: _db_detect_orm       — ORM destructive pattern detection
+
+# Quick pattern match — skip entire section for commands with no multi-vector keywords
+if echo "$_stripped_cmd" | grep -qiE '(terraform|pulumi|cloudformation|docker-compose|docker[[:space:]]+compose|docker[[:space:]]+volume|kubectl[[:space:]]+delete[[:space:]]+(pvc|pv)|rails[[:space:]]+db:|rake[[:space:]]+db:|manage\.py[[:space:]]+(migrate|makemigrations)|alembic[[:space:]]+(upgrade|downgrade|revision)|prisma[[:space:]]+(migrate|db)|flyway[[:space:]]+(migrate|repair|clean)|liquibase[[:space:]]+(update|rollback)|sequelize-cli|npx[[:space:]]+knex[[:space:]]+migrate|typeorm[[:space:]]+migration|goose[[:space:]]+(up|down)|migrate[[:space:]]+-path|drizzle-kit[[:space:]]+(push|generate|migrate)|drop_all[[:space:]]*\(|force[[:space:]]*:[[:space:]]*true)'; then
+    require_db_safety
+
+    # B5: Migration framework detection
+    _MV_FRAMEWORK=$(_db_detect_migration "$COMMAND")
+    if [[ "$_MV_FRAMEWORK" != "none" ]]; then
+        # Migration frameworks are always allowed. Emit advisories for dangerous variants.
+        _MV_ADVISORY=$(_db_detect_migration_advisory "$COMMAND")
+        if [[ -n "$_MV_ADVISORY" ]]; then
+            emit_advisory "DB-SAFETY MIGRATION ADVISORY (${_MV_FRAMEWORK}): ${_MV_ADVISORY}"
+        fi
+        # Migration detected and handled — skip IaC/container/ORM checks for this command
+    else
+        # B6: IaC destructive command detection
+        _MV_IAC=$(_db_detect_iac "$COMMAND")
+        _MV_IAC_LEVEL="${_MV_IAC%%:*}"
+        _MV_IAC_REASON="${_MV_IAC#*:}"
+        if [[ "$_MV_IAC_LEVEL" == "deny" ]]; then
+            emit_deny "$(_db_format_deny "$_MV_IAC_REASON" "Run terraform plan / pulumi preview first to review changes, then execute interactively with confirmation prompts.")"
+        fi
+
+        # B7: Container/volume destruction detection
+        _MV_CONTAINER=$(_db_detect_container "$COMMAND")
+        _MV_CONTAINER_LEVEL="${_MV_CONTAINER%%:*}"
+        _MV_CONTAINER_REASON="${_MV_CONTAINER#*:}"
+        if [[ "$_MV_CONTAINER_LEVEL" == "deny" ]]; then
+            emit_deny "$(_db_format_deny "$_MV_CONTAINER_REASON" "Back up volume data before deletion. Use 'docker volume inspect' to identify which databases are stored in the volume.")"
+        fi
+
+        # B8: ORM destructive pattern detection
+        _MV_ORM=$(_db_detect_orm "$COMMAND")
+        _MV_ORM_LEVEL="${_MV_ORM%%:*}"
+        _MV_ORM_REASON="${_MV_ORM#*:}"
+        if [[ "$_MV_ORM_LEVEL" == "advisory" ]]; then
+            emit_advisory "DB-SAFETY ORM ADVISORY: ${_MV_ORM_REASON}"
+        fi
+    fi
+fi
+
 # --- Database Safety Checks ---
 # @modality database
 # @decision DEC-DBSAFE-001

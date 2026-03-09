@@ -42,7 +42,7 @@
 # Guard: prevent re-sourcing
 [[ -n "${_DB_SAFETY_LIB_LOADED:-}" ]] && return 0
 _DB_SAFETY_LIB_LOADED=1
-_DB_SAFETY_LIB_VERSION=1
+_DB_SAFETY_LIB_VERSION=2
 
 # ---------------------------------------------------------------------------
 # _db_detect_cli COMMAND
@@ -353,4 +353,391 @@ _db_check_mongo() {
     local cmd="$1"
     local env="${2:-unknown}"
     _db_classify_risk "$cmd" "mongosh"
+}
+
+# =============================================================================
+# Wave 2b: Multi-vector database infrastructure safety functions
+#
+# @decision DEC-DBSAFE-W2B-001
+# @title Four-function multi-vector safety layer for non-CLI database infrastructure
+# @status accepted
+# @rationale Database infrastructure can be destroyed by tools that are NOT database
+#   CLIs — migration frameworks that wipe schemas, IaC tools that tear down DB instances,
+#   container orchestration that deletes persistent volumes, and ORM patterns that bypass
+#   migration management. Wave 2b adds four detectors (B5-B8) that fire in pre-bash.sh
+#   BEFORE the existing DB CLI section, catching these vectors early. Each function
+#   returns a standardized result string: "allow", "deny:<reason>", or "advisory:<reason>".
+#   Migration frameworks (B5) are ALLOWED through — they are intentional schema changes —
+#   but advisory flags are emitted for especially dangerous variants (flyway clean,
+#   alembic downgrade base, drizzle-kit push --force) and for any migration in production.
+#
+# @decision DEC-DBSAFE-W2B-002
+# @title _db_detect_migration returns framework name, advisory is separate function
+# @status accepted
+# @rationale Separating detection (returns framework name / "none") from advisory
+#   classification (_db_detect_migration_advisory) keeps the detection function
+#   pure and testable in isolation. pre-bash.sh can call detection first for the
+#   quick-exit gate, then call advisory only when a framework was detected.
+#   This matches the pattern established by _db_detect_cli + _db_classify_risk.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# _db_detect_migration COMMAND
+#
+# Recognizes migration framework commands and returns the framework name.
+# Migration commands are ALLOWED through (they are intentional schema changes),
+# but callers should also invoke _db_detect_migration_advisory for special-case
+# advisory warnings.
+#
+# Returns: "<framework_name>" if detected, "none" if not.
+#
+# Supported frameworks:
+#   rails    — rails db:migrate, rails db:rollback, rails db:schema:load, rake db:*
+#   django   — python/python3 manage.py migrate|makemigrations
+#   alembic  — alembic upgrade|downgrade|revision
+#   prisma   — prisma migrate deploy|dev, prisma db push
+#   flyway   — flyway migrate|repair|clean
+#   liquibase — liquibase update|rollback
+#   sequelize — npx sequelize-cli db:migrate
+#   knex     — npx knex migrate:latest|migrate:rollback
+#   typeorm  — typeorm migration:run
+#   goose    — goose up|down
+#   golang-migrate — migrate -path
+#   drizzle-kit — drizzle-kit push|generate|migrate
+# ---------------------------------------------------------------------------
+_db_detect_migration() {
+    local cmd="$1"
+
+    # Rails: rails db:migrate, rails db:rollback, rails db:schema:load
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()rails[[:space:]]+(db:(migrate|rollback|schema:|reset|seed)|db:[a-z])'; then
+        printf 'rails'; return 0
+    fi
+    # Rake: rake db:migrate, rake db:rollback, rake db:*
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()rake[[:space:]]+db:[a-z]'; then
+        printf 'rails'; return 0
+    fi
+
+    # Django: python/python3 manage.py migrate|makemigrations
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()python3?[[:space:]]+manage\.py[[:space:]]+(migrate|makemigrations)'; then
+        printf 'django'; return 0
+    fi
+
+    # Alembic: alembic upgrade|downgrade|revision
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()alembic[[:space:]]+(upgrade|downgrade|revision)'; then
+        printf 'alembic'; return 0
+    fi
+
+    # Prisma: prisma migrate deploy|dev, prisma db push
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()prisma[[:space:]]+(migrate[[:space:]]+(deploy|dev)|db[[:space:]]+push)'; then
+        printf 'prisma'; return 0
+    fi
+
+    # Flyway: flyway migrate|repair|clean
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()flyway[[:space:]]+(migrate|repair|clean)([[:space:]]|$)'; then
+        printf 'flyway'; return 0
+    fi
+
+    # Liquibase: liquibase update|rollback
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()liquibase[[:space:]]+(update|rollback)'; then
+        printf 'liquibase'; return 0
+    fi
+
+    # Sequelize: npx sequelize-cli db:migrate
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()npx[[:space:]]+sequelize-cli[[:space:]]+db:migrate'; then
+        printf 'sequelize'; return 0
+    fi
+
+    # Knex: npx knex migrate:latest|migrate:rollback
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()npx[[:space:]]+knex[[:space:]]+migrate:(latest|rollback)'; then
+        printf 'knex'; return 0
+    fi
+
+    # TypeORM: typeorm migration:run
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()typeorm[[:space:]]+migration:run'; then
+        printf 'typeorm'; return 0
+    fi
+
+    # Goose: goose up|down
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()goose[[:space:]]+(up|down)([[:space:]]|$)'; then
+        printf 'goose'; return 0
+    fi
+
+    # golang-migrate: migrate -path
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()migrate[[:space:]]+-path'; then
+        printf 'golang-migrate'; return 0
+    fi
+
+    # Drizzle Kit: drizzle-kit push|generate|migrate
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()drizzle-kit[[:space:]]+(push|generate|migrate)'; then
+        printf 'drizzle-kit'; return 0
+    fi
+
+    printf 'none'
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _db_detect_migration_advisory COMMAND
+#
+# Returns an advisory message string for especially dangerous migration variants,
+# or an empty string if no advisory applies.
+#
+# Special cases flagged as advisory (not deny — the commands are still allowed):
+#   drizzle-kit push --force  → "drizzle-kit push --force skips confirmation"
+#   alembic downgrade base    → "alembic downgrade base reverts ALL migrations"
+#   flyway clean              → "flyway clean drops all objects in the configured schemas"
+#   production env + any migration → "Production migration detected. Ensure this is intentional."
+#
+# Production check fires after special-case check so both can appear if applicable.
+# Callers that need just the advisory string can pipe or capture this output.
+# ---------------------------------------------------------------------------
+_db_detect_migration_advisory() {
+    local cmd="$1"
+    local advisory=""
+
+    # Special case: drizzle-kit push --force
+    if printf '%s' "$cmd" | grep -qE 'drizzle-kit[[:space:]]+push.*--force'; then
+        advisory="drizzle-kit push --force skips confirmation"
+    fi
+
+    # Special case: alembic downgrade base
+    if printf '%s' "$cmd" | grep -qE 'alembic[[:space:]]+downgrade[[:space:]]+base'; then
+        advisory="alembic downgrade base reverts ALL migrations"
+    fi
+
+    # Special case: flyway clean (destructive — drops all DB objects)
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()flyway[[:space:]]+clean([[:space:]]|$)'; then
+        advisory="flyway clean drops all objects in the configured schemas"
+    fi
+
+    # Production environment advisory (appended after special cases)
+    local env
+    env=$(_db_detect_environment)
+    if [[ "$env" == "production" || "$env" == "unknown" ]]; then
+        # Only append production advisory when this is actually a migration command
+        local framework
+        framework=$(_db_detect_migration "$cmd")
+        if [[ "$framework" != "none" ]]; then
+            if [[ -n "$advisory" ]]; then
+                advisory="${advisory}. Production migration detected. Ensure this is intentional."
+            else
+                advisory="Production migration detected. Ensure this is intentional."
+            fi
+        fi
+    fi
+
+    printf '%s' "$advisory"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _db_detect_iac COMMAND
+#
+# Detects Infrastructure-as-Code commands that can destroy database infrastructure.
+# Returns: "deny:<reason>", "advisory:<reason>", or "allow"
+#
+# Decision matrix:
+#   terraform destroy              → deny (always)
+#   terraform apply -auto-approve  → deny (bypasses human review)
+#   terraform apply                → allow (terraform prompts interactively)
+#   terraform plan                 → allow (read-only)
+#   pulumi destroy                 → deny (always)
+#   pulumi up --yes                → deny (bypasses confirmation)
+#   pulumi up                      → allow (pulumi prompts interactively)
+#   aws cloudformation delete-stack → deny (always)
+#
+# @decision DEC-DBSAFE-W2B-003
+# @title terraform apply without -auto-approve is ALLOW (interactive prompt is the gate)
+# @status accepted
+# @rationale terraform apply prompts "Do you want to perform these actions?" before
+#   executing. This human-in-the-loop confirmation is sufficient protection for
+#   interactive use. Only -auto-approve bypasses it — that variant is denied.
+#   terraform destroy always denies because there is no "selective" destroy;
+#   it tears down all resources matching the state file.
+# ---------------------------------------------------------------------------
+_db_detect_iac() {
+    local cmd="$1"
+
+    # terraform destroy — always deny
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()terraform[[:space:]]+destroy'; then
+        printf 'deny:terraform destroy tears down all infrastructure defined in the state file'
+        return 0
+    fi
+
+    # terraform apply -auto-approve — deny (bypasses human review)
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()terraform[[:space:]]+apply.*-auto-approve'; then
+        printf 'deny:terraform apply -auto-approve bypasses the human review prompt — infrastructure changes must be reviewed interactively'
+        return 0
+    fi
+
+    # terraform apply (without -auto-approve) — allow (interactive prompt is the gate)
+    # terraform plan — allow (read-only)
+    # These are caught by the generic terraform check below only if explicitly denied above.
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()terraform[[:space:]]+(apply|plan)'; then
+        printf 'allow'; return 0
+    fi
+
+    # pulumi destroy — always deny
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()pulumi[[:space:]]+destroy'; then
+        printf 'deny:pulumi destroy tears down all infrastructure in the current stack'
+        return 0
+    fi
+
+    # pulumi up --yes — deny (bypasses confirmation)
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()pulumi[[:space:]]+up.*--yes'; then
+        printf 'deny:pulumi up --yes bypasses the confirmation prompt — infrastructure changes must be reviewed interactively'
+        return 0
+    fi
+
+    # pulumi up (without --yes) — allow
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()pulumi[[:space:]]+up([[:space:]]|$)'; then
+        printf 'allow'; return 0
+    fi
+
+    # aws cloudformation delete-stack — always deny
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()aws[[:space:]]+cloudformation[[:space:]]+delete-stack'; then
+        printf 'deny:aws cloudformation delete-stack permanently destroys the CloudFormation stack and all its resources'
+        return 0
+    fi
+
+    printf 'allow'
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _db_detect_container COMMAND
+#
+# Detects container/volume destruction commands that can destroy persistent
+# database storage.
+#
+# Returns: "deny:<reason>", "advisory:<reason>", or "allow"
+#
+# Decision matrix:
+#   docker-compose down -v / --volumes → deny (deletes named volumes)
+#   docker compose down -v / --volumes → deny (v2 plugin syntax)
+#   docker-compose down (no flag)      → allow (stops containers, keeps volumes)
+#   docker compose down (no flag)      → allow
+#   docker volume rm                   → deny (always)
+#   docker volume prune                → deny (removes ALL unused volumes)
+#   docker volume ls/inspect           → allow (read-only)
+#   kubectl delete pvc                 → deny (PVC deletion may trigger data loss)
+#   kubectl delete pv                  → deny
+#
+# @decision DEC-DBSAFE-W2B-004
+# @title Both docker-compose v1 and docker compose v2 syntax handled
+# @status accepted
+# @rationale Docker Compose v1 uses the hyphenated binary name (docker-compose).
+#   Docker Compose v2 ships as a Docker CLI plugin using space-separated syntax
+#   (docker compose). Both are in active use as of 2024. The -v / --volumes flag
+#   check must cover both syntaxes. The grep pattern matches both with a single
+#   expression by matching "docker[-[:space:]]compose".
+# ---------------------------------------------------------------------------
+_db_detect_container() {
+    local cmd="$1"
+
+    # docker-compose down -v / --volumes (v1 hyphenated binary)
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()docker-compose[[:space:]]+down'; then
+        if printf '%s' "$cmd" | grep -qE 'docker-compose[[:space:]]+down.*(-v\b|--volumes\b)'; then
+            printf 'deny:docker-compose down -v deletes named volumes, permanently destroying persistent database data'
+            return 0
+        fi
+        printf 'allow'; return 0
+    fi
+
+    # docker compose down -v / --volumes (v2 plugin syntax)
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()docker[[:space:]]+compose[[:space:]]+down'; then
+        if printf '%s' "$cmd" | grep -qE 'docker[[:space:]]+compose[[:space:]]+down.*(-v\b|--volumes\b)'; then
+            printf 'deny:docker compose down -v deletes named volumes, permanently destroying persistent database data'
+            return 0
+        fi
+        printf 'allow'; return 0
+    fi
+
+    # docker volume rm — always deny
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()docker[[:space:]]+volume[[:space:]]+rm([[:space:]]|$)'; then
+        printf 'deny:docker volume rm permanently deletes the named volume and all data it contains'
+        return 0
+    fi
+
+    # docker volume prune — always deny
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()docker[[:space:]]+volume[[:space:]]+prune([[:space:]]|$)'; then
+        printf 'deny:docker volume prune removes ALL unused volumes — this may delete database volumes that are not currently attached to a running container'
+        return 0
+    fi
+
+    # kubectl delete pvc — deny
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()kubectl[[:space:]]+delete[[:space:]]+pvc([[:space:]]|$)'; then
+        printf 'deny:kubectl delete pvc deletes a PersistentVolumeClaim — data loss depends on the ReclaimPolicy (Retain vs Delete). Verify the PV ReclaimPolicy before proceeding.'
+        return 0
+    fi
+
+    # kubectl delete pv — deny
+    if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()kubectl[[:space:]]+delete[[:space:]]+pv([[:space:]]|$)'; then
+        printf 'deny:kubectl delete pv deletes a PersistentVolume — this may permanently destroy the underlying storage'
+        return 0
+    fi
+
+    printf 'allow'
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _db_detect_orm COMMAND
+#
+# Detects ORM destructive patterns in bash command strings.
+# Best-effort detection — catches what is visible in the command string.
+#
+# Returns: "deny:<reason>", "advisory:<reason>", or "allow"
+#
+# Patterns detected:
+#   sequelize.sync({ force: true })  → advisory (drops+recreates all tables)
+#   db.metadata.drop_all()           → advisory (SQLAlchemy drops all tables)
+#   npm run seed                     → advisory if production environment
+#   python seed.py                   → advisory if production environment
+#
+# @decision DEC-DBSAFE-W2B-005
+# @title ORM detection is advisory-only (not deny) due to best-effort nature
+# @status accepted
+# @rationale ORM patterns are embedded in application code invoked via CLI.
+#   We can only inspect the command string, not the code being executed.
+#   False positives (a "seed" script that is read-only, a sync with force
+#   that is intentional in dev) would create friction without clear benefit.
+#   Advisory is appropriate: the user sees the warning and can confirm intent.
+#   Seed scripts in production are the highest-risk detected pattern — they
+#   can populate unexpected data or truncate existing data depending on
+#   implementation. Production-env gating is the primary useful signal.
+# ---------------------------------------------------------------------------
+_db_detect_orm() {
+    local cmd="$1"
+
+    # sequelize.sync({ force: true }) — drops and recreates all tables
+    if printf '%s' "$cmd" | grep -qE 'sequelize\.sync\(\s*\{[^}]*force\s*:\s*true'; then
+        printf 'advisory:sequelize.sync({ force: true }) drops and recreates all tables, permanently destroying existing data'
+        return 0
+    fi
+
+    # db.metadata.drop_all() — SQLAlchemy drops all tables
+    if printf '%s' "$cmd" | grep -qE 'drop_all\s*\('; then
+        printf 'advisory:drop_all() drops all tables defined in the SQLAlchemy metadata — permanent data loss'
+        return 0
+    fi
+
+    # Seed scripts in production — advisory
+    local env
+    env=$(_db_detect_environment)
+    if [[ "$env" == "production" || "$env" == "unknown" ]]; then
+        # npm run seed
+        if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()npm[[:space:]]+run[[:space:]]+seed([[:space:]]|$)'; then
+            printf 'advisory:Running a seed script in production may overwrite or corrupt existing data. Verify this is intentional.'
+            return 0
+        fi
+        # python seed.py (or python3 seed.py)
+        if printf '%s' "$cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()python3?[[:space:]]+seed\.py([[:space:]]|$)'; then
+            printf 'advisory:Running a seed script in production may overwrite or corrupt existing data. Verify this is intentional.'
+            return 0
+        fi
+    fi
+
+    printf 'allow'
+    return 0
 }
