@@ -1479,8 +1479,8 @@ test_dual_color_bar_shows_both_block_types() {
 }
 
 test_dual_color_bar_system_uses_dim_color() {
-    # System blocks should be preceded by a dim ANSI code (ESC[2m or ESC[34m).
-    # The bar opens with ESC[2m[ so dim color precedes the system (heavy-shade) blocks.
+    # System blocks should be preceded by a cyan ANSI code (ESC[36m).
+    # The bar renders: bold-cyan bracket, cyan system blocks, severity conv blocks, dim empty blocks.
     run_test
     local tmpdir
     tmpdir=$(mktemp -d)
@@ -1493,12 +1493,12 @@ test_dual_color_bar_system_uses_dim_color() {
     local raw_line2
     raw_line2=$(run_sl_raw_line2 "$json" "$tmpdir")
 
-    # The dual-color bar renders dim code (ESC[2m) before the heavy-shade blocks.
-    # Check that ESC[2m appears in the bar output.
-    if printf '%s' "$raw_line2" | grep -qF $'\033[2m'; then
-        pass_test "Dual-color bar: dim color code (ESC[2m) present in bar output for system blocks"
+    # The dual-color bar renders cyan code (ESC[36m) for system (heavy-shade) blocks.
+    # Check that ESC[36m appears in the bar output.
+    if printf '%s' "$raw_line2" | grep -qF $'\033[36m'; then
+        pass_test "Dual-color bar: cyan color code (ESC[36m) present in bar output for system blocks"
     else
-        fail_test "Dual-color bar: no dim ANSI code (ESC[2m) found in bar output" \
+        fail_test "Dual-color bar: no cyan ANSI code (ESC[36m) found in bar output" \
             "visible: $(printf '%s' "$raw_line2" | sed 's/\x1b\[[0-9;]*m//g')"
     fi
 }
