@@ -14,6 +14,7 @@
 #   state_delete        - Remove a key from SQLite state.db
 #   state_dir           - Return canonical state directory for project
 #   state_locks_dir     - Return centralized locks directory
+#   state_migrate       - Run pending schema migrations (idempotent)
 #
 # The SQLite database ($CLAUDE_DIR/state/state.db) is the authoritative state
 # store. Old jq-based functions are preserved as _legacy_* for Wave 2 dual-write.
@@ -38,11 +39,31 @@
 # @status superseded
 # @rationale Original decision preserved for Wave 2 migration reference. The SQLite
 #   database replaces state.json as the primary store. Legacy functions preserved as _legacy_*.
+#
+# @decision DEC-STATE-UNIFY-001
+# @title BEGIN IMMEDIATE for all write transactions
+# @status accepted
+# @rationale WAL mode with BEGIN acquires SHARED lock on read, then tries to upgrade
+#   to RESERVED on first write. Two connections both holding SHARED cannot both upgrade
+#   — deadlock. BEGIN IMMEDIATE acquires RESERVED immediately, so only one writer
+#   enters the transaction; the other gets SQLITE_BUSY and retries via busy_timeout.
+#   3/3 deep research providers confirm this as the #1 WAL concurrency fix.
+#   Applied in: state_update(), state_cas(). See MASTER_PLAN.md DEC-STATE-UNIFY-001.
+#
+# @decision DEC-STATE-UNIFY-002
+# @title _migrations table for schema versioning with per-migration checksums
+# @status accepted
+# @rationale Per-migration records with checksums enable rollback detection and
+#   partial migration recovery. PRAGMA user_version is a single integer with no
+#   history — insufficient for a system where schema evolves independently across
+#   multiple active worktrees. _migrations table: version (PK), name, checksum,
+#   applied_at. Runner is idempotent — re-running completed migrations is a no-op.
+#   See MASTER_PLAN.md DEC-STATE-UNIFY-002.
 
 # Guard against double-sourcing
 [[ -n "${_STATE_LIB_LOADED:-}" ]] && return 0
 
-_STATE_LIB_VERSION=2
+_STATE_LIB_VERSION=3
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Internal helpers
@@ -155,6 +176,13 @@ BEGIN
     );
 END;
 
+CREATE TABLE IF NOT EXISTS _migrations (
+    version     INTEGER PRIMARY KEY,
+    name        TEXT    NOT NULL,
+    checksum    TEXT,
+    applied_at  INTEGER NOT NULL
+);
+
 INSERT OR IGNORE INTO state
     (key, value, workflow_id, session_id, updated_at, source, pid)
 VALUES
@@ -162,6 +190,119 @@ VALUES
 " | sqlite3 "$db" 2>/dev/null || true
 
     _STATE_SCHEMA_INITIALIZED=1
+
+    # Run any pending migrations (idempotent — already-applied migrations skipped)
+    _state_run_migrations "$db"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Migration framework
+# ─────────────────────────────────────────────────────────────────────────────
+
+# _MIGRATIONS — ordered array of "version:name:function_name" entries.
+#   Each entry defines one migration. The runner processes them in order.
+#   Future Implementers: to add a new migration:
+#   1. Define _migration_NNN_description() below (receives db path as $1)
+#   2. Add "NNN:description:_migration_NNN_description" to this array
+#   3. Use printf + sqlite3 for SQL within the function (not _state_sql — that
+#      would recurse into schema init before migrations are complete)
+_MIGRATIONS=(
+    "1:initial_schema:_migration_001_initial_schema"
+)
+
+# _migration_001_initial_schema DB
+#   No-op migration: records that the baseline schema (state + history tables)
+#   was created by _state_ensure_schema(). This migration exists to establish
+#   version 1 in the _migrations table — subsequent migrations can depend on
+#   version 1 being present. No SQL schema changes needed here.
+_migration_001_initial_schema() {
+    # No-op: existing schema created by _state_ensure_schema().
+    # This migration just records that the baseline schema exists.
+    return 0
+}
+
+# _state_checksum_fn FUNCTION_NAME
+#   Compute SHA-256 checksum of a function's body (via `type -f`).
+#   Used to detect if a migration's implementation has changed since it was applied.
+#   Returns 64-char lowercase hex string.
+_state_checksum_fn() {
+    local fn_name="$1"
+    local fn_body
+    fn_body=$(type -f "$fn_name" 2>/dev/null || echo "$fn_name:undefined")
+    if command -v shasum >/dev/null 2>&1; then
+        printf '%s' "$fn_body" | shasum -a 256 | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$fn_body" | sha256sum | awk '{print $1}'
+    else
+        # Fallback: no sha available — use a stable placeholder (not cryptographic)
+        printf '%s' "$fn_body" | cksum | awk '{printf "%064d", $1}'
+    fi
+}
+
+# _state_run_migrations DB
+#   Executes pending migrations in order. Each migration is a function named
+#   _migration_NNN_description() that receives the db path as $1.
+#   Idempotent: completed migrations (by version) are skipped.
+#   On failure: logs error, returns 1 — does NOT continue past failed migration.
+#   Called automatically by _state_ensure_schema() after table creation.
+_state_run_migrations() {
+    local db="$1"
+    local migration_entry version name fn_name checksum applied ts
+
+    for migration_entry in "${_MIGRATIONS[@]}"; do
+        # Parse "version:name:fn_name" entry
+        version="${migration_entry%%:*}"
+        local rest="${migration_entry#*:}"
+        name="${rest%%:*}"
+        fn_name="${rest#*:}"
+
+        # Check if this version is already applied
+        applied=$(printf '.timeout 5000\nSELECT COUNT(*) FROM _migrations WHERE version=%s;\n' "$version" \
+            | sqlite3 "$db" 2>/dev/null || echo "0")
+        applied="${applied//[[:space:]]/}"
+
+        if [[ "$applied" -ge 1 ]]; then
+            # Already applied — skip (idempotent)
+            continue
+        fi
+
+        # Compute checksum of the migration function body
+        checksum=$(_state_checksum_fn "$fn_name")
+
+        # Execute the migration function
+        if ! "$fn_name" "$db"; then
+            # Migration failed — log and stop (don't continue past failure)
+            log_info "STATE-MIGRATION" "Migration ${version} (${name}) FAILED — stopping migration runner" 2>/dev/null || true
+            return 1
+        fi
+
+        # Record the migration in _migrations
+        ts=$(date +%s)
+        local name_e checksum_e
+        name_e=$(printf '%s' "$name" | sed "s/'/''/g")
+        checksum_e=$(printf '%s' "$checksum" | sed "s/'/''/g")
+        printf '.timeout 5000\nINSERT OR IGNORE INTO _migrations (version, name, checksum, applied_at) VALUES (%s, '"'"'%s'"'"', '"'"'%s'"'"', %s);\n' \
+            "$version" "$name_e" "$checksum_e" "$ts" \
+            | sqlite3 "$db" 2>/dev/null || true
+    done
+    return 0
+}
+
+# state_migrate
+#   Run any pending migrations against the state database.
+#   Called automatically by _state_ensure_schema() on first invocation.
+#   Safe to call explicitly — idempotent, already-applied migrations are skipped.
+#
+#   Future Implementers: add new migrations by:
+#   1. Define _migration_NNN_description() function (receives DB path as $1)
+#   2. Add "NNN:description:_migration_NNN_description" to _MIGRATIONS array
+#   3. Migration functions receive DB path as $1 — use printf+sqlite3 directly
+#   4. Use _state_sql() for SQL execution ONLY if schema is already initialized
+#      (never inside _state_run_migrations — that runs during schema init)
+state_migrate() {
+    local db
+    db=$(_state_db_path)
+    _state_run_migrations "$db"
 }
 
 # _state_sql SQL
@@ -292,7 +433,7 @@ state_update() {
     fi
 
     _state_sql "
-BEGIN;
+BEGIN IMMEDIATE;
 INSERT OR REPLACE INTO state
     (key, value, workflow_id, session_id, updated_at, source, pid)
 VALUES
@@ -393,7 +534,7 @@ state_cas() {
 
     local result
     result=$(_state_sql "
-BEGIN;
+BEGIN IMMEDIATE;
 UPDATE state
 SET value='${new_value_e}', updated_at=${ts}, source='${source_e}', pid=${pid}
 WHERE key='${key_e}' AND workflow_id='${wf_id_e}' AND value='${expected_e}';
@@ -633,6 +774,8 @@ export -f workflow_id _state_sql _state_ensure_schema _state_db_path
 export -f state_update state_read state_cas state_delete
 export -f state_dir state_locks_dir
 export -f state_integrity_check
+export -f state_migrate _state_run_migrations _state_checksum_fn
+export -f _migration_001_initial_schema
 export -f _legacy_state_update _legacy_state_read
 export -f _sql_escape _proof_ordinal
 
