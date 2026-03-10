@@ -14,6 +14,9 @@
 #   state_delete        - Remove a key from SQLite state.db
 #   state_dir           - Return canonical state directory for project
 #   state_locks_dir     - Return centralized locks directory
+#   proof_state_get     - Read proof state as pipe-delimited string (with flat-file fallback)
+#   proof_state_set     - Transition proof state with monotonic lattice enforcement
+#   proof_epoch_reset   - Bump epoch to allow proof state regression
 #
 # The SQLite database ($CLAUDE_DIR/state/state.db) is the authoritative state
 # store. Old jq-based functions are preserved as _legacy_* for Wave 2 dual-write.
@@ -159,6 +162,17 @@ INSERT OR IGNORE INTO state
     (key, value, workflow_id, session_id, updated_at, source, pid)
 VALUES
     ('_schema_version', '1', '_system', NULL, strftime('%s','now'), 'state-lib', NULL);
+
+CREATE TABLE IF NOT EXISTS proof_state (
+    workflow_id TEXT PRIMARY KEY,
+    status      TEXT NOT NULL DEFAULT 'none'
+                    CHECK(status IN ('none','needs-verification','pending','verified','committed')),
+    epoch       INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL,
+    updated_by  TEXT    NOT NULL,
+    session_id  TEXT,
+    pid         INTEGER
+);
 " | sqlite3 "$db" 2>/dev/null || true
 
     _STATE_SCHEMA_INITIALIZED=1
@@ -478,6 +492,238 @@ state_locks_dir() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# proof_state typed table API
+# ─────────────────────────────────────────────────────────────────────────────
+
+# proof_state_get [WORKFLOW_ID]
+#   Return current proof state as pipe-delimited string:
+#     status|epoch|updated_at|updated_by
+#   If WORKFLOW_ID not provided, uses workflow_id().
+#   Returns empty string (exit 1) if no entry found and no flat-file fallback.
+#
+#   Dual-read fallback (DEC-STATE-UNIFY-004): when the proof_state table has
+#   no row for the workflow, fall back to the flat proof-status file at:
+#     $CLAUDE_DIR/state/{phash}/proof-status  (new path)
+#     $CLAUDE_DIR/.proof-status-{phash}       (old path)
+#   Flat-file output uses the format: status|0|timestamp|flat-file-fallback
+#
+# @decision DEC-STATE-UNIFY-003
+# @title proof_state typed table for structured proof lifecycle state
+# @status accepted
+# @rationale The existing proof_status key in the generic `state` table stores
+#   a plain TEXT value with no schema enforcement. Adding a dedicated
+#   `proof_state` table provides: (1) CHECK constraint on status values —
+#   the DB rejects invalid status strings at the storage layer, not just at
+#   the application layer; (2) first-class epoch column — epoch is a
+#   structured field, not a separate key lookup; (3) typed metadata columns
+#   (updated_by, session_id, pid) that mirror the `state` table pattern but
+#   scoped to proof lifecycle semantics; (4) workflow_id as PRIMARY KEY
+#   enforces one-proof-state-per-workflow invariant at the DB level.
+#   This is the typed table approach from DEC-STATE-UNIFY-003 in MASTER_PLAN.md.
+proof_state_get() {
+    local wf_id="${1:-}"
+    if [[ -z "$wf_id" ]]; then
+        wf_id=$(workflow_id)
+    fi
+
+    local wf_id_e
+    wf_id_e=$(_sql_escape "$wf_id")
+
+    local result
+    result=$(_state_sql "
+.separator '|'
+SELECT status, epoch, updated_at, updated_by
+FROM proof_state
+WHERE workflow_id='${wf_id_e}'
+LIMIT 1;
+") || true
+
+    if [[ -n "$result" ]]; then
+        echo "$result"
+        return 0
+    fi
+
+    # Dual-read fallback: read flat proof-status file (DEC-STATE-UNIFY-004).
+    # Flat-file format: "status|timestamp" (written by write_proof_status()).
+    # We synthesize the 4-field output as: status|0|timestamp|flat-file-fallback
+    local claude_dir="${CLAUDE_DIR:-$(get_claude_dir)}"
+    local project_root="${PROJECT_ROOT:-$(detect_project_root 2>/dev/null || echo "$PWD")}"
+    local phash
+    phash=$(project_hash "$project_root")
+    local new_path="${claude_dir}/state/${phash}/proof-status"
+    local old_path="${claude_dir}/.proof-status-${phash}"
+
+    local flat_file=""
+    if [[ -f "$new_path" ]]; then
+        flat_file="$new_path"
+    elif [[ -f "$old_path" ]]; then
+        flat_file="$old_path"
+    fi
+
+    if [[ -n "$flat_file" ]]; then
+        local flat_val flat_ts
+        flat_val=$(cut -d'|' -f1 "$flat_file" 2>/dev/null || true)
+        flat_ts=$(cut -d'|' -f2 "$flat_file" 2>/dev/null || true)
+        [[ -z "$flat_ts" ]] && flat_ts=$(date +%s)
+        if [[ -n "$flat_val" ]]; then
+            echo "${flat_val}|0|${flat_ts}|flat-file-fallback"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# proof_state_set STATUS [SOURCE]
+#   Transition proof state with monotonic lattice enforcement.
+#   Returns 0 on success, 1 on lattice violation or failure.
+#
+#   Lattice: none(0) → needs-verification(1) → pending(2) → verified(3) → committed(4)
+#   Forward progression always allowed. Regression (new_ord < current_ord) is
+#   rejected unless proof_epoch_reset() has been called since last write.
+#
+#   Implementation uses a read-then-write pattern with BEGIN IMMEDIATE on the
+#   write to prevent concurrent regressions. Since the lattice only prevents
+#   backward movement and both concurrent writers are advancing forward, the
+#   TOCTOU window is safe: a concurrent writer can only move state further
+#   forward, which is acceptable.
+#
+#   Each successful write inserts a history row for full audit trail.
+#
+# @decision DEC-STATE-UNIFY-003
+# @title Read-then-write pattern for proof_state_set lattice enforcement
+# @status accepted
+# @rationale Pure SQL conditional INSERT (e.g., INSERT ... WHERE NOT EXISTS ...)
+#   cannot easily express the epoch-based regression exception in a single
+#   statement without a complex subquery. The read-then-write approach matches
+#   state_cas() precedent in this file and keeps the lattice logic in readable
+#   bash. BEGIN IMMEDIATE on the write ensures atomicity of the write itself;
+#   the read-before-write TOCTOU window is acceptable because concurrent forward
+#   progression is idempotent and epoch bumps are always done explicitly.
+proof_state_set() {
+    local new_status="${1:?proof_state_set requires a status}"
+    local source="${2:-${_HOOK_NAME:-unknown}}"
+    local wf_id
+    wf_id=$(workflow_id)
+    local session_id="${CLAUDE_SESSION_ID:-}"
+    local pid="$$"
+    local ts
+    ts=$(date +%s)
+
+    local new_ord
+    new_ord=$(_proof_ordinal "$new_status")
+
+    local wf_id_e new_status_e source_e session_id_e
+    wf_id_e=$(_sql_escape "$wf_id")
+    new_status_e=$(_sql_escape "$new_status")
+    source_e=$(_sql_escape "$source")
+
+    local session_val
+    if [[ -n "$session_id" ]]; then
+        session_id_e=$(_sql_escape "$session_id")
+        session_val="'${session_id_e}'"
+    else
+        session_val="NULL"
+    fi
+
+    # Read current state (status + epoch)
+    local current
+    current=$(_state_sql "
+SELECT status || '|' || epoch
+FROM proof_state
+WHERE workflow_id='${wf_id_e}'
+LIMIT 1;
+") || true
+
+    local cur_epoch=0
+    if [[ -n "$current" ]]; then
+        local cur_status
+        cur_status="${current%%|*}"
+        cur_epoch="${current##*|}"
+        local cur_ord
+        cur_ord=$(_proof_ordinal "$cur_status")
+
+        # Lattice check: regression requires epoch to have been bumped.
+        # Epoch bump is recorded directly in proof_state.epoch via proof_epoch_reset().
+        # If new ordinal < current ordinal, only allow if epoch in DB > the epoch
+        # that was present when the current status was written. Since proof_epoch_reset()
+        # increments epoch in-place, a bumped epoch means the stored epoch > 0 AND
+        # was incremented since last status write. We detect this via a separate
+        # epoch sentinel key (proof.epoch.bumped) for backward compat with state_cas().
+        if (( new_ord < cur_ord )); then
+            # Check if an epoch bump has been signalled
+            local bumped
+            bumped=$(state_read "proof.epoch.bumped" "$wf_id" 2>/dev/null || true)
+            if [[ -z "$bumped" ]]; then
+                return 1
+            fi
+        fi
+    fi
+
+    # Write: BEGIN IMMEDIATE for concurrent write safety.
+    _state_sql "
+BEGIN IMMEDIATE;
+INSERT OR REPLACE INTO proof_state
+    (workflow_id, status, epoch, updated_at, updated_by, session_id, pid)
+VALUES
+    ('${wf_id_e}', '${new_status_e}',
+     COALESCE((SELECT epoch FROM proof_state WHERE workflow_id='${wf_id_e}'), 0),
+     ${ts}, '${source_e}', ${session_val}, ${pid});
+INSERT INTO history
+    (key, value, workflow_id, session_id, source, timestamp, pid)
+VALUES
+    ('proof_state', '${new_status_e}', '${wf_id_e}', ${session_val}, '${source_e}', ${ts}, ${pid});
+COMMIT;
+" >/dev/null && return 0 || return 1
+}
+
+# proof_epoch_reset [WORKFLOW_ID]
+#   Bump the epoch counter for a workflow, allowing proof state regression.
+#   Used when source code changes invalidate previous verification.
+#
+#   After calling proof_epoch_reset(), the next proof_state_set() call may
+#   move the status backward (e.g., from verified back to none).
+#
+#   Sets the proof.epoch.bumped sentinel key in the generic state table for
+#   compatibility with state_cas() lattice checks on the proof_status key.
+#   Also increments proof_state.epoch directly for the typed table.
+#
+# @decision DEC-STATE-UNIFY-003
+# @title proof_epoch_reset updates both typed table and sentinel key
+# @status accepted
+# @rationale The existing state_cas() lattice check reads proof.epoch.bumped
+#   from the generic state table. proof_epoch_reset() must set that sentinel
+#   for backward compat during the dual-write window. The typed proof_state
+#   table stores epoch as an integer column; incrementing it directly here
+#   ensures the typed API is self-consistent without reading the sentinel key.
+proof_epoch_reset() {
+    local wf_id="${1:-}"
+    if [[ -z "$wf_id" ]]; then
+        wf_id=$(workflow_id)
+    fi
+
+    local wf_id_e
+    wf_id_e=$(_sql_escape "$wf_id")
+    local ts
+    ts=$(date +%s)
+
+    # Bump epoch in proof_state (upsert: if no row exists, create one with epoch=1)
+    _state_sql "
+BEGIN IMMEDIATE;
+INSERT INTO proof_state (workflow_id, status, epoch, updated_at, updated_by)
+VALUES ('${wf_id_e}', 'none', 1, ${ts}, 'proof_epoch_reset')
+ON CONFLICT(workflow_id) DO UPDATE SET
+    epoch = epoch + 1,
+    updated_at = ${ts},
+    updated_by = 'proof_epoch_reset';
+COMMIT;
+" >/dev/null || true
+
+    # Also set the sentinel key for backward compat with state_cas() checks
+    state_update "proof.epoch.bumped" "1" "proof_epoch_reset" 2>/dev/null || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Legacy functions (preserved for Wave 2 dual-write migration)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -633,6 +879,7 @@ export -f workflow_id _state_sql _state_ensure_schema _state_db_path
 export -f state_update state_read state_cas state_delete
 export -f state_dir state_locks_dir
 export -f state_integrity_check
+export -f proof_state_get proof_state_set proof_epoch_reset
 export -f _legacy_state_update _legacy_state_read
 export -f _sql_escape _proof_ordinal
 
