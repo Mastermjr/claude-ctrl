@@ -182,6 +182,13 @@ project's institutional memory.
 | 2026-03-09 | DEC-DBSAFE-004 | db-safety | MCP governance via PreToolUse hook, not full proxy | Hook-based interception at JSON-RPC argument level provides governance without infrastructure changes; full proxy is P2 |
 | 2026-03-09 | DEC-DBSAFE-005 | db-safety | Regex-based pattern matching at hook layer, no SQL AST parsing | Consistent with guard.sh approach; hook layer stays fast (<10ms); Database Guardian handles deeper analysis |
 | 2026-03-09 | DEC-DBSAFE-006 | db-safety | Modular _db_check_*() functions for extensibility | Each CLI/IaC/container tool gets its own handler function; new databases added by writing a function and registering in early-exit gate |
+| 2026-03-09 | DEC-STATE-UNIFY-001 | state-unification | BEGIN IMMEDIATE for all write transactions | Prevents read-then-write deadlock under WAL concurrent access; 3/3 deep research providers consensus |
+| 2026-03-09 | DEC-STATE-UNIFY-002 | state-unification | _migrations table for schema versioning | Per-migration records with checksums; supports rollback detection; better than PRAGMA user_version for plugin systems |
+| 2026-03-09 | DEC-STATE-UNIFY-003 | state-unification | Typed tables for structured state + KV for ad-hoc | proof_state, agent_markers, events get proper indexes and constraints; generic KV retained for ad-hoc state |
+| 2026-03-09 | DEC-STATE-UNIFY-004 | state-unification | Dual-read for 2 releases during transition | SQLite primary, flat-file fallback covers in-flight worktree lifetimes; prevents data loss during migration |
+| 2026-03-09 | DEC-STATE-UNIFY-005 | state-unification | Event ledger with consumer checkpoints | Append-only events table with per-consumer offsets; enables async governor triggers, observatory signals, cross-session coordination |
+| 2026-03-09 | DEC-STATE-UNIFY-006 | state-unification | Lint enforcement gated on migration completion | Cannot deny dotfile I/O while hooks still use it; enforce only after W5-1 complete |
+| 2026-03-09 | DEC-STATE-UNIFY-007 | state-unification | Version-gated fallback for backward compatibility | Graceful mixed-version handling during dual-read window; multiple Claude instances may run different code |
 
 ---
 
@@ -769,6 +776,342 @@ Main is sacred. The `db-safety` branch was created from main for this initiative
 
 ---
 
+### Initiative: State Unification
+**Status:** active
+**Started:** 2026-03-09
+**Goal:** Replace the four overlapping state management eras (dotfiles, state.json+jq, atomic tmp->mv, shadow SQLite) with SQLite as sole authority -- typed schema, migration discipline, event-driven coordination, and lint enforcement to prevent regression.
+
+> The hook system's state management has four overlapping eras coexisting simultaneously: raw dotfiles, jq+flock on state.json, atomic tmp->mv with monotonic lattice, and SQLite WAL. SQLite was added as Wave 1 of the Robust State Management initiative but ALL writes are best-effort shadows (`type state_update &>/dev/null && ... || true`). Flat files remain authoritative. This dual-authority system has produced 20+ state-related fixes across 755 commits, with 5 recurring failure patterns: session ID loss (5 independent fixes), proof file location instability (3 paths for same data), TTL-based marker falsification (3+ fixes), marker false positives (glob-based detection errors), and partial write corruption. Every new hook that touches state must navigate this archaeological layering. Additionally, all write transactions use `BEGIN;` instead of `BEGIN IMMEDIATE;`, creating a deadlock window under concurrent hook processes. This initiative eliminates the flat-file layer entirely, promotes SQLite to sole authority, adds typed schema with migration discipline, and introduces an event ledger for async coordination.
+
+**Dominant Constraint:** reliability
+
+**Supersedes:** SQLite Unified State Store (parked, #128-#134) -- this initiative completes what that one started
+
+#### Goals
+- REQ-GOAL-SU-001: SQLite as the sole authoritative state store -- all state reads/writes go through state-lib.sh API, flat files eliminated
+- REQ-GOAL-SU-002: Zero state-related regressions during migration -- dual-read window ensures no data loss for in-flight worktrees
+- REQ-GOAL-SU-003: Typed schema for structured state -- proof_state, agent_markers, events tables with proper indexes and constraints
+- REQ-GOAL-SU-004: Event-driven coordination capability -- append-only events table enables async governor triggers, observatory signals, cross-session coordination
+- REQ-GOAL-SU-005: Migration discipline -- schema changes go through `_migrations` table; Future Implementers never modify schema inline
+
+#### Non-Goals
+- REQ-NOGO-SU-001: Unix socket state daemon -- over-engineered for current single-user scale; revisit when multi-user patterns emerge (from parked RSM initiative)
+- REQ-NOGO-SU-002: Real-time pub/sub notifications -- event ledger uses polling (consumer checkpoints), not WebSocket/push; sufficient for hook-based architecture
+- REQ-NOGO-SU-003: Cross-machine state synchronization -- this is a local-first system; state.db is per-machine
+- REQ-NOGO-SU-004: SQL AST parsing for migration validation -- regex-based validation is sufficient for bash migrations; full AST parsing adds dependencies
+
+#### Requirements
+
+**Must-Have (P0)**
+
+- REQ-P0-SU-001: Upgrade `state_update()`, `state_cas()`, `state_delete()` to use `BEGIN IMMEDIATE;`
+  Acceptance: Given concurrent hook processes writing to state.db, When two writers contend, Then busy_timeout handles the wait (no deadlock). Verified by concurrent write test (10 parallel processes, 0 failures).
+
+- REQ-P0-SU-002: Create `_migrations` table and migration runner in state-lib.sh
+  Acceptance: Given `_state_ensure_schema()` runs on first call, When schema version is behind, Then pending migrations execute in order. Each migration recorded with version, description, timestamp, checksum. Runner is idempotent -- re-running completed migrations is a no-op.
+
+- REQ-P0-SU-003: Create `proof_state` typed table replacing `.proof-status-{phash}` flat files
+  Acceptance: Given `proof_state_set("verified")` is called, When `proof_state_get()` is called, Then returns "verified" with timestamp, source, workflow_id. Monotonic lattice enforcement preserved. All 16 hooks that reference proof status use the new API.
+
+- REQ-P0-SU-004: Create `agent_markers` typed table replacing `.active-{type}-{session}-{phash}` dotfiles
+  Acceptance: Given `marker_create("implementer", SESSION, WF_ID, PID)` is called, When `marker_query("implementer")` is called, Then returns active markers with PID-based liveness check. Stale marker cleanup via `marker_cleanup(300)` replaces TTL-based glob deletion.
+
+- REQ-P0-SU-005: Create `events` and `event_checkpoints` tables for event ledger
+  Acceptance: Given `state_emit("proof.verified", PAYLOAD)` is called, When `state_events_since("governor")` is called, Then returns events since the governor's last checkpoint. Consumer checkpoints are per-consumer, not global.
+
+- REQ-P0-SU-006: Migrate all 26 hooks from flat-file state I/O to SQLite API calls
+  Acceptance: Given hook X previously read/wrote `.proof-status-{phash}`, When migrated, Then hook X calls `proof_state_get()`/`proof_state_set()`. No flat file I/O for state operations.
+
+- REQ-P0-SU-007: Dual-read window during transition -- SQLite primary, flat-file fallback
+  Acceptance: Given an in-flight worktree has old code writing flat files, When new code reads state, Then it checks SQLite first, falls back to flat file if SQLite has no entry. Duration: 2 releases.
+
+- REQ-P0-SU-008: Remove all `type state_update &>/dev/null && ... || true` patterns
+  Acceptance: Given a hook needs to write state, When it calls the state API, Then the call is direct (no type-check guard, no `|| true` swallowing). Failures are logged, not silently ignored.
+
+- REQ-P0-SU-009: Lint enforcement denying direct dotfile state I/O in hook code
+  Acceptance: Given a developer writes `echo "status" > .proof-status-{phash}` in a hook, When lint.sh runs, Then the write is denied with message directing to the state API.
+
+**Nice-to-Have (P1)**
+
+- REQ-P1-SU-001: `state_gc_events` for event table garbage collection -- consumer-based (delete events older than oldest checkpoint)
+- REQ-P1-SU-002: Migration rollback support -- `_migrations` table tracks rollback SQL for each migration
+- REQ-P1-SU-003: `state_history_query` for structured history queries (by key, time range, source)
+
+**Future Consideration (P2)**
+
+- REQ-P2-SU-001: Observatory integration -- emit events for trace analysis signals
+- REQ-P2-SU-002: Governor auto-trigger via cumulative event thresholds
+- REQ-P2-SU-003: Cross-session proof coordination (multi-instance awareness)
+- REQ-P2-SU-004: Self-healing detection via failure accumulation queries
+
+#### Definition of Done
+
+All 9 P0 requirements pass their acceptance criteria. SQLite is the sole authoritative state store -- zero flat-file state I/O in any hook. All write transactions use BEGIN IMMEDIATE (no deadlock window). Typed tables (proof_state, agent_markers, events) have proper indexes and constraints. Migration runner is idempotent and records each migration. Event ledger supports emit/consume/checkpoint/GC cycle. Lint enforcement prevents regression to flat-file patterns. Dual-read window covers transition. All 200+ existing hook tests pass. Satisfies: REQ-GOAL-SU-001 through REQ-GOAL-SU-005.
+
+#### Architectural Decisions
+
+<!--
+@decision DEC-STATE-UNIFY-001
+@title BEGIN IMMEDIATE for all write transactions
+@status accepted
+@rationale WAL mode with BEGIN acquires SHARED lock on read, then tries to upgrade
+  to RESERVED on first write. Two connections both holding SHARED cannot both upgrade
+  -- deadlock. BEGIN IMMEDIATE acquires RESERVED immediately, so only one writer
+  enters the transaction; the other gets SQLITE_BUSY and retries via busy_timeout.
+  3/3 deep research providers confirm this as the #1 WAL concurrency fix.
+-->
+
+- DEC-STATE-UNIFY-001: BEGIN IMMEDIATE for all write transactions
+  Addresses: REQ-P0-SU-001.
+  Rationale: WAL mode with `BEGIN` acquires SHARED lock on read, then tries to upgrade to RESERVED on first write -- two connections both holding SHARED cannot both upgrade (deadlock). `BEGIN IMMEDIATE` acquires RESERVED immediately, so only one writer enters the transaction; the other gets SQLITE_BUSY and retries via busy_timeout. 3/3 deep research providers confirm this as the #1 WAL concurrency fix. Mechanical change: `BEGIN;` -> `BEGIN IMMEDIATE;` in `state_update()`, `state_cas()`, `state_delete()`.
+
+<!--
+@decision DEC-STATE-UNIFY-002
+@title _migrations table for schema versioning
+@status accepted
+@rationale Per-migration records with checksums; supports rollback detection and
+  partial migration recovery. PRAGMA user_version is a single integer with no
+  history -- insufficient for a system where schema evolves independently across
+  multiple active worktrees. _migrations table tracks: id, version, description,
+  applied_at, checksum. Runner is idempotent.
+-->
+
+- DEC-STATE-UNIFY-002: _migrations table for schema versioning
+  Addresses: REQ-P0-SU-002, REQ-GOAL-SU-005.
+  Rationale: Per-migration records with checksums enable rollback detection and partial migration recovery. PRAGMA user_version is a single integer with no history -- insufficient for a system where schema evolves independently across multiple active worktrees. _migrations table tracks: id, version, description, applied_at, checksum. Runner is idempotent -- re-running completed migrations is a no-op based on checksum matching.
+
+<!--
+@decision DEC-STATE-UNIFY-003
+@title Typed tables for structured state + KV for ad-hoc
+@status accepted
+@rationale Generic key-value works for simple state but fights the type system for
+  structured data. Typed tables enable proper indexes, CHECK constraints, and SQL
+  queries. proof_state gets CHECK constraint on status values, agent_markers gets
+  UNIQUE constraint on (type, session, workflow), events gets AUTOINCREMENT seq
+  for ordering. The key-value API (state_update/state_read) remains for ad-hoc state.
+-->
+
+- DEC-STATE-UNIFY-003: Typed tables for structured state + KV for ad-hoc
+  Addresses: REQ-P0-SU-003, REQ-P0-SU-004, REQ-P0-SU-005, REQ-GOAL-SU-003.
+  Rationale: Generic key-value works for simple state but fights the type system for structured data. Typed tables enable proper indexes, CHECK constraints, and SQL queries. `proof_state` gets CHECK constraint on status values, `agent_markers` gets UNIQUE constraint on (type, session, workflow), `events` gets AUTOINCREMENT seq for ordering. The key-value API (`state_update`/`state_read`) remains for ad-hoc state that doesn't warrant its own table.
+
+<!--
+@decision DEC-STATE-UNIFY-004
+@title Dual-read for 2 releases during transition
+@status accepted
+@rationale In-flight worktrees may have code that writes flat files. Dual-read
+  ensures no state loss during transition: SQLite primary, flat-file fallback if
+  SQLite has no entry. 2-release window covers all worktree lifetimes. After the
+  window, W5-2 removes the fallback paths.
+-->
+
+- DEC-STATE-UNIFY-004: Dual-read for 2 releases during transition
+  Addresses: REQ-P0-SU-007.
+  Rationale: In-flight worktrees may have code that writes flat files. Dual-read ensures no state loss during transition: SQLite primary, flat-file fallback if SQLite has no entry. 2-release window covers all worktree lifetimes (typically <1 week). After the window, W5-2 removes the fallback paths.
+
+<!--
+@decision DEC-STATE-UNIFY-005
+@title Event ledger with consumer checkpoints
+@status accepted
+@rationale Current async coordination patterns (observatory signal collection,
+  governor triggers) use polling across multiple flat files. An append-only events
+  table with per-consumer checkpoints enables event-driven coordination: each
+  consumer tracks its own offset, queries only new events. No infrastructure
+  changes needed -- same sqlite3 CLI, same state-lib.sh API.
+-->
+
+- DEC-STATE-UNIFY-005: Event ledger with consumer checkpoints
+  Addresses: REQ-P0-SU-005, REQ-GOAL-SU-004.
+  Rationale: Current async coordination patterns (observatory signal collection, governor triggers) use polling across multiple flat files. An append-only events table with per-consumer checkpoints enables event-driven coordination: each consumer tracks its own offset, queries only new events since its checkpoint. GC deletes events older than the oldest consumer checkpoint. No infrastructure changes -- same sqlite3 CLI, same state-lib.sh API.
+
+<!--
+@decision DEC-STATE-UNIFY-006
+@title Lint enforcement gated on migration completion
+@status accepted
+@rationale Cannot deny dotfile I/O while hooks still use it -- premature enforcement
+  breaks in-flight work. The lint gate flips when all W5-1 hooks are merged.
+  Until then, the lint rule exists but is disabled via a schema-version check.
+-->
+
+- DEC-STATE-UNIFY-006: Lint enforcement gated on migration completion
+  Addresses: REQ-P0-SU-009.
+  Rationale: Cannot deny dotfile I/O while hooks still use it -- premature enforcement breaks in-flight work. The lint gate flips when all W5-1 hooks are merged. Until then, the lint rule exists but is disabled via a schema-version check: only fires when `_migrations` table confirms all migration versions are applied.
+
+<!--
+@decision DEC-STATE-UNIFY-007
+@title Version-gated fallback for backward compatibility
+@status accepted
+@rationale Multiple Claude instances may run different code versions simultaneously
+  (e.g., one orchestrator on main, one implementer on a worktree with older code).
+  Version-gated fallback: state_read() checks schema version; if pre-migration,
+  falls back to flat file read. This prevents hard failures during rolling migration.
+-->
+
+- DEC-STATE-UNIFY-007: Version-gated fallback for backward compatibility
+  Addresses: REQ-P0-SU-007.
+  Rationale: Multiple Claude instances may run different code versions simultaneously (e.g., one orchestrator on main, one implementer on a worktree with older code). Version-gated fallback: `proof_state_get()` checks schema version; if `proof_state` table doesn't exist, falls back to flat file read. This prevents hard failures during rolling migration.
+
+#### Interface Contracts
+
+**Contract: proof_state API (state-lib.sh)**
+- Exports: `proof_state_get([WORKFLOW_ID]) -> "status|timestamp|source"`, `proof_state_set(STATUS, [SOURCE]) -> 0|1`
+- Consumed by: `hooks/log.sh`, `hooks/pre-bash.sh`, `hooks/task-track.sh`, `hooks/prompt-submit.sh`, `hooks/check-tester.sh`, `hooks/check-guardian.sh`, `hooks/post-write.sh`, `hooks/stop.sh`, `hooks/compact-preserve.sh`
+- Test expectations: `proof_state_set "verified"` followed by `proof_state_get` returns "verified". Lattice enforcement: `proof_state_set "pending"` after "verified" is rejected (returns 1) unless epoch reset.
+
+**Contract: marker API (state-lib.sh)**
+- Exports: `marker_create(TYPE, SESSION, WF_ID, PID) -> row_id`, `marker_query(TYPE, [WF_ID]) -> "type|session|wf_id|pid|created_at" lines`, `marker_cleanup(STALE_SECONDS) -> count_removed`
+- Consumed by: `hooks/trace-lib.sh`, `hooks/session-lib.sh`, `hooks/subagent-start.sh`, `hooks/task-track.sh`, `hooks/check-implementer.sh`, `hooks/check-guardian.sh`, `hooks/post-write.sh`
+- Test expectations: `marker_create "implementer" SID WF PID` followed by `marker_query "implementer"` returns the marker. After PID dies, `marker_cleanup 0` removes it.
+
+**Contract: event ledger API (state-lib.sh)**
+- Exports: `state_emit(TYPE, PAYLOAD, [WF_ID]) -> seq_no`, `state_events_since(CONSUMER, [TYPE]) -> "seq|type|payload|wf_id|timestamp" lines`, `state_checkpoint(CONSUMER, SEQ) -> 0`, `state_gc_events() -> count_removed`
+- Consumed by: `hooks/session-init.sh` (governor trigger check), `agents/governor.md` (event query), `observatory/` (signal collection)
+- Test expectations: `state_emit "proof.verified" '{"wf":"test"}'` returns seq 1. `state_events_since "governor"` returns the event. `state_checkpoint "governor" 1` + `state_events_since "governor"` returns empty.
+
+#### Waves
+
+##### Initiative Summary
+- **Total items:** 9
+- **Critical path:** 5 waves (W1-1 -> W2-1 -> W5-1 -> W5-2; longest sequential chain)
+- **Max width:** 3 (W2-1 || W3-1 || W4-1 can execute in parallel after Wave 1 completes)
+- **Gates:** 5 review, 2 approve
+
+##### Wave 1: Foundation (no dependencies)
+**Parallel dispatches:** 2
+
+**W1-1: Schema + Migration Framework + BEGIN IMMEDIATE (#213)** -- Weight: M, Gate: review
+- Add `_migrations` table to state-lib.sh: id, version, description, applied_at, checksum
+- Implement `_run_migrations()`: idempotent runner, executes pending migrations in version order
+- Upgrade `state_update()`, `state_cas()`, `state_delete()` from `BEGIN;` to `BEGIN IMMEDIATE;`
+- Wire migration runner into `_state_ensure_schema()` (runs after base table creation)
+- Test: concurrent write test (10 parallel processes, 0 deadlocks), migration idempotency, migration ordering
+- **Integration:** `hooks/state-lib.sh` modified; no new files; no settings.json changes
+
+**W1-2: Proof State Typed Table + API (#214)** -- Weight: L, Gate: review
+- Create migration 001: `proof_state` table (workflow_id PK, status CHECK, epoch, updated_at, updated_by, session_id, pid)
+- Add API: `proof_state_get([WORKFLOW_ID])` -> "status|timestamp|source", `proof_state_set(STATUS, [SOURCE])` -> 0|1
+- Monotonic lattice enforcement via CHECK constraint + application logic for epoch reset
+- Dual-read fallback: if SQLite has no entry, read from flat file `.proof-status-{phash}`
+- Test: CRUD, lattice enforcement, epoch reset, concurrent CAS, dual-read fallback
+- **Integration:** `hooks/state-lib.sh` modified; migration 001 registered in runner
+
+##### Wave 2: Core Migration
+**Parallel dispatches:** 1
+**Blocked by:** W1-1, W1-2
+
+**W2-1: Proof State Hook Migration -- 7 hooks (#215)** -- Weight: XL, Gate: approve, Deps: W1-1, W1-2
+- Migrate 7 hooks from flat-file proof I/O to proof_state API:
+  1. **log.sh**: replace `resolve_proof_file()` callers + `write_proof_status()` internals with `proof_state_set()`
+  2. **pre-bash.sh**: replace `validate_state_file()` + `cut` with `proof_state_get()`
+  3. **task-track.sh**: replace proof file reads/writes with `proof_state_get()`/`proof_state_set()`
+  4. **prompt-submit.sh**: replace `cas_proof_status()` pattern with `proof_state_set()` (lattice handles CAS)
+  5. **check-tester.sh**: replace proof file writes with `proof_state_set("verified")`
+  6. **check-guardian.sh**: replace proof file cleanup with `proof_state_set("committed")`
+  7. **post-write.sh**: replace `resolve_proof_file()` reads with `proof_state_get()`
+- Dual-write preserved during transition: both SQLite typed table and flat file written
+- Test: full proof lifecycle e2e (needs-verification -> pending -> verified -> committed), dual-read verification
+- **Integration:** 7 hook files modified; `resolve_proof_file()` and `write_proof_status()` retained as thin wrappers during dual-write window
+
+##### Wave 3: Agent Markers
+**Parallel dispatches:** 2
+**Blocked by:** W1-1
+
+**W3-1: Agent Marker Typed Table + API (#216)** -- Weight: M, Gate: review, Deps: W1-1
+- Create migration 002: `agent_markers` table (id AUTOINCREMENT, agent_type, session_id, workflow_id, status, pid, created_at, updated_at, trace_id; UNIQUE(agent_type, session_id, workflow_id))
+- Add API: `marker_create()`, `marker_query()` (with PID liveness via kill -0), `marker_cleanup()`
+- Test: CRUD, PID liveness, stale cleanup, concurrent creation
+- **Integration:** `hooks/state-lib.sh` modified; migration 002 registered
+
+**W3-2: Agent Marker Hook Migration -- 4+ hooks (#217)** -- Weight: L, Gate: review, Deps: W1-1, W3-1
+- Migrate hooks from `.active-{type}-{session}-{phash}` dotfile markers to marker API:
+  1. **trace-lib.sh**: marker creation, find_active_trace() -> marker_query(), cleanup
+  2. **session-lib.sh**: session tracking via marker API (replace glob loops)
+  3. **subagent-start.sh**: marker creation at dispatch
+  4. **task-track.sh**: marker_query("guardian") replaces glob `.active-guardian-*`
+  5. **check-implementer.sh**: marker_query("implementer") replaces glob
+  6. **check-guardian.sh**: marker_cleanup() replaces rm `.active-guardian-*`
+  7. **post-write.sh**: marker_query() replaces glob `.active-guardian-*`/`.active-autoverify-*`
+- Dual-read: SQLite primary, glob fallback for 2 releases
+- Test: marker lifecycle e2e, cross-hook consistency
+- **Integration:** 7 hook files modified; `.active-*` dotfile creation retained during dual-write window
+
+##### Wave 4: Event Ledger
+**Parallel dispatches:** 1
+**Blocked by:** W1-1
+
+**W4-1: Event Ledger + Checkpoint System (#218)** -- Weight: M, Gate: review, Deps: W1-1
+- Create migration 003: `events` table (seq AUTOINCREMENT, type, workflow_id, session_id, payload JSON, created_at; INDEX on type+created_at; cap TRIGGER at 5000 per workflow)
+- Create migration 004: `event_checkpoints` table (consumer PK, last_seq, updated_at)
+- Add API: `state_emit()`, `state_events_since()`, `state_checkpoint()`, `state_gc_events()`
+- Test: emit/consume cycle, multiple consumers, GC, concurrent emits, type filtering
+- **Integration:** `hooks/state-lib.sh` modified; migrations 003-004 registered
+
+##### Wave 5: Completion
+**Parallel dispatches:** 2
+**Blocked by:** W2-1, W3-2, W4-1
+
+**W5-1: Remaining Hook Migrations + Remove Type Guards (#219)** -- Weight: L, Gate: review, Deps: W2-1, W3-2, W4-1
+- Migrate remaining hooks: stop.sh, compact-preserve.sh, session-init.sh, session-lib.sh, test-runner.sh, session-end.sh
+- Remove ALL `type state_update &>/dev/null && ... || true` patterns (5 sites across 4 files)
+- Emit events from key lifecycle points (session start/end, agent dispatch, proof transitions)
+- Test: grep-based validation (no `type state_update` guards remain), full lifecycle e2e
+- **Integration:** 6 hook files modified; `db-guardian-lib.sh` updated (remove type guard)
+
+**W5-2: Lint Enforcement + Legacy Code Removal (#220)** -- Weight: M, Gate: approve, Deps: W5-1
+- Add lint.sh gate: deny direct dotfile state I/O in hook source code
+- Remove legacy code: `_legacy_state_update()`, `_legacy_state_read()`, state.json, flat-file proof/test status, old lock files
+- Remove dual-read fallback paths from all hooks
+- Test: lint validation catches intentional violations, all 200+ tests pass with legacy removed
+- **Integration:** `hooks/lint.sh`, `hooks/state-lib.sh`, `hooks/core-lib.sh` modified; flat files deleted
+
+##### Wave 6: Advanced Integration
+**Parallel dispatches:** 1
+**Blocked by:** W4-1, W5-1
+
+**W6-1: Event-Driven Governor Triggers + Observatory Signals (#221)** -- Weight: L, Gate: review, Deps: W4-1, W5-1
+- Wire session-init.sh: query pending events for governor auto-trigger (threshold: 3 assessment events)
+- Wire observatory: consume events via `state_events_since("observatory")`, checkpoint after analysis
+- Wire lifecycle event emission: proof transitions, agent starts/stops, session boundaries
+- Test: governor trigger threshold, observatory consumption, event emission from lifecycle hooks
+- **Integration:** `hooks/session-init.sh`, `hooks/state-lib.sh`, `observatory/` modified
+
+##### Critical Files
+- `hooks/state-lib.sh` -- primary target: migration framework, typed APIs, event ledger (all waves)
+- `hooks/log.sh` -- resolve_proof_file() and write_proof_status() migration (W2-1)
+- `hooks/trace-lib.sh` -- heaviest marker user: create/query/cleanup/finalize (W3-2)
+- `hooks/pre-bash.sh` -- proof gate read migration (W2-1)
+- `hooks/task-track.sh` -- proof and marker reads (W2-1, W3-2)
+- `hooks/session-init.sh` -- migration runner invocation, event-based governor trigger (W5-1, W6-1)
+- `hooks/core-lib.sh` -- protected registry update, read_test_status migration (W5-2)
+- `hooks/lint.sh` -- new dotfile I/O deny rule (W5-2)
+
+##### Decision Log
+<!-- Guardian appends here after wave completion -->
+
+#### State Unification Worktree Strategy
+
+Main is sacred. Each wave dispatches parallel worktrees:
+- **Wave 1:** `.worktrees/su-w1-schema` on branch `feature/su-w1-schema` (W1-1), `.worktrees/su-w1-proof-table` on branch `feature/su-w1-proof-table` (W1-2)
+- **Wave 2:** `.worktrees/su-w2-proof-migration` on branch `feature/su-w2-proof-migration` (W2-1)
+- **Wave 3:** `.worktrees/su-w3-markers-table` on branch `feature/su-w3-markers-table` (W3-1), `.worktrees/su-w3-markers-migration` on branch `feature/su-w3-markers-migration` (W3-2)
+- **Wave 4:** `.worktrees/su-w4-events` on branch `feature/su-w4-events` (W4-1)
+- **Wave 5:** `.worktrees/su-w5-remaining` on branch `feature/su-w5-remaining` (W5-1), `.worktrees/su-w5-cleanup` on branch `feature/su-w5-cleanup` (W5-2)
+- **Wave 6:** `.worktrees/su-w6-integration` on branch `feature/su-w6-integration` (W6-1)
+
+#### State Unification References
+
+- Existing state API: `hooks/state-lib.sh` (state_update, state_read, state_cas, state_delete, workflow_id)
+- Proof state management: `hooks/log.sh` (resolve_proof_file, write_proof_status)
+- Agent marker management: `hooks/trace-lib.sh` (.active-* dotfile lifecycle)
+- Protected state registry: `hooks/core-lib.sh` (_PROTECTED_STATE_FILES array)
+- SQLite state store Wave 1 (parked): Issues #128-#134; 8 planning decisions DEC-SQLITE-001 through 008
+- State Management Reliability (completed): 10 decisions DEC-STATE-001 through DEC-STATE-AUDIT-001
+- Robust State Management (completed): 6 decisions DEC-RSM-REGISTRY-001 through DEC-RSM-SELFCHECK-001
+- Database Safety state.db protection: `hooks/pre-bash.sh` Check DB-SAFE-A1 (blocks direct sqlite3 to state.db)
+- Deep research: Task context analysis (3-provider consensus on BEGIN IMMEDIATE, typed schema, migration discipline)
+
+---
+
 ## Completed Initiatives
 
 | Initiative | Period | Phases | Key Decisions | Archived |
@@ -882,6 +1225,6 @@ Issues not belonging to any active initiative. Tracked for future consideration.
 | #37 | Close Write-tool loophole for .proof-status bypass | **Active** — Phase 0 of Robust State Management |
 | #36 | Evaluate Opus for implementer agent | Not in remediation scope |
 | #25 | Create unified model provider library | Not in remediation scope |
-| SQLite Unified State Store (#128-#134) | SQLite WAL state backend replacing flat-file state. Wave 1 (core API + tests) merged to main. Waves 2-4 pending: hook integration, migration, cleanup. 8 planning decisions (DEC-SQLITE-001 through 008). | Park until prompt restoration completes. Wave 1 code is stable and tested in main. Reactivate when ready to replace flat-file state system-wide. |
+| SQLite Unified State Store (#128-#134) | SQLite WAL state backend replacing flat-file state. Wave 1 (core API + tests) merged to main. Waves 2-4 pending: hook integration, migration, cleanup. 8 planning decisions (DEC-SQLITE-001 through 008). | **Superseded** by State Unification initiative (active). Wave 1 code (state-lib.sh API) is the foundation that State Unification builds on. Remaining waves (hook integration, migration, cleanup) are covered by State Unification W2-W5. |
 | Operational Mode System (#114-#118) | 4-tier mode taxonomy (Observe/Amend/Patch/Build) with escalation engine and hook integration. 9 planning decisions. Deep-research validated. | Ambitious for current project scale. Revisit when multi-user or multi-project usage patterns emerge. |
 | Backlog Auto-Capture (cancelled) | Automatic issue creation from conversation keywords. 5 planning decisions. | Cancelled (DEC-RECK-006): manual /backlog command is sufficient. prompt-submit.sh already auto-detects deferred-work language. |
