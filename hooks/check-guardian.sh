@@ -158,6 +158,16 @@ COMPLIANCE_GUARDIAN_INIT_EOF
     # finalize_trace MUST run before advisory checks (get_git_state etc.) to prevent stale markers.
     # See DEC-STALE-MARKER-001: advisory checks can consume the 5s budget before this runs.
     finalize_trace "$TRACE_ID" "$PROJECT_ROOT" "guardian" || true
+
+    # --- W3-2: PRIMARY — SQLite marker_update to 'completed' (DEC-STATE-UNIFY-004) ---
+    # finalize_trace already cleaned the dotfile marker (.active-guardian-*).
+    # Update the SQLite marker to 'completed' so marker_query reflects the transition.
+    # Uses session+workflow_id to scope the update. require_state is idempotent.
+    require_state 2>/dev/null || true
+    _CG_SESSION="${CLAUDE_SESSION_ID:-$$}"
+    _CG_WF_ID=$(workflow_id 2>/dev/null || echo "main")
+    marker_update "guardian" "$_CG_SESSION" "$_CG_WF_ID" "completed" "${TRACE_ID}" 2>/dev/null || true
+    # DUAL-WRITE: dotfile cleanup already handled by finalize_trace (W5-2 remove comment)
 fi
 
 get_git_state "$PROJECT_ROOT"

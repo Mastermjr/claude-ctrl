@@ -178,52 +178,98 @@ MANIFEST
 #
 #   Only emit_deny when the trace manifest shows status="active" (genuine conflict)
 #   or when a pre-dispatch marker is < 120s old (agent startup window).
+#
+# @decision DEC-STATE-UNIFY-004
+# @title W3-2: SQLite PRIMARY marker detection in Gate A.0 with dotfile fallback
+# @status accepted
+# @rationale marker_query provides PID liveness self-healing — dead-PID markers
+#   are automatically marked 'crashed' and excluded from results, eliminating the
+#   TTL-only staleness problem. Dotfile glob is kept as FALLBACK (W5-2 remove)
+#   for markers written by init_trace() before W3-2 migration completes.
 if [[ "$AGENT_TYPE" == "guardian" ]]; then
     _PHASH_A0=$(project_hash "$PROJECT_ROOT")
-    _EXISTING_MARKER=$(find "$TRACE_STORE" -name ".active-guardian-*-${_PHASH_A0}" -newer "$TRACE_STORE" -mmin -10 2>/dev/null | head -1)
-    if [[ -n "$_EXISTING_MARKER" ]]; then
-        # Check if the marker is within TTL (600s)
-        _MARKER_AGE=$(( $(date +%s) - $(_file_mtime "$_EXISTING_MARKER") ))
-        if [[ "$_MARKER_AGE" -lt 600 ]]; then
-            # Read marker content to distinguish active vs stale markers.
-            _MARKER_CONTENT=$(cat "$_EXISTING_MARKER" 2>/dev/null || echo "")
 
-            if [[ "$_MARKER_CONTENT" == "pre-dispatch|"* ]]; then
-                # Pre-dispatch format: agent was dispatched but init_trace() never ran.
-                # The embedded timestamp tells us when the dispatch happened.
-                # If > 120s ago, the agent never started — treat as stale.
-                _PD_EPOCH=$(echo "$_MARKER_CONTENT" | cut -d'|' -f2)
-                _PD_AGE=$(( $(date +%s) - ${_PD_EPOCH:-0} ))
-                if [[ "$_PD_AGE" -ge 120 ]]; then
-                    # Agent never started (or crashed before init_trace). Clean and allow.
-                    rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
-                    # Fall through — no deny
-                else
-                    _write_gate_denied_trace "guardian" "gate-a0-duplicate" "Guardian dispatch in progress (marker age: ${_MARKER_AGE}s, dispatch age: ${_PD_AGE}s)" 2>/dev/null || true
-                    emit_deny "Cannot dispatch Guardian: a Guardian dispatch is in progress for this project (marker age: ${_MARKER_AGE}s, dispatch age: ${_PD_AGE}s). Wait for agent startup to complete or for the 120s window to expire."
-                fi
-            elif [[ "$_MARKER_CONTENT" != *"|"* && -n "$_MARKER_CONTENT" ]]; then
-                # Trace ID format: look up manifest.status to determine if genuinely active.
-                _A0_MANIFEST="${TRACE_STORE}/${_MARKER_CONTENT}/manifest.json"
-                _A0_STATUS=$(jq -r '.status // "unknown"' "$_A0_MANIFEST" 2>/dev/null || echo "unknown")
-                if [[ "$_A0_STATUS" == "completed" || "$_A0_STATUS" == "crashed" ]]; then
-                    # Trace already finalized — marker is stale (finalize_trace cleanup failed).
-                    # Clean it and allow dispatch. Mirrors DEC-STALE-MARKER-003 (Gate B).
-                    rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
-                    # Fall through — no deny
-                elif [[ "$_A0_STATUS" == "active" ]]; then
-                    _write_gate_denied_trace "guardian" "gate-a0-duplicate" "Another Guardian already active (trace: ${_MARKER_CONTENT}, age: ${_MARKER_AGE}s)" 2>/dev/null || true
-                    emit_deny "Cannot dispatch Guardian: another Guardian is already active for this project (trace: ${_MARKER_CONTENT}, age: ${_MARKER_AGE}s). Wait for it to complete or clean stale markers."
-                else
-                    # Unknown/missing manifest — treat as stale, clean and allow.
-                    # No manifest means init_trace never ran or trace dir was deleted.
-                    rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
-                    # Fall through — no deny
-                fi
-            else
-                # Unknown marker format — treat as stale, clean and allow.
+    # --- W3-2: PRIMARY detection via SQLite marker_query ---
+    # require_state is idempotent; already called above via require_trace path.
+    require_state 2>/dev/null || true
+    _A0_SQL_MARKERS=$(marker_query "guardian" "$(workflow_id 2>/dev/null || echo "main")" 2>/dev/null || echo "")
+
+    if [[ -n "$_A0_SQL_MARKERS" ]]; then
+        # Active guardian found in SQLite — check if pre-dispatch or genuinely active
+        _A0_SQL_STATUS=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f4 | head -1)
+        _A0_SQL_CREATED=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f6 | head -1)
+        _A0_NOW=$(date +%s)
+        _A0_MARKER_AGE=$(( _A0_NOW - ${_A0_SQL_CREATED:-0} ))
+
+        if [[ "$_A0_SQL_STATUS" == "pre-dispatch" ]]; then
+            if [[ "$_A0_MARKER_AGE" -ge 120 ]]; then
+                # Pre-dispatch marker is stale — agent never started. Clean SQLite marker.
+                _A0_SQL_SESSION=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f2 | head -1)
+                _A0_SQL_WF=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f3 | head -1)
+                marker_update "guardian" "$_A0_SQL_SESSION" "$_A0_SQL_WF" "crashed" 2>/dev/null || true
+                # Also clean dotfile fallback (W5-2 remove)
                 rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
                 # Fall through — no deny
+            else
+                _write_gate_denied_trace "guardian" "gate-a0-duplicate" "Guardian dispatch in progress (age: ${_A0_MARKER_AGE}s, SQLite pre-dispatch)" 2>/dev/null || true
+                emit_deny "Cannot dispatch Guardian: a Guardian dispatch is in progress for this project (age: ${_A0_MARKER_AGE}s). Wait for agent startup to complete or for the 120s window to expire."
+            fi
+        elif [[ "$_A0_SQL_STATUS" == "active" ]]; then
+            _A0_SQL_TRACE=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f7 | head -1)
+            # Check if the trace manifest confirms active status
+            _A0_MANIFEST="${TRACE_STORE}/${_A0_SQL_TRACE}/manifest.json"
+            _A0_MF_STATUS="unknown"
+            [[ -n "$_A0_SQL_TRACE" && -f "$_A0_MANIFEST" ]] && \
+                _A0_MF_STATUS=$(jq -r '.status // "unknown"' "$_A0_MANIFEST" 2>/dev/null || echo "unknown")
+            if [[ "$_A0_MF_STATUS" == "completed" || "$_A0_MF_STATUS" == "crashed" ]]; then
+                # Trace finalized but SQLite marker not cleaned — stale.
+                _A0_SQL_SESSION=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f2 | head -1)
+                _A0_SQL_WF=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f3 | head -1)
+                marker_update "guardian" "$_A0_SQL_SESSION" "$_A0_SQL_WF" "completed" 2>/dev/null || true
+                rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                # Fall through — no deny
+            else
+                _write_gate_denied_trace "guardian" "gate-a0-duplicate" "Another Guardian already active (SQLite marker, age: ${_A0_MARKER_AGE}s)" 2>/dev/null || true
+                emit_deny "Cannot dispatch Guardian: another Guardian is already active for this project (age: ${_A0_MARKER_AGE}s). Wait for it to complete or clean stale markers."
+            fi
+        fi
+    else
+        # --- W3-2: FALLBACK — dotfile glob detection (W5-2 remove) ---
+        _EXISTING_MARKER=$(find "$TRACE_STORE" -name ".active-guardian-*-${_PHASH_A0}" -newer "$TRACE_STORE" -mmin -10 2>/dev/null | head -1)
+        if [[ -n "$_EXISTING_MARKER" ]]; then
+            # Check if the marker is within TTL (600s)
+            _MARKER_AGE=$(( $(date +%s) - $(_file_mtime "$_EXISTING_MARKER") ))
+            if [[ "$_MARKER_AGE" -lt 600 ]]; then
+                # Read marker content to distinguish active vs stale markers.
+                _MARKER_CONTENT=$(cat "$_EXISTING_MARKER" 2>/dev/null || echo "")
+
+                if [[ "$_MARKER_CONTENT" == "pre-dispatch|"* ]]; then
+                    _PD_EPOCH=$(echo "$_MARKER_CONTENT" | cut -d'|' -f2)
+                    _PD_AGE=$(( $(date +%s) - ${_PD_EPOCH:-0} ))
+                    if [[ "$_PD_AGE" -ge 120 ]]; then
+                        rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                        # Fall through — no deny
+                    else
+                        _write_gate_denied_trace "guardian" "gate-a0-duplicate" "Guardian dispatch in progress (marker age: ${_MARKER_AGE}s, dispatch age: ${_PD_AGE}s)" 2>/dev/null || true
+                        emit_deny "Cannot dispatch Guardian: a Guardian dispatch is in progress for this project (marker age: ${_MARKER_AGE}s, dispatch age: ${_PD_AGE}s). Wait for agent startup to complete or for the 120s window to expire."
+                    fi
+                elif [[ "$_MARKER_CONTENT" != *"|"* && -n "$_MARKER_CONTENT" ]]; then
+                    _A0_MANIFEST="${TRACE_STORE}/${_MARKER_CONTENT}/manifest.json"
+                    _A0_STATUS=$(jq -r '.status // "unknown"' "$_A0_MANIFEST" 2>/dev/null || echo "unknown")
+                    if [[ "$_A0_STATUS" == "completed" || "$_A0_STATUS" == "crashed" ]]; then
+                        rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                        # Fall through — no deny
+                    elif [[ "$_A0_STATUS" == "active" ]]; then
+                        _write_gate_denied_trace "guardian" "gate-a0-duplicate" "Another Guardian already active (trace: ${_MARKER_CONTENT}, age: ${_MARKER_AGE}s)" 2>/dev/null || true
+                        emit_deny "Cannot dispatch Guardian: another Guardian is already active for this project (trace: ${_MARKER_CONTENT}, age: ${_MARKER_AGE}s). Wait for it to complete or clean stale markers."
+                    else
+                        rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                        # Fall through — no deny
+                    fi
+                else
+                    rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                    # Fall through — no deny
+                fi
             fi
         fi
     fi
@@ -327,7 +373,15 @@ if [[ "$AGENT_TYPE" == "guardian" ]]; then
         mkdir -p "$TRACE_STORE" 2>/dev/null || true
         # Guardian is taking over — auto-verify protection no longer needed.
         # Clean project-scoped auto-verify markers before creating the guardian marker.
+        # W3-2: Also clean SQLite autoverify markers.
+        marker_update "autoverify" "$_SESSION" "$(workflow_id 2>/dev/null || echo "main")" "completed" 2>/dev/null || true
         rm -f "${TRACE_STORE}/.active-autoverify-"*"-${_PHASH}" 2>/dev/null || true
+
+        # --- W3-2: PRIMARY — SQLite pre-dispatch marker (DEC-STATE-UNIFY-004) ---
+        _TT_WF_ID=$(workflow_id 2>/dev/null || echo "main")
+        marker_create "guardian" "$_SESSION" "$_TT_WF_ID" "$$" "" "pre-dispatch" 2>/dev/null || true
+
+        # DUAL-WRITE: dotfile (W5-2 remove)
         _GUARDIAN_MARKER="${TRACE_STORE}/.active-guardian-${_SESSION}-${_PHASH}"
         echo "pre-dispatch|$(date +%s)" > "$_GUARDIAN_MARKER"
 

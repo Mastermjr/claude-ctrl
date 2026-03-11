@@ -50,6 +50,22 @@ case "$AGENT_TYPE" in
         if [[ -n "$TRACE_ID" ]]; then
             TRACE_DIR="${TRACE_STORE}/${TRACE_ID}"
         fi
+
+        # --- W3-2: PRIMARY — SQLite marker_create at trace init time (DEC-STATE-UNIFY-004) ---
+        # init_trace() writes a dotfile .active-TYPE-SESSION-PHASH marker.
+        # We dual-write to SQLite as PRIMARY so marker_query can detect active agents.
+        # require_state is idempotent (already loaded via require_trace → trace-lib.sh).
+        # Only write for governance agents that have marker lifecycle (not Bash/Explore).
+        if [[ -n "$TRACE_ID" ]]; then
+            require_state 2>/dev/null || true
+            _SAS_SESSION="${CLAUDE_SESSION_ID:-$$}"
+            _SAS_WF_ID=$(workflow_id 2>/dev/null || echo "main")
+            _SAS_AGENT_LOWER=$(echo "${AGENT_TYPE:-unknown}" | tr '[:upper:]' '[:lower:]')
+            marker_create "$_SAS_AGENT_LOWER" "$_SAS_SESSION" "$_SAS_WF_ID" "$$" "$TRACE_ID" "active" 2>/dev/null || true
+            log_info "SUBAGENT-START" "W3-2: SQLite marker created for ${_SAS_AGENT_LOWER} trace=${TRACE_ID}"
+        fi
+        # DUAL-WRITE: dotfile .active-TYPE-SESSION-PHASH already written by init_trace() above.
+
         # Write .last-tester-trace breadcrumb at trace creation time for tester agents.
         #
         # @decision DEC-AV-BREADCRUMB-002

@@ -249,6 +249,12 @@ if [[ "$PROOF_STATUS" == "pending" || "$PROOF_STATUS" == "needs-verification" ]]
         _AV_SESSION_CT="${CLAUDE_SESSION_ID:-$$}"
         _AV_PHASH_CT=$(project_hash "$PROJECT_ROOT")
         mkdir -p "$TRACE_STORE" 2>/dev/null || true
+
+        # --- W3-2: PRIMARY — SQLite marker_create for autoverify (DEC-STATE-UNIFY-004) ---
+        require_state 2>/dev/null || true
+        _AV_WF_CT=$(workflow_id 2>/dev/null || echo "main")
+        marker_create "autoverify" "$_AV_SESSION_CT" "$_AV_WF_CT" "$$" "" "active" 2>/dev/null || true
+        # DUAL-WRITE: dotfile (W5-2 remove)
         echo "auto-verify|$(date +%s)" > "${TRACE_STORE}/.active-autoverify-${_AV_SESSION_CT}-${_AV_PHASH_CT}"
         # --- W2-1: PRIMARY write to SQLite via proof_state_set (DEC-STATE-UNIFY-004) ---
         declare -f proof_state_set >/dev/null 2>&1 && \
