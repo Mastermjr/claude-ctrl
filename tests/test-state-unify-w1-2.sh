@@ -313,16 +313,15 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T09: Dual-read fallback — reads flat file when SQLite empty
+# T09: No flat-file fallback — proof_state_get returns empty when SQLite empty
 # ─────────────────────────────────────────────────────────────────────────────
-run_test "T09: Dual-read fallback — proof_state_get reads flat file when SQLite empty"
+run_test "T09: proof_state_get returns empty when SQLite has no entry (no flat-file fallback since W5-2)"
 _setup t09
 
 # Bootstrap schema (creates DB but no proof_state rows)
 _run_state "$_CD" "$_PR" "state_update 'bootstrap' 'yes' 'test'" >/dev/null || true
 
 # Compute project hash the same way state-lib.sh does
-# (shasum on macOS, sha256sum on Linux)
 if command -v shasum >/dev/null 2>&1; then
     _T09_PHASH=$(echo "$_PR" | shasum -a 256 | cut -c1-8)
 elif command -v sha256sum >/dev/null 2>&1; then
@@ -331,20 +330,18 @@ else
     _T09_PHASH="00000000"
 fi
 
+# Write ONLY to flat file — SQLite proof_state table is empty
 mkdir -p "${_CD}/state/${_T09_PHASH}"
 _T09_TS=$(date +%s)
 printf 'pending|%s' "$_T09_TS" > "${_CD}/state/${_T09_PHASH}/proof-status"
 
+# W5-2: proof_state_get() must return empty (no flat-file fallback)
 _T09_RESULT=$(_run_state "$_CD" "$_PR" "proof_state_get") || true
 
-# Should return something pipe-delimited with 'pending' as first field
-_T09_STATUS=$(echo "$_T09_RESULT" | cut -d'|' -f1 || true)
-_T09_SOURCE=$(echo "$_T09_RESULT" | cut -d'|' -f4 || true)
-
-if [[ "$_T09_STATUS" == "pending" ]] && [[ "$_T09_SOURCE" == "flat-file-fallback" ]]; then
+if [[ -z "$_T09_RESULT" ]]; then
     pass_test
 else
-    fail_test "Expected pending|...|...|flat-file-fallback; got '${_T09_RESULT}'"
+    fail_test "proof_state_get should return empty (W5-2 removed flat-file fallback); got '${_T09_RESULT}'"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

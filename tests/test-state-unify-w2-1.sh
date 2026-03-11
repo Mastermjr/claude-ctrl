@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# test-state-unify-w2-1.sh — Tests for State Unification Wave 2-1.
+# test-state-unify-w2-1.sh — Tests for State Unification Wave 2-1 (updated for W5-2).
 #
 # Validates: 7 hooks migrated from flat-file proof I/O to proof_state_get/proof_state_set API.
-# Each hook must:
+# Since W5-2, SQLite is the SOLE authority for proof state. Each hook must:
 #   1. Call proof_state_set() as the PRIMARY write
-#   2. Maintain dual-write to flat files (DEC-STATE-UNIFY-004)
-#   3. Read via proof_state_get() (with flat-file fallback)
+#   2. NOT write to flat files (dual-write removed in W5-2)
+#   3. Read via proof_state_get() (no flat-file fallback)
 #
 # Tests:
 #   T01: log.sh write_proof_status() calls proof_state_set (SQLite has entry after write)
-#   T02: log.sh write_proof_status() still writes flat file (dual-write)
+#   T02: log.sh write_proof_status() does NOT write flat file (SQLite-only since W5-2)
 #   T03: pre-bash.sh reads proof status via proof_state_get (mock test)
 #   T04: task-track.sh writes needs-verification via proof_state_set
 #   T05: prompt-submit.sh cas_proof_status writes verified via proof_state_set
 #   T06: Full lifecycle: needs-verification → pending → verified → committed via SQLite
-#   T07: Dual-write consistency — SQLite and flat file agree after each transition
-#   T08: Fallback — when SQLite empty, hooks read flat file correctly
+#   T07: SQLite-only consistency — proof_state_set/get round-trip works correctly
+#   T08: No flat-file fallback — proof_state_get returns empty when SQLite has no entry
 #
 # Usage: bash tests/test-state-unify-w2-1.sh
 #
@@ -26,6 +26,7 @@
 #   fresh flat files to confirm that proof_state_set/get work independently of
 #   any prior state. Same pattern as DEC-STATE-UNIFY-TEST-001 (W1-1 tests).
 #   Lifecycle test (T06) uses a shared DB to verify multi-transition correctness.
+#   Tests updated in W5-2 to reflect SQLite-only proof state (no flat-file writes or fallback).
 
 set -uo pipefail
 
@@ -136,9 +137,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T02: log.sh write_proof_status() dual-writes to flat file
+# T02: log.sh write_proof_status() does NOT write flat file (SQLite-only, W5-2)
 # ─────────────────────────────────────────────────────────────────────────────
-run_test "T02: write_proof_status() still dual-writes to flat file"
+run_test "T02: write_proof_status() does NOT write flat file (SQLite-only since W5-2)"
 
 _setup "t02"
 _T02_RESULT=$(_run_state "$_CD" "$_PR" "
@@ -149,20 +150,18 @@ new_path=\"\${CLAUDE_DIR}/state/\${phash}/proof-status\"
 old_path=\"\${CLAUDE_DIR}/.proof-status-\${phash}\"
 found_flat=''
 if [[ -f \"\$new_path\" ]]; then
-    val=\$(cut -d'|' -f1 \"\$new_path\" 2>/dev/null || echo '')
-    [[ \"\$val\" == 'pending' ]] && found_flat='new:pending'
+    found_flat='new_flat_exists'
 fi
-if [[ -z \"\$found_flat\" && -f \"\$old_path\" ]]; then
-    val=\$(cut -d'|' -f1 \"\$old_path\" 2>/dev/null || echo '')
-    [[ \"\$val\" == 'pending' ]] && found_flat='old:pending'
+if [[ -f \"\$old_path\" ]]; then
+    found_flat='old_flat_exists'
 fi
-echo \"\${found_flat:-NOT_FOUND}\"
+echo \"\${found_flat:-NO_FLAT_FILE}\"
 " 2>/dev/null)
 
-if [[ "$_T02_RESULT" == "new:pending" || "$_T02_RESULT" == "old:pending" ]]; then
+if [[ "$_T02_RESULT" == "NO_FLAT_FILE" ]]; then
     pass_test
 else
-    fail_test "write_proof_status did not write to flat file (got: '$_T02_RESULT')"
+    fail_test "write_proof_status wrote to flat file — dual-write should be removed in W5-2 (got: '$_T02_RESULT')"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -254,9 +253,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T07: Dual-write consistency — SQLite and flat file agree after write
+# T07: SQLite-only consistency — proof_state_set/get round-trip works correctly
 # ─────────────────────────────────────────────────────────────────────────────
-run_test "T07: Dual-write consistency — SQLite and flat file agree after write_proof_status"
+run_test "T07: SQLite-only consistency — proof_state_set writes and proof_state_get reads same value"
 
 _setup "t07"
 # Write a temp script so we avoid complex quoting in the heredoc
@@ -269,74 +268,59 @@ _WORKFLOW_ID=''
 source "${HOOKS_DIR}/log.sh" 2>/dev/null || true
 write_proof_status "verified" "$PROJECT_ROOT" 2>/dev/null || true
 
-# Read SQLite directly via proof_state_get, but detect if it's from SQLite or flat-file
-# proof_state_get returns "status|epoch|updated_at|updated_by"
-# If updated_by == "flat-file-fallback", the row is from a flat file, not SQLite
+# Read back via proof_state_get — must return "verified" from SQLite
 result=$(proof_state_get 2>/dev/null || echo "")
-sqlite_status="missing_sqlite"
 if [[ -n "$result" ]]; then
     status=$(echo "$result" | cut -d'|' -f1)
     source_field=$(echo "$result" | cut -d'|' -f4)
     if [[ "$source_field" == "flat-file-fallback" ]]; then
-        sqlite_status="missing_sqlite"
+        echo "FROM_FLAT_FILE"
+    elif [[ "$status" == "verified" ]]; then
+        echo "SQLITE_CONSISTENT:verified"
     else
-        sqlite_status="$status"
+        echo "WRONG_STATUS:$status"
     fi
-fi
-
-# Read flat file
-phash=$(project_hash "$PROJECT_ROOT")
-new_path="${CLAUDE_DIR}/state/${phash}/proof-status"
-old_path="${CLAUDE_DIR}/.proof-status-${phash}"
-flat_status="missing_flat"
-if [[ -f "$new_path" ]]; then
-    flat_status=$(cut -d'|' -f1 "$new_path" 2>/dev/null || echo "missing_flat")
-elif [[ -f "$old_path" ]]; then
-    flat_status=$(cut -d'|' -f1 "$old_path" 2>/dev/null || echo "missing_flat")
-fi
-
-if [[ "$sqlite_status" == "$flat_status" && "$sqlite_status" == "verified" ]]; then
-    echo "CONSISTENT:${sqlite_status}"
 else
-    echo "MISMATCH:sqlite=${sqlite_status}:flat=${flat_status}"
+    echo "NOT_FOUND"
 fi
 SCRIPT_EOF
 chmod +x "$_T07_SCRIPT"
 _T07_RESULT=$(HOOKS_DIR="$HOOKS_DIR" CLAUDE_DIR="$_CD" PROJECT_ROOT="$_PR" CLAUDE_PROJECT_DIR="$_PR" CLAUDE_SESSION_ID="test-session-$$" bash "$_T07_SCRIPT" 2>/dev/null)
 
-if [[ "$_T07_RESULT" == CONSISTENT:* ]]; then
+if [[ "$_T07_RESULT" == "SQLITE_CONSISTENT:verified" ]]; then
     pass_test
 else
-    fail_test "SQLite and flat file disagree (got: '$_T07_RESULT')"
+    fail_test "SQLite round-trip failed (got: '$_T07_RESULT')"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T08: Fallback — when SQLite empty, proof_state_get reads flat file
+# T08: No flat-file fallback — proof_state_get returns empty when SQLite empty
 # ─────────────────────────────────────────────────────────────────────────────
-run_test "T08: proof_state_get fallback — reads flat file when SQLite has no entry"
+run_test "T08: proof_state_get returns empty when SQLite has no entry (no flat-file fallback)"
 
 _setup "t08"
 _T08_RESULT=$(_run_state "$_CD" "$_PR" '
 # Write ONLY to flat file — do NOT call proof_state_set
+# W5-2: proof_state_get() should NOT fall back to flat file
 phash=$(project_hash "$PROJECT_ROOT")
 mkdir -p "${CLAUDE_DIR}/state/${phash}"
 new_path="${CLAUDE_DIR}/state/${phash}/proof-status"
 printf "needs-verification|%s\n" "$(date +%s)" > "$new_path"
 
-# Now proof_state_get should fall back to the flat file
+# proof_state_get must return empty (SQLite is empty, no fallback)
 result=$(proof_state_get 2>/dev/null || echo "")
-if [[ -n "$result" ]]; then
-    status=$(echo "$result" | cut -d"|" -f1)
-    echo "$status"
+if [[ -z "$result" ]]; then
+    echo "EMPTY"
 else
-    echo "NOT_FOUND"
+    status=$(echo "$result" | cut -d"|" -f1)
+    echo "GOT_VALUE:$status"
 fi
 ' 2>/dev/null)
 
-if [[ "$_T08_RESULT" == "needs-verification" ]]; then
+if [[ "$_T08_RESULT" == "EMPTY" ]]; then
     pass_test
 else
-    fail_test "proof_state_get did not fall back to flat file (got: '$_T08_RESULT')"
+    fail_test "proof_state_get should return empty (no flat-file fallback in W5-2) but got: '$_T08_RESULT'"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -397,20 +381,19 @@ else
     fail_test "DEC-STATE-UNIFY-004 annotation not found in any of the 7 migrated hooks"
 fi
 
-run_test "T13: W5-2 removal comment present in dual-write sites"
+run_test "T13: write_proof_status() has no flat-file write patterns (W5-2 SQLite-only)"
 
-# Each hook that dual-writes should have a comment noting W5-2 removal
-_T13_FOUND=0
-for hook in log.sh prompt-submit.sh check-tester.sh check-guardian.sh; do
-    if grep -qiE 'W5-2|remove.*dual|dual.*remove' "${HOOKS_DIR}/${hook}" 2>/dev/null; then
-        _T13_FOUND=$((_T13_FOUND + 1))
-    fi
-done
+# W5-2: write_proof_status() must not contain flat-file write patterns.
+# Check that the function body does not contain printf/atomic_write to .proof-status paths.
+_T13_NO_FLAT=0
+if ! grep -qE 'printf.*proof-status|atomic_write.*proof' "${HOOKS_DIR}/log.sh" 2>/dev/null; then
+    _T13_NO_FLAT=1
+fi
 
-if [[ "$_T13_FOUND" -ge 1 ]]; then
+if [[ "$_T13_NO_FLAT" -eq 1 ]]; then
     pass_test
 else
-    fail_test "No W5-2 removal comments found in dual-write hook files"
+    fail_test "write_proof_status() in log.sh still contains flat-file write patterns — should be SQLite-only in W5-2"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -438,16 +421,9 @@ else
     fail_test "test-state-unify-w1-1.sh regression: exit code $_T15_EXIT"
 fi
 
-run_test "T16: Existing test-state-unify-w1-2.sh still passes (regression)"
-
-_T16_EXIT=0
-bash "${TEST_DIR}/test-state-unify-w1-2.sh" >/dev/null 2>&1 || _T16_EXIT=$?
-
-if [[ "$_T16_EXIT" -eq 0 ]]; then
-    pass_test
-else
-    fail_test "test-state-unify-w1-2.sh regression: exit code $_T16_EXIT"
-fi
+# T16: REMOVED in W5-2 cleanup — test-state-unify-w1-2.sh contained stale T09
+# (dual-read fallback test) which was updated alongside this file. Each test suite
+# now runs independently; test-state-unify-w1-2.sh is covered by direct CI invocation.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary

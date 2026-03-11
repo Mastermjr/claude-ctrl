@@ -80,25 +80,27 @@ init_registry() {
     fi
 }
 
-# clean_worktree_state — remove breadcrumb and proof-status files associated with a worktree path.
+# clean_worktree_state — remove breadcrumb, legacy proof-status, and SQLite proof_state
+# entries associated with a worktree path.
 #
 # @decision DEC-WORKTREE-004
-# @title Breadcrumb cleanup on worktree removal
+# @title Breadcrumb and SQLite proof_state cleanup on worktree removal
 # @status accepted
-# @rationale When a worktree is removed (via cleanup or sweep), its associated state files
-#   in ~/.claude/ persist: .active-worktree-path-{phash} breadcrumbs and .active-worktree-path
-#   (legacy). These stale breadcrumbs cause resolve_proof_file() to try to read a now-deleted
-#   worktree path, falling back to the scoped orchestrator file which may contain stale
-#   "verified" status from a prior session. This triggers the dedup guard in check-tester.sh
-#   incorrectly. Cleaning breadcrumbs on worktree removal prevents this class of bug.
-#   The worktree's own .proof-status is inside the directory and removed with it; we only
-#   need to clean the orchestrator-side breadcrumbs and scoped state files.
+# @rationale When a worktree is removed (via cleanup or sweep), its associated state in
+#   ~/.claude/ persists: .active-worktree-path-{phash} breadcrumbs, legacy .proof-status-{phash}
+#   flat files, AND SQLite proof_state rows keyed by workflow_id. All must be cleaned to
+#   prevent stale "verified" proof state from contaminating future sessions.
+#   Since W5-2, proof state lives in SQLite (state/state.db) keyed by workflow_id =
+#   {project_phash}_{worktree_name}. When a worktree is removed, its proof_state row must
+#   be deleted. The project phash is computed from claude_dir (the parent of .worktrees/).
+#   The worktree name is the basename of the worktree directory.
 clean_worktree_state() {
     local worktree_path="$1"
     local claude_dir="${2:-$CLAUDE_STATE_DIR}"
     local cleaned=0
 
-    # Compute the project hash for this worktree path
+    # Compute the project hash for this worktree path (hash of worktree path itself, for
+    # breadcrumb scoping — matches the old flat-file naming convention)
     local phash
     phash=$(echo "$worktree_path" | $_SHA256_CMD | cut -c1-8 2>/dev/null || echo "")
 
@@ -111,12 +113,13 @@ clean_worktree_state() {
             echo "  Cleaned breadcrumb: $scoped_breadcrumb" >&2
         fi
 
-        # Remove scoped proof-status: .proof-status-{phash}
+        # Remove legacy scoped proof-status flat file: .proof-status-{phash}
+        # (no longer written since W5-2, but may exist from pre-migration sessions)
         local scoped_proof="$claude_dir/.proof-status-${phash}"
         if [[ -f "$scoped_proof" ]]; then
             rm -f "$scoped_proof"
             cleaned=$((cleaned + 1))
-            echo "  Cleaned proof-status: $scoped_proof" >&2
+            echo "  Cleaned legacy proof-status: $scoped_proof" >&2
         fi
     fi
 
@@ -129,6 +132,34 @@ clean_worktree_state() {
             rm -f "$legacy_breadcrumb"
             cleaned=$((cleaned + 1))
             echo "  Cleaned legacy breadcrumb: $legacy_breadcrumb" >&2
+        fi
+    fi
+
+    # Clean SQLite proof_state row for this worktree's workflow_id.
+    # workflow_id = {project_phash}_{worktree_name} where:
+    #   project_phash = SHA-256[0:8] of the main project root (claude_dir, parent of .worktrees/)
+    #   worktree_name = basename of worktree_path
+    local state_db="$claude_dir/state/state.db"
+    if [[ -f "$state_db" ]] && command -v sqlite3 >/dev/null 2>&1; then
+        local project_phash wt_name wf_id
+        project_phash=$(echo "$claude_dir" | $_SHA256_CMD | cut -c1-8 2>/dev/null || echo "")
+        wt_name=$(basename "$worktree_path")
+        if [[ -n "$project_phash" && -n "$wt_name" ]]; then
+            wf_id="${project_phash}_${wt_name}"
+            local rows_before rows_after
+            rows_before=$(sqlite3 "$state_db" "SELECT COUNT(*) FROM proof_state WHERE workflow_id='${wf_id}';" 2>/dev/null || echo "0")
+            if [[ "${rows_before:-0}" -gt 0 ]]; then
+                sqlite3 "$state_db" "DELETE FROM proof_state WHERE workflow_id='${wf_id}';" 2>/dev/null || true
+                rows_after=$(sqlite3 "$state_db" "SELECT COUNT(*) FROM proof_state WHERE workflow_id='${wf_id}';" 2>/dev/null || echo "0")
+                if [[ "${rows_after:-1}" -eq 0 ]]; then
+                    cleaned=$((cleaned + 1))
+                    echo "  Cleaned SQLite proof_state: workflow_id=$wf_id" >&2
+                else
+                    echo "  WARNING: SQLite proof_state delete may have failed for workflow_id=$wf_id" >&2
+                fi
+            fi
+            # Also clean history entries for this workflow_id to avoid orphaned audit trail
+            sqlite3 "$state_db" "DELETE FROM history WHERE workflow_id='${wf_id}';" 2>/dev/null || true
         fi
     fi
 

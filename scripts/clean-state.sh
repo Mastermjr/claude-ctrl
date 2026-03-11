@@ -12,7 +12,8 @@
 #   clean-state.sh --clean      — actually remove orphaned files
 #
 # Categories of files managed:
-#   proof-status-*      — project-scoped .proof-status-{phash} files
+#   sqlite-proof-state  — state/state.db proof_state table (active SQLite-backed proof state)
+#   proof-status-*      — LEGACY .proof-status-{phash} flat files (no longer written since W5-2)
 #   test-status         — .test-status (global, not scoped by project)
 #   guardian-start-sha  — .guardian-start-sha-{phash}
 #   last-tester-trace   — .last-tester-trace-{phash}
@@ -81,7 +82,8 @@ Usage: clean-state.sh [--dry-run|--clean]
   --clean    Actually remove identified orphaned and stale state files.
 
 Files audited (in $CLAUDE_DIR/):
-  .proof-status-{phash}            Project-scoped proof status
+  state/state.db (proof_state)     SQLite-backed proof state (active since W5-2)
+  .proof-status-{phash}            LEGACY flat-file proof status (no longer written since W5-2)
   .active-worktree-path-{phash}    Scoped breadcrumbs for worktrees
   .active-worktree-path            Legacy breadcrumb
   .test-status                     Global test result
@@ -91,6 +93,7 @@ Files audited (in $CLAUDE_DIR/):
   .cwd-recovery-needed             CWD recovery canary
 
 Files NEVER removed (persistent cross-session state):
+  state/state.db                   SQLite state database
   .audit-log                       Persistent audit trail
   .plan-drift                      Decision drift data
   .doc-drift                       Documentation drift data
@@ -157,10 +160,44 @@ get_active_worktree_paths() {
 ACTIVE_WORKTREES=$(get_active_worktree_paths)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Proof-status files (.proof-status-{phash})
+# 1. SQLite proof state (state/state.db → proof_state table)
+# Since W5-2, proof state is stored in SQLite. This section reports active
+# proof state entries from the DB. No cleanup is performed here — SQLite entries
+# are managed by proof_state_set()/proof_epoch_reset() in state-lib.sh.
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "${BOLD}1. Proof-status files (.proof-status*)${NC}"
+STATE_DB="$CLAUDE_DIR/state/state.db"
+echo "${BOLD}1. SQLite proof state (state/state.db)${NC}"
+if [[ -f "$STATE_DB" ]] && command -v sqlite3 >/dev/null 2>&1; then
+    _proof_count=$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM proof_state;" 2>/dev/null || echo "0")
+    if [[ "${_proof_count:-0}" -gt 0 ]]; then
+        echo "  Active proof state entries: $_proof_count"
+        sqlite3 "$STATE_DB" "SELECT workflow_id, status, epoch, updated_at, updated_by FROM proof_state;" 2>/dev/null |             while IFS='|' read -r wf_id status epoch updated_at updated_by; do
+                _age=$(($(date +%s) - ${updated_at:-0}))
+                _age_h=$((_age / 3600))
+                echo "  ${GREEN}[sqlite]${NC} workflow=$wf_id status=$status epoch=$epoch age=${_age_h}h updated_by=$updated_by"
+                echo ""
+            done
+    else
+        echo "  No active proof state entries."
+        echo ""
+    fi
+elif [[ -f "$STATE_DB" ]]; then
+    echo "  ${YELLOW}[skip]${NC} sqlite3 not available — cannot query $STATE_DB"
+    echo ""
+else
+    echo "  No state.db found."
+    echo ""
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1b. Legacy proof-status flat files (.proof-status-{phash})
+# These files are no longer written since W5-2 (SQLite is the sole authority).
+# Any remaining files are legacy artifacts from before the migration and can
+# be safely removed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+echo "${BOLD}1b. Legacy proof-status flat files (.proof-status*) [no longer written since W5-2]${NC}"
 FOUND_PROOF=0
 
 for proof_file in "$CLAUDE_DIR"/.proof-status*; do
@@ -174,18 +211,12 @@ for proof_file in "$CLAUDE_DIR"/.proof-status*; do
     age_h=$((age / 3600))
     age_d=$((age / 86400))
 
-    # Age-based staleness: proof-status files older than 7 days are likely stale
-    if [[ "${timestamp:-0}" -gt 0 && "$age_d" -gt 7 ]]; then
-        report_stale_file "$proof_file" "Status='$status', age=${age_d}d (>7 days — likely stale)" "proof-status"
-    else
-        age_str="${age_h}h"
-        [[ "$age_d" -gt 0 ]] && age_str="${age_d}d"
-        echo "  ${GREEN}[valid]${NC} $(basename "$proof_file"): status=$status, age=$age_str"
-        echo ""
-    fi
+    # All legacy flat-file proof-status entries are candidates for removal
+    # (they are no longer written or read by the system since W5-2)
+    report_file "$proof_file" "Legacy flat-file proof state (no longer written since W5-2 — SQLite is the sole authority)" "proof-status-legacy"
 done
 
-[[ "$FOUND_PROOF" -eq 0 ]] && echo "  No proof-status files found." && echo ""
+[[ "$FOUND_PROOF" -eq 0 ]] && echo "  No legacy proof-status flat files found." && echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Test-status file (.test-status)
