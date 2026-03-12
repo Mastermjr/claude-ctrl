@@ -9,34 +9,59 @@
 [![Last commit](https://img.shields.io/github/last-commit/juanandresgs/claude-ctrl)](https://github.com/juanandresgs/claude-ctrl/commits/main)
 [![Shell](https://img.shields.io/badge/language-bash-green.svg)](hooks/)
 
-A batteries-included governance layer for Claude Code. Four specialized agents handle planning, implementation, verification, and git operations. Shell scripts enforce the rules at every lifecycle event, regardless of context window pressure.
-
 **Instructions guide. Hooks enforce.**
 
-*Formerly `claude-system`.*
+A deterministic governance layer for [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that uses shell-script hooks to intercept every tool call —bash commands, file writes, agent dispatches, session boundaries— and mechanically enforce sound principles. Responsibilities are divided between specialized agents (Planner, Implementer, Tester, Guardian) to ensure quality work. The hooks enforce the process so the model can focus on the task at hand.
 
 ---
 
-## Platform at a Glance
+## Design Philosophy
 
-```
-~/.claude/
-├── hooks/          # Hook scripts and shared libraries
-├── agents/         # 4 agent definitions (Planner, Implementer, Tester, Guardian)
-├── skills/         # 11 skills across 3 domains
-├── commands/       # Slash commands (/compact, /backlog)
-├── scripts/        # 7 utility scripts + lib/
-├── observatory/    # Self-improving trace analysis
-├── traces/         # Agent execution archive
-├── tests/          # Hook validation suite
-├── ARCHITECTURE.md # Definitive technical reference (18 sections)
-├── CLAUDE.md       # Session instructions (loaded every time)
-└── settings.json   # Hook registration + model config
-```
+Telling a model to 'never commit on main' works... until context pressure erases the rule. After compaction, under heavy cognitive load, after 40 minutes of deep implementation, the constraints that live in the model's context aren't constraints. At best, they're suggestions. Most of the time, they're prayers.
+
+LLMs are not deterministic systems with probabilistic quirks. They are **probabilistic systems** — and the only way to harness them into producing reliably good outcomes is through deterministic, event-based enforcement. Wiring a hook that fires before every bash command and mechanically denies commits on main works regardless of what the model remembers or forgets or decides to prioritize. Cybernetics gave us a framework to harness these systems decades ago. The hook system enforces standards determinitically. The observatory jots down traces to analyze for each run. That feedback improves performance and guides how the gates adapt. 
+
+Every version teaches me something about how to govern probabilistic systems, and those lessons feed into the next iteration. The end-state goal is an instantiation of what I call **Self-Evaluating Self-Adaptive Programs (SESAPs)**: probabilistic systems constrained to deterministically produce a range of desired outcomes.
+
+Most AI coding harnesses today rely entirely on prompt-level guidance for constraints. So far, Claude Code has the more comprehensive event-based hooks support that serves as the mechanical layer that makes deterministic governance possible. Without it, every session is a bet against context pressure. This project is meant to address the disturbing gap between developers at the frontier and the majority of token junkies vibing at the roulette wheel hoping for a payday.
+
+I've never been much of a gambler myself.
+
+*— [JAGS](https://x.com/juanandres_gs)*
 
 ---
 
-## Without This vs With This
+<h2 align="center">Metanoia v3.0</h2>
+
+<p align="center"><em>metanoia (n.) — a fundamental change in thinking; a transformative shift in approach</em></p>
+
+<p align="center"><strong>617 commits over v2.0</strong> — a ground-up refactor of the hook architecture,<br>state management, and agent governance.</p>
+
+---
+
+### Performance (v2.1 → v3.0)
+
+**BLUF: v3.0 delivers 75% more successes at the same cost per success.** The governance overhead pays for itself.
+
+Measured across 18 trials (3 tasks × 3 trials × 2 configs) using the [Claude Code Performance Harness](https://github.com/juanandresgs/cc-perf-harness).
+
+v3.0 succeeds nearly twice as often across easy, medium, and hard tasks (78% vs 44%). When it fails, it wastes 62% fewer tokens (29% waste ratio vs 76%). It cracked the hard refactoring task that v2.1 couldn't solve at all (33% vs 0%).
+
+The multi-agent pipeline uses ~55% more turns per success (31 vs 20). Governance has a cost. But cost-per-success is identical (+1.3%) because three-quarters of v2.1's token budget went to trials that produced nothing.
+
+| Metric | v2.1 | v3.0 | Delta |
+|--------|------|------|-------|
+| Success Rate | 44% (4/9) | 78% (7/9) | **+77%** |
+| Token Waste Ratio | 76% | 29% | **-62%** |
+| CPSO (tokens/success) | 1,190,572 | 1,206,306 | +1.3% (same cost, 75% more successes) |
+| PAR-10 | 11,246,198 | 5,141,470 | **-54%** |
+| Turns/success | 20.0 | 31.0 | +55% (governance cost) |
+
+<sub>**CPSO** (Cost Per Successful Outcome) = total tokens ÷ successes — includes the cost of failures. **PAR-10** from SAT solver competitions — failed trials count 10× max, punishing unreliable configs. **Token Waste Ratio** = failed tokens ÷ total tokens.</sub>
+
+---
+
+## How It Works
 
 **Default Claude Code** — you describe a feature and:
 
@@ -46,81 +71,60 @@ idea → code → commit → push → discover the mess
 
 The model writes on main, skips tests, force-pushes, and forgets the plan once the context window fills up. Every session is a coin flip.
 
-**With this system** — the same feature request triggers a self-correcting pipeline:
+**With claude-ctrl** — the same feature request triggers a self-correcting pipeline:
 
 ```mermaid
 flowchart TD
-    A([You describe a feature]) --> B
-
-    B["**Planner agent**
-    1a. Problem decomposition with evidence
-    1b. User requirements — P0 / P1 / P2
-    1c. Success metrics
-    2.  Research gate → architecture decision
-    ──────────────────────────────
-    Output: MASTER_PLAN.md + GitHub Issues"]
-
-    B --> C["**Guardian agent**
-    Creates isolated git worktree"]
-
+    A["You describe a feature"] --> B
+    B["<b>Planner</b><br/>Decompose · requirements · architecture<br/>→ MASTER_PLAN.md + GitHub Issues"]
+    B --> C["Orchestrator creates isolated worktree"]
     C --> D
 
-    subgraph D["**Implementer codes**"]
+    subgraph D [" Implementer — every write passes through pre-write.sh gates "]
         direction TB
-        W[write src/] --> TG{tests passing?}
-        TG -- "no → fix" --> W
-        TG -- yes --> PC{plan stale?}
-        PC -- "yes → update" --> W
-        PC -- no --> DG{documented?}
-        DG -- "no → add docs" --> W
-        DG -- yes --> DONE_IMPL[ ]
+        W["Write code"] --> G1{"on main?"}
+        G1 -->|"yes · deny"| W
+        G1 -->|"no"| G2{"plan exists?"}
+        G2 -->|"no · deny"| W
+        G2 -->|"yes"| G3{"tests passing?"}
+        G3 -->|"failing · warn→block"| W
+        G3 -->|"yes"| G4{"internal mocks?"}
+        G4 -->|"yes · warn→block"| W
+        G4 -->|"no"| G5{"documented?"}
+        G5 -->|"no · deny"| W
+        G5 -->|"yes"| POST["post-write: lint · track · proof invalidation"]
     end
 
-    DONE_IMPL --> E
-
-    E["**Tester agent**
-    Live E2E verification
-    → proof-of-work evidence written to disk
-    → check-tester.sh: auto-verify
-      or surface report for user approval"]
-
-    E --> F["**Guardian agent**
-    Commit — requires verified proof-of-work + approval
-    → merge to main"]
-
-    style DONE_IMPL fill:none,stroke:none
+    D --> E["<b>Tester</b><br/>Run feature live · write proof-of-work evidence"]
+    E --> F{"check-tester.sh"}
+    F -->|"High confidence"| G["Auto-verify"]
+    F -->|"Caveats"| H["Surface report for user approval"]
+    G --> I
+    H --> I["<b>Guardian</b><br/>Commit + merge to main"]
 ```
 
-Every arrow is a hook. Every feedback loop is automatic. The model doesn't choose to follow the process — the hooks won't let it skip. Try to write code without a plan and you're pushed back. Try to commit with failing tests and you're pushed back. Try to skip documentation and you're pushed back. Try to commit without tester sign-off and you're pushed back. The system self-corrects until the work is right.
+Every arrow is a hook. Every feedback loop is mechanical. The model doesn't choose to follow the process — the hooks won't let it skip. Write on main? Denied. No plan? Denied. Tests failing? Blocked. Undocumented? Blocked. No tester sign-off? Commit denied. The system self-corrects until the work meets the standard.
 
-**The result:** you move faster because you never think about process. The hooks think about it for you. Dangerous commands get denied or rewritten (`--force` → `--force-with-lease`, `/tmp/` → project `tmp/`). Everything else either flows through or gets caught. You just describe what you want and review what comes out.
-
----
-
-## Why Hooks, Not Instructions
-
-Most Claude Code configs rely on CLAUDE.md instructions — guidance that works early in a session but degrades as the context window fills up or compaction throws everything off a cliff. This system puts enforcement in **deterministic hooks**: shell scripts that fire before and after every event, regardless of context pressure.
-
-Instructions are probabilistic. Hooks are mechanical. That's the difference.
+**The result:** you move faster because you never think about process. The hooks think about it for you. Dangerous commands get denied with corrections (`--force` → `--force-with-lease`, `/tmp/` → project `tmp/`). You describe what you want and review what comes out.
 
 ---
 
-## Requirements
+## Sacred Practices
 
-| Dependency | Required | Purpose |
-|-----------|----------|---------|
-| bash 3.2+ | Yes | Hook execution (macOS/Linux compatible) |
-| git 2.20+ | Yes | Worktree isolation, branch management |
-| jq 1.6+ | Yes | JSON parsing in all hooks |
-| POSIX utils | Yes | sed, awk, grep, sort, etc. |
-| sha256sum or shasum | Yes | Project state hashing (auto-detected) |
-| lockf (macOS) or flock (Linux) | Yes | Atomic state file operations (auto-detected) |
-| gh CLI | Optional | `/backlog` command, issue tracking |
-| terminal-notifier | Optional | macOS desktop notifications |
-| shellcheck | Optional | Hook development/CI linting |
-| API keys (OpenAI/Perplexity/Gemini) | Optional | `deep-research` skill |
+Ten rules. Each one enforced by hooks that fire every time, regardless of what the model remembers.
 
-Run `bash scripts/check-deps.sh` after cloning to verify your system.
+| # | Practice | What Enforces It |
+|---|----------|-------------|
+| 1 | **Always Use Git** | `session-init.sh` injects git state; `pre-bash.sh` blocks destructive operations |
+| 2 | **Main is Sacred** | `pre-write.sh` blocks writes on main; `pre-bash.sh` blocks commits on main |
+| 3 | **No /tmp/** | `pre-bash.sh` denies `/tmp/` paths and directs to project `tmp/` |
+| 4 | **Nothing Done Until Tested** | `pre-write.sh` warns then blocks when tests fail; `pre-bash.sh` requires test evidence for commits |
+| 5 | **Solid Foundations** | `pre-write.sh` detects and escalates internal mocking (warn → deny) |
+| 6 | **No Implementation Without Plan** | `pre-write.sh` denies source writes without MASTER_PLAN.md |
+| 7 | **Code is Truth** | `pre-write.sh` enforces headers and @decision annotations on 50+ line files |
+| 8 | **Approval Gates** | `pre-bash.sh` blocks force push; Guardian requires approval for all permanent ops |
+| 9 | **Track in Issues** | `post-write.sh` checks plan alignment; `check-planner.sh` validates issue creation |
+| 10 | **Proof Before Commit** | `check-tester.sh` auto-verify; `prompt-submit.sh` user approval gate; `pre-bash.sh` evidence gate |
 
 ---
 
@@ -129,440 +133,46 @@ Run `bash scripts/check-deps.sh` after cloning to verify your system.
 ### 1. Clone
 
 ```bash
-# SSH
 git clone --recurse-submodules git@github.com:juanandresgs/claude-ctrl.git ~/.claude
-
-# Or HTTPS
-git clone --recurse-submodules https://github.com/juanandresgs/claude-ctrl.git ~/.claude
 ```
 
-If you already have a `~/.claude` directory, back it up first: `tar czf ~/claude-backup-$(date +%Y%m%d).tar.gz ~/.claude`
+Back up first if you already have a `~/.claude` directory.
 
 ### 2. Configure
 
 ```bash
 cp settings.local.example.json settings.local.json
-# Edit to set your model preference, MCP servers, plugins
 ```
 
-Settings are split: `settings.json` (tracked, universal) and `settings.local.json` (gitignored, your overrides). Claude Code merges both, with local taking precedence.
+Edit `settings.local.json` to set your model preference and MCP servers. This file is gitignored — your overrides stay local.
 
-### 3. Verify
+### 3. API Keys (optional)
 
-On your first `claude` session, you should see the SessionStart hook inject git state, plan status, and worktree info. Try writing a file to `/tmp/test.txt` — `pre-bash.sh` should rewrite it to `tmp/test.txt` in the project root.
+The `deep-research` skill queries OpenAI, Perplexity, and Gemini in parallel for multi-model synthesis. Copy the example and fill in your keys:
 
-**Optional:** `/backlog` command uses GitHub Issues via `gh` CLI (`gh auth login`). Research skills (`deep-research`) accept OpenAI/Perplexity/Gemini API keys but degrade gracefully without them. Desktop notifications need `terminal-notifier` (macOS: `brew install terminal-notifier`).
+```bash
+cp .env.example .env
+```
+
+Everything works without these — research just won't be available.
+
+### 4. Verify
+
+Run `bash scripts/check-deps.sh` to confirm dependencies. On your first `claude` session, the SessionStart hook will inject git state, plan status, and worktree info.
 
 ### Staying Updated
 
-The harness auto-checks for updates on every new session start. Same-MAJOR-version updates are applied automatically. Breaking changes (different MAJOR version) show a notification — you decide when to apply.
+Auto-updates on every session start. Same-MAJOR-version updates apply automatically; breaking changes notify you first. Create `~/.claude/.disable-auto-update` to opt out. Fork users: your `origin` points to your fork — add `upstream` to track the original.
 
-- **Auto-updates enabled by default.** Create `~/.claude/.disable-auto-update` to disable.
-- **Manual update:** `cd ~/.claude && git pull --autostash --rebase`
-- **Fork users:** Your `origin` points to your fork, so you get your own updates. Add an `upstream` remote to also track the original repo.
-- **Local customizations safe:** `settings.local.json` and `CLAUDE.local.md` are gitignored. If you edit tracked files, `--autostash` preserves your changes. If a conflict occurs, the update aborts cleanly and you're notified.
+### Uninstall
 
----
-
-## How It Works
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│  The model doesn't decide the workflow. The hooks do.              │
-│  Plan first. Segment and isolate. Test everything. Get approval.   │
-└────────────────────────────────────────────────────────────────────┘
-```
-
-### Agent Workflow
-
-```
-                    ┌──────────┐
-                    │   User   │
-                    └────┬─────┘
-                         │ requirement
-                         ▼
-                  ┌──────────────┐
-                  │   Planner    │──── MASTER_PLAN.md + GitHub Issues
-                  │  (opus)      │
-                  └──────┬───────┘
-                         │ approved plan
-                         ▼
-                  ┌──────────────┐
-                  │   Guardian   │──── git worktree create
-                  │  (opus)      │
-                  └──────┬───────┘
-                         │ isolated branch
-                         ▼
-                  ┌──────────────┐
-                  │ Implementer  │──── tests + code + @decision
-                  │  (sonnet)    │
-                  └──────┬───────┘
-                         │ tests passing
-                         ▼
-                  ┌──────────────┐
-                  │    Tester    │──── live E2E verification + evidence
-                  │  (sonnet)    │
-                  └──────┬───────┘
-                         │ verified (auto or user approval)
-                         ▼
-                  ┌──────────────┐
-                  │   Guardian   │──── commit + merge + plan update
-                  │  (opus)      │
-                  └──────┬───────┘
-                         │ approval gate
-                         ▼
-                    ┌──────────┐
-                    │   Main   │ ← clean, tested, annotated
-                    └──────────┘
-```
-
-| Agent | Model | Role | Key Output |
-|-------|-------|------|------------|
-| **Planner** | Opus | Complexity assessment (Brief/Standard/Full tiers), problem decomposition, requirements (P0/P1/P2 with acceptance criteria), success metrics, architecture design, research gate | MASTER_PLAN.md (with REQ-IDs + DEC-IDs), GitHub Issues, research log |
-| **Implementer** | Sonnet | Test-first coding in isolated worktrees | Working code, tests, @decision annotations, trace artifacts |
-| **Tester** | Sonnet | Live E2E verification — run the feature, observe real behavior, report confidence level | Verification report, proof evidence, auto-verify signal |
-| **Guardian** | Opus | Git operations, merge analysis, plan evolution | Commits, merges, phase reviews, plan updates |
-
-The orchestrator dispatches to agents but never writes source code itself. Each agent handles its own approval cycle: present the work, wait for approval, execute, verify, suggest next steps.
-
-For the complete agent protocol and dispatch rules, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Remove `~/.claude` and restart Claude Code. It recreates a default config. Your projects are unaffected.
 
 ---
 
-## Performance
+## Go Deeper
 
-The Metanoia refactor (deployed 2026-02-23) consolidated 17 individual hook scripts into 4 entry points backed by 10 lazy-loaded domain libraries. The result: **74% less hook overhead per session** with zero governance loss.
-
-### Architecture Change
-
-```
-Before (v2.0):                          After (Metanoia):
-
-Bash cmd fires 3 hooks:                 Bash cmd fires 1 hook:
-  guard.sh          134ms avg             pre-bash.sh       93ms p50
-  auto-review.sh     83ms avg               (guard + auto-review + doc-freshness
-  doc-freshness.sh   50ms avg                merged, libraries lazy-loaded)
-  ─────────────────────────
-  Total:            ~267ms               Total:             ~93ms  (65% reduction)
-
-Write cmd fires 6 hooks:                Write cmd fires 1 hook:
-  branch-guard.sh    48ms avg             pre-write.sh      100ms p50
-  plan-check.sh     134ms avg               (all 6 merged, require_*() loads
-  doc-gate.sh        58ms avg                only needed domains)
-  test-gate.sh       10ms avg
-  mock-gate.sh       28ms avg
-  checkpoint.sh      25ms avg
-  ─────────────────────────
-  Total:            ~303ms               Total:            ~100ms  (67% reduction)
-```
-
-### Benchmark Results
-
-Measured with `tests/bench-hooks.sh` (5 iterations per fixture, 63 fixtures total). Timing via cross-platform nanosecond library (`tests/lib/timing.sh`).
-
-**Pre-Bash** — fires before every Bash tool call:
-
-| Scenario | p50 | p95 |
-|----------|-----|-----|
-| Nuclear denials (`rm -rf /`, fork bomb, `dd`, shutdown) | 50–84ms | 52–87ms |
-| Safe commands (`ls`, `git status`, `curl`) | 88–96ms | 90–98ms |
-| Git write operations (`commit`, `merge`, `reset --hard`) | 116–163ms | 117–167ms |
-| Git remote merge (`git -C <path> merge`) | 250ms | 258ms |
-
-**Pre-Write** — fires before every Write/Edit tool call:
-
-| Scenario | p50 | p95 |
-|----------|-----|-----|
-| Plan and config files (MASTER_PLAN.md, CLAUDE.md) | 86–102ms | 88–104ms |
-| Test files | 113ms | 117ms |
-| Source files on feature branch | 133–135ms | 136–137ms |
-| Large files requiring @decision audit | 228ms | 229ms |
-
-**Post-Write** — fires after every Write/Edit (lint, track, validate):
-
-| Scenario | p50 | p95 |
-|----------|-----|-----|
-| All post-write scenarios | 39–42ms | 39–44ms |
-
-**Lifecycle hooks:**
-
-| Hook | p50 | p95 | Fires on |
-|------|-----|-----|----------|
-| prompt-submit.sh | 276ms | 278ms | Every user message |
-| task-track.sh | 233–254ms | 253–262ms | Agent dispatch |
-| stop.sh | 1,091–1,150ms | 1,111–1,207ms | End of every response |
-
-Library-load baseline (sourcing `source-lib.sh` + `core-lib.sh` cold): **13ms**.
-
-### Production Metrics
-
-Derived from 39,644 timing entries across 5 days of real sessions. Pre-refactor entries use the legacy 4-field format; post-refactor entries use the new 5-field format with event-type classification.
-
-| Hook | Pre-Refactor Avg | Post-Refactor Avg | Improvement |
-|------|-------------------|-------------------|-------------|
-| Bash protection | 134ms (guard alone) | 128ms (all 3 merged) | Same latency, 3x fewer spawns |
-| Write protection | 303ms (6 hooks summed) | 66ms (all 6 merged) | **78% faster** |
-| Post-write tracking | 42ms | 6ms | **86% faster** |
-
-### Session-Level Impact
-
-Modeled on a representative session: 50 Bash commands + 20 Write/Edit calls.
-
-| Metric | Pre-Refactor | Post-Refactor | Savings |
-|--------|-------------|---------------|---------|
-| Shell processes spawned | ~270 | ~70 | **74% fewer** |
-| Total hook overhead | ~26s | ~6.7s | **74% less** |
-| Library code loaded per hook | 3,222 lines (full) | ~1,200 lines (selective) | **63% less** |
-
-The lazy-loading mechanism (`require_git()`, `require_plan()`, `require_trace()`, etc.) means each hook loads only the domain libraries it actually needs. A simple `git status` check loads `core-lib.sh` (400 lines) and `git-lib.sh` (76 lines). A source file write additionally loads `plan-lib.sh` and `doc-lib.sh`. The full 3,222-line library set is never loaded by any single invocation.
-
-### Test Suite
-
-| Metric | Value |
-|--------|-------|
-| Total tests | 160 |
-| Passing | 159 (99.4%) |
-| Benchmark fixtures | 63 |
-| Test scopes (`--scope`) | 10 (syntax, pre-bash, pre-write, post-write, unit, session, integration, trace, gate, state) |
-| Full suite runtime | 45–90s |
-| Scoped run runtime | 5–15s |
-
-Run benchmarks: `bash tests/bench-hooks.sh`
-Run timing report: `bash scripts/hook-timing-report.sh`
-Run scoped tests: `bash tests/run-hooks.sh --scope pre-bash`
-
-### End-to-End Benchmark (Claude-Ctrl-Performance Harness)
-
-Docker-isolated A/B comparison on T01 (simple-bugfix, Sonnet, n=3):
-
-| Metric | Without Claude-Ctrl | With Claude-Ctrl v3.0 (Metanoia) | Improvement |
-|--------|----------------------|---------------------|-------------|
-| Total tokens | 375k–505k | 178k–208k | 45–65% fewer |
-| Turns to completion | 19–26 | 12–14 | 36–47% fewer |
-| Artifact completeness | 56–67% | 100% | Full output every time |
-| Hook overhead | 0ms | ~40ms/call | Negligible governance cost |
-
-Benchmark source: [Claude-Ctrl-Performance](https://github.com/juanandresgs/Claude-Ctrl-Performance)
-
----
-
-## Sacred Practices
-
-These are non-negotiable. Each one is enforced by hooks that run every time, regardless of context window state or model behavior.
-
-| # | Practice | What Enforces It |
-|---|----------|-------------|
-| 1 | **Always Use Git** | `session-init.sh` injects git state; `pre-bash.sh` blocks destructive operations |
-| 2 | **Main is Sacred** | `pre-write.sh` (branch-guard logic) blocks writes on main; `pre-bash.sh` blocks commits on main |
-| 3 | **No /tmp/** | `pre-bash.sh` denies `/tmp/` paths and directs model to use project `tmp/` directory |
-| 4 | **Nothing Done Until Tested** | `pre-write.sh` (test-gate logic) warns then blocks source writes when tests fail; `pre-bash.sh` requires test evidence for commits |
-| 5 | **Solid Foundations** | `pre-write.sh` (mock-gate logic) detects and escalates internal mocking (warn → deny) |
-| 6 | **No Implementation Without Plan** | `pre-write.sh` (plan-check logic) denies source writes without MASTER_PLAN.md |
-| 7 | **Code is Truth** | `pre-write.sh` (doc-gate logic) enforces headers and @decision on 50+ line files |
-| 8 | **Approval Gates** | `pre-bash.sh` blocks force push; Guardian agent requires approval for all permanent ops |
-| 9 | **Track in Issues** | `post-write.sh` (plan-validate logic) checks alignment; `check-planner.sh` validates issue creation |
-| 10 | **Proof Before Commit** | `check-tester.sh` auto-verify evaluation; `prompt-submit.sh` user approval gate; `pre-bash.sh` evidence gate on commits |
-
----
-
-## Hook System
-
-All hooks are registered in `settings.json` and run deterministically — JSON in on stdin, JSON out on stdout. Hooks fire at four lifecycle points: before tool use (block or rewrite), after tool use (lint, track, validate), at session boundaries (context injection, cleanup), and around subagents (inject context, verify output).
-
-For the full protocol, detailed tables, enforcement patterns, state files, and shared library APIs, see [`hooks/HOOKS.md`](hooks/HOOKS.md).
-
-**Shared Libraries** (not registered as hooks — sourced by hook scripts):
-- `source-lib.sh` — Bootstrap loader: sources `log.sh` + `core-lib.sh` (667 lines total). Provides `require_*()` lazy loaders for domain libraries. All hooks source this first.
-- `log.sh` — JSON I/O, stdin caching, path utilities (`detect_project_root`, `resolve_proof_file`)
-- `core-lib.sh` — deny/allow/advisory output helpers, atomic writes, shared predicates
-- Domain libraries loaded on demand via `require_*()`): `git-lib.sh`, `plan-lib.sh`, `trace-lib.sh`, `session-lib.sh`, `doc-lib.sh`, `ci-lib.sh`
-
-**PreToolUse Hooks** — fire before every tool call; can block or rewrite:
-
-| Hook | Event | Consolidated Logic |
-|------|-------|--------------------|
-| **pre-bash.sh** | PreToolUse:Bash | Safety gate + `/tmp/` denial + `--force-with-lease` + test evidence gate (guard) + three-tier command classification (auto-review) + doc-freshness enforcement at merge |
-| **pre-write.sh** | PreToolUse:Write\|Edit | Checkpoint snapshots + test-gate (warn/block on failing tests) + mock-gate + branch-guard (blocks main) + doc-gate (headers + @decision) + plan-check (requires MASTER_PLAN.md) |
-| **task-track.sh** | PreToolUse:Task | Track subagent state and update status bar; gate Guardian on verified proof |
-
-**PostToolUse Hooks** — fire after every tool call; can lint, track, validate:
-
-| Hook | Event | Consolidated Logic |
-|------|-------|--------------------|
-| **post-write.sh** | PostToolUse:Write\|Edit | Auto-linting (lint) + change tracking + proof invalidation (track) + async test execution (test-runner) + MASTER_PLAN.md format validation (plan-validate) + optional LLM code review |
-| **skill-result.sh** | PostToolUse:Skill | Reads `.skill-result.md` from forked skills, injects as context |
-| **webfetch-fallback.sh** | PostToolUse:WebFetch | Suggest `mcp__fetch__fetch` when WebFetch fails or is blocked |
-| **playwright-cleanup.sh** | PostToolUse:browser\_snapshot | Browser session cleanup after Playwright tool use |
-
-**Session & Notification Hooks**:
-
-| Hook | Event | Purpose |
-|------|-------|---------|
-| **session-init.sh** | SessionStart | Inject git state, update status, plan status, worktrees, todo HUD (calls `scripts/update-check.sh`) |
-| **prompt-submit.sh** | UserPromptSubmit | Keyword-based context injection, deferred-work detection, proof-status gate |
-| **compact-preserve.sh** | PreCompact | Dual-path context preservation across compaction |
-| **notify.sh** | Notification | Desktop alert when Claude needs attention (macOS) |
-| **session-end.sh** | SessionEnd | Cleanup session files, kill async processes |
-
-**Stop Hook** — fires when Claude finishes responding:
-
-| Hook | Event | Consolidated Logic |
-|------|-------|--------------------|
-| **stop.sh** | Stop | Decision audit + @decision coverage + REQ-ID traceability (surface) + file counts + git state + next-action guidance (session-summary) + forward-motion check |
-
-**SubagentStart/Stop Hooks** — fire around Task tool invocations:
-
-| Hook | Event | Purpose |
-|------|-------|---------|
-| **subagent-start.sh** | SubagentStart | Agent-specific context injection (plan, worktree, prior traces) |
-| **check-planner.sh** | SubagentStop:planner | Verify MASTER_PLAN.md exists and is valid |
-| **check-implementer.sh** | SubagentStop:implementer | Enforce proof-of-work (live demo + tests) before commits |
-| **check-tester.sh** | SubagentStop:tester | Auto-verify evaluation; write `.proof-status` if High confidence + clean |
-| **check-guardian.sh** | SubagentStop:guardian | Validate commit message format and issue linkage |
-| **check-explore.sh** | SubagentStop:Explore | Post-exploration validation for Explore agents; validates research output quality |
-| **check-general-purpose.sh** | SubagentStop:general-purpose | Post-execution validation for general-purpose agents; validates output quality |
-
----
-
-## Decision Annotations
-
-The `@decision` annotation maps MASTER_PLAN.md decision IDs to source code. The Planner pre-assigns IDs (`DEC-COMPONENT-NNN`), the Implementer annotates code, the Guardian verifies coverage at merge time. `pre-write.sh` (doc-gate logic) enforces annotations on files over 50 lines.
-
-```typescript
-/**
- * @decision DEC-AUTH-001
- * @title Use PKCE for mobile OAuth
- * @status accepted
- * @rationale Mobile apps cannot securely store client secrets
- */
-```
-
-Also supported: `# DECISION:` (Python/Shell) and `// DECISION:` (Go/Rust/C). Detection regex: `@decision|# DECISION:|// DECISION:`. See [`hooks/HOOKS.md`](hooks/HOOKS.md) for enforcement details.
-
-### Two-Tier Traceability
-
-Requirements and decisions live in a single artifact (MASTER_PLAN.md) with bidirectional linkage to source code:
-
-```
-MASTER_PLAN.md                         Source Code
-REQ-P0-001 (requirement)               @decision DEC-AUTH-001
-DEC-AUTH-001 (decision)                   Addresses: REQ-P0-001
-  Addresses: REQ-P0-001
-```
-
-REQ-IDs (`REQ-{CATEGORY}-{NNN}`) are assigned during planning. DEC-IDs link to REQ-IDs via `Addresses:`. Phases reference which REQ-IDs they satisfy. `stop.sh` audits unaddressed P0 requirements at session end. `post-write.sh` validates REQ-ID format on every MASTER_PLAN.md write.
-
----
-
-## Skills and Commands
-
-### Skills
-
-**Governance:**
-
-| Skill | Purpose |
-|-------|---------|
-| **diagnose** | System health check: hook integrity, state file consistency, configuration validation |
-| **rewind** | List and restore git-ref checkpoints created by `checkpoint.sh` |
-
-**Research:**
-
-| Skill | Purpose |
-|-------|---------|
-| **deep-research** | Multi-model research synthesis with comparative analysis |
-| **consume-content** | Structured content analysis and extraction from URLs or documents |
-
-**Workflow:**
-
-| Skill | Purpose |
-|-------|---------|
-| **context-preservation** | Structured summaries for session continuity across compaction |
-| **decide** | Interactive decision configurator — explore trade-offs, costs, effort estimates with filtering UI |
-| **prd** | Deep-dive PRD: problem statement, user journeys, requirements, success metrics |
-
-### Commands
-
-| Command | Purpose |
-|---------|---------|
-| `/compact` | Generate structured context summary before compaction (prevents amnesia) |
-| `/backlog` | Unified backlog management — list, create, close, triage todos via GitHub Issues |
-
----
-
-## Utility Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `worktree-roster.sh` | Worktree inventory, stale detection, cleanup |
-| `statusline.sh` | Status bar enrichment from `.statusline-cache` |
-| `update-check.sh` | Auto-update with breaking change detection |
-| `batch-fetch.py` | Cascade-proof multi-URL fetching (use for 3+ URLs) |
-| `hook-timing-report.sh` | Parse `.hook-timing.log` for hook performance analysis — shows p50/p95/max latency per hook and flags slow hooks |
-| `ci-watch.sh` | Watch CI status for the current branch; polls GitHub Actions and reports pass/fail |
-| `clean-state.sh` | Clean up stale state files (`.test-status`, `.proof-status`, `.agent-findings`) when the hook system gets into a bad state |
-| `repair-traces.sh` | Repair corrupted or incomplete trace manifests; re-indexes `traces/index.jsonl` |
-
----
-
-## What Changes From Default Claude Code
-
-| Behavior | Default CC | With This System |
-|----------|-----------|-----------------|
-| Branch management | Works on whatever branch | Blocked from writing on main; worktree isolation enforced |
-| Temporary files | Writes to `/tmp/` | Denied with redirect to project `tmp/` directory |
-| Force push | Executes directly | Denied to main/master; `--force` elsewhere rewritten to `--force-with-lease` |
-| Test discipline | Tests optional | Writes blocked when tests fail; commits require test evidence |
-| Mocking | Mocks anything | Internal mocks warned then blocked; external boundary mocks only |
-| Planning | Implements immediately | Plan mode by default; MASTER_PLAN.md required before code |
-| Documentation | Optional | File headers and @decision enforced on 50+ line files |
-| Session end | Just stops | Decision audit + session summary + forward momentum check |
-| Session start | Cold start | Git state, plan status, worktrees, todo HUD, agent findings injected |
-| Context loss | Compaction loses everything | Dual-path preservation: persistent file + compaction directive |
-| Commits | Executes on request | Requires approval via Guardian agent; test + proof-of-work evidence |
-| Code review | None | Suggested on significant file writes (when Multi-MCP available) |
-| Verification | Self-reported done | Tester runs live, auto-verify (High confidence) or user approval gate |
-| Checkpoints | No snapshots | Git ref-based checkpoints before every write; restore with `/rewind` |
-| Learning | No memory across sessions | Observatory analyzes traces, surfaces improvement suggestions |
-| CWD safety | Delete worktree = bricked session | Three-path CWD recovery: Check 0.5 auto-recover + Check 0.75 deny |
-
----
-
-## Customization
-
-**Safe to change:** `settings.local.json` (model, MCP servers, plugins), API keys for research skills, hook timeouts in `settings.json`.
-
-**Change with understanding:** Agent definitions (`agents/*.md`), hook scripts (`hooks/*.sh`), `CLAUDE.md` dispatch rules and sacred practices.
-
----
-
-## Troubleshooting
-
-| Issue | Fix |
-|-------|-----|
-| Hook timeout errors | Increase `timeout` in `settings.json` for the slow hook |
-| Desktop notifications not firing | Install `terminal-notifier` (macOS only): `brew install terminal-notifier` |
-| test-gate blocking unexpectedly | Check `.claude/.test-status` — stale from previous session? Delete it |
-| SessionStart not injecting context | Known bug ([#10373](https://github.com/anthropics/claude-code/issues/10373)). `prompt-submit.sh` mitigates on first prompt |
-| CWD bricked after worktree deletion | pre-bash.sh Check 0.5 auto-recovers on next Bash call. Prevention: never `cd` into worktrees from orchestrator — use absolute paths |
-| Stale `.proof-status` blocking commits | Delete `.claude/.proof-status` manually, or re-run the tester to generate fresh evidence |
-
-## Recovery and Uninstall
-
-Archived files are stored in `.archive/YYYYMMDD/`. Full backups at `~/claude-backup-*.tar.gz`.
-
-To debug a hook: `echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | bash hooks/pre-bash.sh`
-
-**Uninstall:** Remove `~/.claude` and restart Claude Code. It will recreate a default config directory. Your projects are unaffected.
-
----
-
-## References
-
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — System architecture, 18 sections, design decisions (the authoritative deep-dive)
-- [`hooks/HOOKS.md`](hooks/HOOKS.md) — Full hook reference: protocol, detailed tables, enforcement patterns, state files, shared libraries
-- [`agents/planner.md`](agents/planner.md) — Planning process, research gate, MASTER_PLAN.md format
-- [`agents/implementer.md`](agents/implementer.md) — Test-first workflow, worktree setup, verification checkpoints
-- [`agents/tester.md`](agents/tester.md) — Verification protocol, confidence levels, auto-verify conditions
-- [`agents/guardian.md`](agents/guardian.md) — Approval protocol, merge analysis, phase-boundary plan updates
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — System architecture, design decisions, subsystem deep-dive
+- [`hooks/HOOKS.md`](hooks/HOOKS.md) — Full hook reference: protocol, state files, shared libraries
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — How to contribute
 - [`CHANGELOG.md`](CHANGELOG.md) — Release history

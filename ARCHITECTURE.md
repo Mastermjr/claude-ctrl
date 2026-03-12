@@ -58,7 +58,7 @@ State files bridge the gap — hooks communicate with each other through files, 
 ```
 ~/.claude/
 ├── hooks/                    # Hook scripts and shared libraries
-│   ├── pre-bash.sh           # PreToolUse:Bash — safety gate + command classification (consolidates guard.sh, auto-review.sh, doc-freshness.sh)
+│   ├── pre-bash.sh           # PreToolUse:Bash — safety gate (consolidates guard.sh, doc-freshness.sh)
 │   ├── pre-write.sh          # PreToolUse:Write|Edit — all write gates (consolidates test-gate.sh, mock-gate.sh, branch-guard.sh, doc-gate.sh, plan-check.sh, checkpoint.sh)
 │   ├── task-track.sh         # PreToolUse:Task — agent dispatch gates
 │   ├── post-write.sh         # PostToolUse:Write|Edit — quality feedback (consolidates lint.sh, track.sh, code-review.sh, plan-validate.sh, test-runner.sh)
@@ -337,7 +337,7 @@ with the `additionalContext` injected. `lint.sh` uses this for auto-fix loops.
 | **SessionStart** | `startup\|resume\|clear\|compact` | Fresh session, /clear, /compact | session-init.sh |
 | **UserPromptSubmit** | (all) | Every user prompt | prompt-submit.sh |
 | **PreToolUse** | `Write\|Edit` | Before Write or Edit tool | pre-write.sh (consolidates test-gate, mock-gate, branch-guard, doc-gate, plan-check, checkpoint) |
-| **PreToolUse** | `Bash` | Before every Bash call | pre-bash.sh (consolidates guard, auto-review, doc-freshness) |
+| **PreToolUse** | `Bash` | Before every Bash call | pre-bash.sh (consolidates guard, doc-freshness) |
 | **PreToolUse** | `Task` | Before every agent dispatch | task-track.sh |
 | **PostToolUse** | `Write\|Edit` | After Write or Edit completes | post-write.sh (consolidates lint, track, code-review, plan-validate, test-runner) |
 | **PostToolUse** | `WebFetch` | After WebFetch | webfetch-fallback.sh |
@@ -381,9 +381,8 @@ enforcement layer that instructions cannot replace.
 ### pre-bash.sh
 
 **What it does:** Consolidated PreToolUse:Bash hook. Runs all Bash safety checks
-in sequence: multi-tier nuclear/CWD/git safety gate (formerly guard.sh), three-tier
-command classification (formerly auto-review.sh), and documentation freshness
-enforcement at merge time (formerly doc-freshness.sh).
+in sequence: multi-tier nuclear/CWD/git safety gate (formerly guard.sh) and
+documentation freshness enforcement at merge time (formerly doc-freshness.sh).
 
 **Why it exists:** Bash is the most dangerous tool Claude has. A single mistyped
 command can destroy files, corrupt git history, or fork-bomb the machine.
@@ -397,10 +396,10 @@ pre-bash.sh catches them at the system level.
   so safety is never sacrificed for convenience.
 - Commands on main/master branch without a MASTER_PLAN.md-only exception are ALWAYS
   denied for commits (Check 2).
-- Force pushes to main/master are ALWAYS denied; `--force` elsewhere is rewritten
-  to `--force-with-lease` (Check 3).
+- Force pushes to main/master are ALWAYS denied; `--force` elsewhere is denied with
+  `--force-with-lease` suggestion in the message (Check 3).
 - `git reset --hard`, `git clean -f`, and `git branch -D` are ALWAYS denied (Check 4).
-- Worktree removal is ALWAYS rewritten to cd to main first (Check 5).
+- Worktree removal is ALWAYS denied with a safe cd-first command in the message (Check 5).
 - Tests must be passing for merges (Check 6) and commits (Check 7).
 - `.proof-status` must be `verified` for commits and merges when the gate is active (Check 8).
 - No agent can write `verified` to `.proof-status` directly (Check 9).
@@ -431,7 +430,6 @@ reason message. See upstream issue anthropics/claude-code#26506.
 **State files read:**
 - `.claude/.test-status` — `pass|fail_count|epoch` format
 - `.claude/.proof-status` — `verified|needs-verification|pending|epoch` format
-- `.claude/.cwd-recovery-needed` — canary file for CWD recovery (one-shot)
 
 **Configuration:** pre-bash.sh has no configuration options. All thresholds are
 constants in `core-lib.sh` (`TEST_STALENESS_THRESHOLD=600` seconds).
@@ -446,12 +444,6 @@ ever loading session-lib.sh — avoiding ~800 lines of parse overhead for the co
 - **Safety gate (formerly guard.sh):** 11-check multi-tier Bash safety gate covering nuclear
   destruction, CWD protection, main branch commits, force push handling, destructive git
   commands, and test/proof gates.
-
-- **Command classification (formerly auto-review.sh):** Three-tier classification engine.
-  Decomposes compound commands (&&, ||, ;, |) and recursively analyzes each segment.
-  Tier 1 (ls, cat, git log) auto-approves; Tier 3 (rm, sudo, kill) injects advisory;
-  Tier 2 (git, npm, docker) inspects subcommands. `settings.json` static matching cannot
-  distinguish `git log` from `git reset --hard` — this hook understands composition.
 
 - **Documentation freshness (formerly doc-freshness.sh):** Enforces documentation
   freshness at merge time, ensuring docs are updated when source files change significantly.
@@ -776,9 +768,9 @@ lets each agent go deep on its role without context dilution.
 
 | Agent | Model | max_turns | Primary Output | SubagentStop Validator |
 |-------|-------|-----------|----------------|------------------------|
-| Planner | claude-opus-4-6 | 40 | MASTER_PLAN.md + GitHub Issues | check-planner.sh |
-| Implementer | claude-sonnet-4-6 | 75 | Tests + source code in worktree | check-implementer.sh |
-| Tester | claude-sonnet-4-6 | 25 | .proof-status + verification report | check-tester.sh |
+| Planner | claude-opus-4-6 | 65 | MASTER_PLAN.md + GitHub Issues | check-planner.sh |
+| Implementer | claude-sonnet-4-6 | 85 | Tests + source code in worktree | check-implementer.sh |
+| Tester | claude-sonnet-4-6 | 40 | .proof-status + verification report | check-tester.sh |
 | Guardian | claude-opus-4-6 | 30 | git commit + merge + cleanup | check-guardian.sh |
 
 ### Planner Agent (agents/planner.md)
@@ -1138,22 +1130,20 @@ staging area only).
 
 ### CWD Protection
 
-pre-bash.sh CWD canary (Check 0.5) and pre-bash.sh worktree-cd guard (Check 0.75) are part of a defense-in-depth CWD protection system:
+pre-bash.sh worktree-cd guard (Check 0.75) and source-lib.sh bootstrap recovery form a defense-in-depth CWD protection system:
 
 **The problem:** When a worktree is deleted, any process whose CWD is inside
 the deleted directory fails with `ENOENT` on macOS (posix_spawn). This breaks
 ALL subsequent hooks (not just Bash) because the shell cannot spawn child processes.
 
-**Prevention (pre-bash.sh worktree-cd guard (Check 0.75)):** Deny `cd .worktrees/foo && <commands>`. Force resubmission
+**Prevention (pre-bash.sh Check 0.75):** Deny `cd .worktrees/foo && <commands>`. Force resubmission
 with subshell wrapping: `( cd .worktrees/foo && <commands> )`. Subshell CWD is isolated.
 
-**Recovery (pre-bash.sh CWD canary (Check 0.5)):**
-- Path A: `.cwd` field in hook input is an invalid directory → walk up to nearest git root → emit rewrite with `cd <recovery_dir> && <original_command>`.
-- Path B: `.cwd-recovery-needed` canary file → prepend inline `{ cd . 2>/dev/null || cd "$HOME"; }` guard and continue. Canary is one-shot (deleted on read).
-
-**Canary writes:** pre-bash.sh worktree-remove CWD gate (Check 5) (git worktree remove) and pre-bash.sh worktree-rm-rf CWD gate (Check 5b) (rm -rf .worktrees/)
-write the deleted worktree path to `.cwd-recovery-needed` before the removal executes.
-check-guardian.sh also writes the canary after detecting worktree removal.
+**Recovery (source-lib.sh bootstrap):** Every hook sources `source-lib.sh` which checks
+`[[ ! -d "${PWD:-}" ]]` before any logic runs. If CWD was deleted, it recovers to `$HOME`.
+`log.sh` `detect_project_root()` includes a similar guard. The `.cwd-recovery-needed` canary
+file is written by Check 5/5b and check-guardian.sh before worktree deletion to signal
+the condition; session-end.sh cleans it up.
 
 ---
 
@@ -1242,27 +1232,28 @@ bash scripts/hook-timing-report.sh --hook pre-bash
 ## 12. Shared Libraries
 
 Seven files form the shared library layer. All hooks source `source-lib.sh` which bootstraps
-`log.sh` and `core-lib.sh` (667 lines). Domain libraries are loaded on demand via `require_*()`
+`log.sh` and `core-lib.sh` (~1,093 lines). Domain libraries are loaded on demand via `require_*()`
 lazy loaders — each hook loads only what it needs.
 
 **Library loading architecture (Phase 2 optimization):**
 
 ```
 source-lib.sh (loaded by every hook)
-├── log.sh        — 314 lines (always loaded)
-├── core-lib.sh   — 400 lines (always loaded)
+├── log.sh        — 441 lines (always loaded)
+├── core-lib.sh   — 652 lines (always loaded)
 └── require_*() lazy loaders:
     ├── require_git()     → git-lib.sh
     ├── require_plan()    → plan-lib.sh
     ├── require_trace()   → trace-lib.sh
     ├── require_session() → session-lib.sh
     ├── require_doc()     → doc-lib.sh
-    └── require_ci()      → ci-lib.sh
+    ├── require_ci()      → ci-lib.sh
+    └── require_state()   → state-lib.sh
 
 ```
 
 Previously `source-lib.sh` sourced `context-lib.sh` which loaded all domain libraries
-(3,175 lines total). Now every hook pays only 667 lines on startup; domain libraries
+(3,175 lines total). Now every hook pays only ~1,093 lines on startup; domain libraries
 are loaded on demand. `require_all()` was removed in Phase 3 (dead code — no hook called it).
 `context-lib.sh` compatibility shim was removed in issue #65 — tests now use `require_*()` directly.
 
@@ -1384,7 +1375,7 @@ project root unless marked as `~/.claude/` (global).
 | `.active-worktree-path` | `.claude/` | Absolute path (one line) | task-track.sh | log.sh `resolve_proof_file()` | Breadcrumb: which worktree is the active implementation target |
 | `.update-status` | `~/.claude/` | `status\|local\|remote\|count\|epoch\|summary` | update-check.sh | session-init.sh | One-shot update notification (cleared after display) |
 | `.worktree-roster.tsv` | `~/.claude/` | TSV: `path\|branch\|issue\|session\|pid\|created_at` | worktree-roster.sh | session-init.sh, statusline.sh | Worktree lifecycle tracking |
-| `.cwd-recovery-needed` | `~/.claude/` | Deleted worktree path | pre-bash.sh (Check 5/5b), check-guardian.sh | pre-bash.sh (Check 0.5 Path B) | One-shot CWD recovery canary |
+| `.cwd-recovery-needed` | `~/.claude/` | Deleted worktree path | pre-bash.sh (Check 5/5b), check-guardian.sh | source-lib.sh (bootstrap recovery) | One-shot CWD recovery canary |
 | `traces/index.jsonl` | `~/.claude/` | JSONL (one entry per trace) | trace-lib.sh `index_trace()` | session-init.sh | Global trace index for cross-project searching |
 
 ---
@@ -1580,7 +1571,7 @@ Done. Feature merged to main.
 
 ### Don't: Use /tmp/ for artifacts
 **Problem:** Littering the system, hard to debug, survives crashes unexpectedly.
-**Solution:** `project/tmp/` directory. pre-bash.sh Check 1 rewrites automatically.
+**Solution:** `project/tmp/` directory. pre-bash.sh Check 1 denies with the corrected path.
 
 ### Don't: Mock internal modules
 **Problem:** Tests become brittle, verify the mock not the code.
@@ -1621,7 +1612,7 @@ Done. Feature merged to main.
 | DEC-INTEGRITY-001 | core-lib.sh | accepted | validate_state_file guards corrupt-file reads in guard.sh |
 | DEC-INTEGRITY-002 | guard.sh | accepted | Deny-on-crash EXIT trap for fail-closed behavior |
 | DEC-INTEGRITY-004 | core-lib.sh | accepted | Atomic write via temp-file-then-mv for state file safety |
-| DEC-AUTOREVIEW-001 | auto-review.sh | accepted | Three-tier command classification with recursive analysis |
+| DEC-AUTOREVIEW-001 | pre-bash.sh (pruned) | pruned | Three-tier command classification — pruned in Phase 2 (low-signal, safety denials already in guard.sh) |
 | DEC-MOCK-001 | mock-gate.sh | accepted | Escalating mock detection gate with external-boundary allowlist |
 | DEC-TEST-001 | test-runner.sh | accepted | Automatic background test execution after source changes |
 | DEC-CACHE-001 | session-lib.sh | accepted | Statusline cache for status bar enrichment without re-computation |
@@ -1698,8 +1689,8 @@ for small config fixes).
 inject fresh project context so Claude orients quickly regardless of prior context.
 
 **Canary file:** `.claude/.cwd-recovery-needed` — a one-shot signal written before
-worktree deletion so guard.sh Check 0.5 can recover the orchestrator's CWD on the
-next Bash command.
+worktree deletion. source-lib.sh bootstrap recovery and log.sh detect_project_root()
+use it to recover the orchestrator's CWD.
 
 **TRACE_DIR:** Environment variable injected by subagent-start.sh into agent context.
 Points to the agent's trace directory (`~/.claude/traces/<trace_id>`). Agents write

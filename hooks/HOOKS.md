@@ -169,20 +169,21 @@ Source with: `source "$(dirname "$0")/source-lib.sh"`
 Bootstrap loader that sources `log.sh` and `core-lib.sh`. Provides `require_*()` lazy loaders
 for domain libraries. All hooks source this file as their first dependency.
 
-**What loads immediately (667 lines total):**
-- `log.sh` (314 lines) — JSON I/O, stdin caching, path utilities
-- `core-lib.sh` (400 lines) — deny/allow/advisory output, atomic writes
+**What loads immediately (~1,093 lines total):**
+- `log.sh` (441 lines) — JSON I/O, stdin caching, path utilities
+- `core-lib.sh` (652 lines) — deny/allow/advisory output, atomic writes
 
 **What loads on demand via `require_*()`:**
 
 | Function | Library | Lines | Purpose |
 |----------|---------|-------|---------|
-| `require_git()` | `git-lib.sh` | 76 | Git state detection, branch guards, worktree safety |
-| `require_plan()` | `plan-lib.sh` | 469 | Plan lifecycle, staleness scoring, MASTER_PLAN.md parsing |
-| `require_trace()` | `trace-lib.sh` | 755 | Trace init/finalize, audit trail, agent markers |
-| `require_session()` | `session-lib.sh` | 645 | Session summary, trajectory, compaction context |
-| `require_doc()` | `doc-lib.sh` | 306 | @decision enforcement, doc-gate rules |
-| `require_ci()` | `ci-lib.sh` | 217 | CI detection, workflow helpers |
+| `require_git()` | `git-lib.sh` | 78 | Git state detection, branch guards, worktree safety |
+| `require_plan()` | `plan-lib.sh` | 542 | Plan lifecycle, staleness scoring, MASTER_PLAN.md parsing |
+| `require_trace()` | `trace-lib.sh` | 789 | Trace init/finalize, audit trail, agent markers |
+| `require_session()` | `session-lib.sh` | 751 | Session summary, trajectory, compaction context |
+| `require_doc()` | `doc-lib.sh` | 308 | @decision enforcement, doc-gate rules |
+| `require_ci()` | `ci-lib.sh` | 219 | CI detection, workflow helpers |
+| `require_state()` | `state-lib.sh` | 564 | Per-worktree state management and isolation |
 
 Each `require_*()` is idempotent — calling `require_git()` twice is a no-op. Hooks that need
 multiple domains call them explicitly (e.g., `require_git; require_plan`). `require_all()` was
@@ -208,8 +209,7 @@ to lint hook source files and detect unregistered writes. Scopes: global, per-pr
 ## Execution Order (Session Lifecycle)
 
 > **Metanoia architecture** (deployed 2026-02-23): 17 individual hooks consolidated into
-> 4 entry points + 6 domain libraries. Legacy hooks preserved in `archive/legacy-hooks/`
-> as reference copies (no symlinks). The behavioral contracts are identical — only the
+> 4 entry points + 7 domain libraries. The behavioral contracts are identical — only the
 > entry points changed.
 
 ```
@@ -217,7 +217,7 @@ SessionStart    → session-init.sh
                     ↓
 UserPromptSubmit → prompt-submit.sh
                     ↓
-PreToolUse:Bash → pre-bash.sh (consolidated: guard.sh + doc-freshness.sh + auto-review.sh)
+PreToolUse:Bash → pre-bash.sh (consolidated: guard.sh + doc-freshness.sh)
 PreToolUse:W/E  → pre-write.sh (consolidated: branch-guard + doc-gate + test-gate + mock-gate + plan-check + checkpoint)
                     ↓
 [Tool executes]
@@ -245,7 +245,7 @@ Hooks within the same event run **sequentially** in array order from settings.js
 
 | Hook | Event | Absorbs |
 |------|-------|---------|
-| **pre-bash.sh** | PreToolUse:Bash | guard.sh, doc-freshness.sh, auto-review.sh |
+| **pre-bash.sh** | PreToolUse:Bash | guard.sh, doc-freshness.sh |
 | **pre-write.sh** | PreToolUse:Write\|Edit | branch-guard, doc-gate, test-gate, mock-gate, plan-check, checkpoint |
 | **post-write.sh** | PostToolUse:Write\|Edit | lint, track, code-review, plan-validate, test-runner |
 | **stop.sh** | Stop | surface, session-summary, forward-motion |
@@ -259,21 +259,16 @@ Hooks within the same event run **sequentially** in array order from settings.js
 | **git-lib.sh** | Git state detection, branch guards, worktree safety checks |
 | **plan-lib.sh** | Plan lifecycle, plan-check, plan-validate, staleness scoring |
 | **session-lib.sh** | Session summary, trajectory, forward motion, compaction context |
+| **state-lib.sh** | Per-worktree state management, workflow isolation |
 | **trace-lib.sh** | Trace init\/finalize, compliance recording, audit trail |
 
 ### PreToolUse — Block Before Execution
 
 | Hook | Matcher | What It Does |
 |------|---------|--------------|
-| **guard.sh** | Bash | 11 checks: nuclear deny (7 catastrophic command categories), early-exit gate (non-git commands skip git-specific checks); denies `/tmp/` paths, `--force` to main, cd into .worktrees/, worktree removal without safe CWD; blocks commits on main, force push to main, destructive git (`reset --hard`, `clean -f`, `branch -D`); requires test evidence + proof-of-work verification for commits and merges (missing state files = allow, gate only active when files exist); **blocks agents from writing approval status to `.proof-status`** and **blocks deletion of `.proof-status` when verification is active** (human gate enforcement). All git subcommand patterns use flag-tolerant matching (`git\s+[^|;&]*\bSUBCMD`) to catch `git -C /path` and other global flags. Trailing boundaries use `[^a-zA-Z0-9-]` to reject hyphenated subcommands (`commit-msg`, `merge-base`, `merge-file`) |
-| **doc-freshness.sh** | Bash | Enforces documentation freshness at merge time. Blocks merges to main/master when tracked docs are critically stale (structural churn exceeds threshold). Advisory-only on feature branches. Supports bypasses: `@no-doc` annotation, doc-only commits, tier reduction when stale doc is included in the merge |
-| **auto-review.sh** | Bash | Three-tier command classifier: auto-approves safe commands, defers risky ones to user. `git commit/push/merge` classified as risky (requires Guardian dispatch per Sacred Practice #8) |
-| **test-gate.sh** | Write\|Edit | Escalating gate: warns on first source write with failing tests, blocks on repeat |
-| **mock-gate.sh** | Write\|Edit | Detects internal mocking patterns; warns first, blocks on repeat |
-| **branch-guard.sh** | Write\|Edit | Blocks source file writes on main/master branch |
-| **doc-gate.sh** | Write\|Edit | Enforces file headers and @decision annotations on 50+ line files; Write = hard deny, Edit = advisory; warns on new root-level markdown files (Sacred Practice #9) |
-| **plan-check.sh** | Write\|Edit | Denies source writes without MASTER_PLAN.md; uses `PLAN_LIFECYCLE` (none/active/dormant) from `get_plan_status()` — dormant (all initiatives completed) = DENIED with "Add a new initiative before implementing"; composite staleness scoring (source churn % + decision drift) warns then blocks when plan diverges from code; bypasses Edit tool, small writes (<20 lines), non-git dirs |
-| **checkpoint.sh** | Write\|Edit | Creates git ref-based snapshots (`refs/checkpoints/<branch>/<N>`) before source file writes. Uses temporary index + write-tree + commit-tree (zero working copy impact, no stash pollution). Tracks checkpoint frequency via `.checkpoint-counter`. Guardian cleans up refs after merge |
+| **pre-bash.sh** | Bash | Consolidated safety gate: 11 checks covering nuclear deny (7 catastrophic command categories), CWD protection (denies cd into .worktrees/), `/tmp/` denial, main branch commit blocks, force push deny-with-correction, destructive git blocks (`reset --hard`, `clean -f`, `branch -D`), test evidence + proof-of-work verification for commits/merges, agent proof-status write blocking, proof-status deletion protection. Doc-freshness enforcement at merge time. All git patterns use flag-tolerant matching. Trailing boundaries reject hyphenated subcommands |
+| **pre-write.sh** | Write\|Edit | Consolidated write gate: checkpoint snapshots (git ref-based), branch-guard (blocks main), plan-check (requires MASTER_PLAN.md, composite staleness scoring), test-gate (escalating: warn then block on failing tests), mock-gate (escalating: warn then block on internal mocks), defprog-gate (escalating: detects silent exception swallowing, `@defprog-exempt` bypass), doc-gate (headers + @decision on 50+ line files), Gate 1.5 dispatch enforcement (blocks orchestrator source writes via SESSION_ID comparison) |
+| **task-track.sh** | Task | Agent dispatch gates: tracks subagent state, gates Guardian on verified proof, updates status bar |
 
 ### PostToolUse — Feedback After Execution
 
@@ -330,7 +325,7 @@ Hooks within the same event run **sequentially** in array order from settings.js
 
 ## Key guard.sh Behaviors
 
-The most complex hook — 11 checks covering 7 nuclear denies, 1 early-exit gate, 2 rewrites, 3 CWD safety denies, 3 hard blocks, 2 evidence gates, and 2 human gate enforcers.
+The most complex hook — 11 checks covering 7 nuclear denies, 1 early-exit gate, 2 deny-with-correction, 3 CWD safety denies, 3 hard blocks, 2 evidence gates, and 2 human gate enforcers.
 
 **Nuclear deny** (Check 0 — unconditional, fires first):
 
@@ -350,12 +345,12 @@ False positive safety: `rm -rf ./node_modules` (scoped path), `curl ... | jq` (j
 
 Strips quoted strings from the command, then checks if `git` appears in a command position (start of line, or after `&&`, `||`, `|`, `;`). If no git command is found, exits immediately — skipping checks 2–8. This prevents false positives where git subcommand keywords appear inside quoted arguments (e.g., `todo.sh add "fix git committing"` or `echo "git merge strategy"`).
 
-**Transparent rewrites** (model's command silently replaced with safe alternative):
+**Deny with correction** (command denied, safe alternative in the deny message — `updatedInput` rewrites are non-functional in PreToolUse hooks):
 
-| Check | Trigger | Rewrite |
-|-------|---------|---------|
-| 1 | `/tmp/` or `/private/tmp/` write | → project `tmp/` directory (macOS symlink-aware; exempts Claude scratchpad) |
-| 3 | `git push --force` (not to main) | → `--force-with-lease` |
+| Check | Trigger | Correction |
+|-------|---------|------------|
+| 1 | `/tmp/` or `/private/tmp/` write | → denied, project `tmp/` path in message (macOS symlink-aware; exempts Claude scratchpad) |
+| 3 | `git push --force` (not to main) | → denied, `--force-with-lease` in message |
 
 **Hard blocks** (deny with explanation):
 
@@ -400,30 +395,6 @@ The composite score takes the worst tier across both signals. If either hits den
 
 ---
 
-## Key auto-review.sh Behaviors
-
-An 840-line policy engine that replaces the blunt "allow or ask" permission model with intelligent classification:
-
-| Tier | Behavior | How It Decides |
-|------|----------|---------------|
-| **1 — Safe** | Auto-approve | Command is inherently read-only: `ls`, `cat`, `grep`, `cd`, `echo`, `sort`, `wc`, `date`, etc. |
-| **2 — Behavior-dependent** | Analyze subcommand + flags | `git status` ✅ auto-approve; `git rebase` ⚠️ advisory. Compound commands (`&&`, `\|\|`, `;`, `\|`) decomposed — every segment must be safe |
-| **3 — Always risky** | Advisory context → defer to user | `rm`, `sudo`, `kill`, `ssh`, `eval`, `bash -c` — risk reason injected so the permission prompt explains *why* |
-
-**Recursive analysis:** Command substitutions (`$()` and backticks) are analyzed to depth 2. `cd $(git rev-parse --show-toplevel)` auto-approves because both `cd` (Tier 1) and `git rev-parse` (Tier 2 → read-only) are safe.
-
-**Dangerous flag escalation:** `--force`, `--hard`, `--no-verify`, `-f` (on git) escalate any command to risky regardless of tier.
-
-**Interpreter analysis:** `python`, `node`, `ruby`, `perl` dispatch to `analyze_interpreter()` which distinguishes safe forms (script files, `-m module`, `--version`) from risky forms (`-c`/`-e` inline code, no-args interactive REPL). This mirrors the existing `analyze_shell()` pattern for `bash`/`sh`/`zsh`.
-
-**Interaction with guard.sh:** Guard runs first (sequential in settings.json). If guard denies, auto-review never executes. If guard allows/passes through, auto-review classifies. This means guard handles the hard security boundaries, auto-review handles the UX of permission prompts.
-
-**Permission evaluation order:** Hooks fire before the settings.json allow/deny lists. The full chain is: (1) PreToolUse hooks fire (guard.sh → auto-review.sh); (2) if a hook emits `permissionDecision: allow` → command proceeds with no prompt; (3) if a hook emits `permissionDecision: deny` → command blocked; (4) if no hook has an opinion → fall through to settings.json deny/allow rules; (5) if no rule matches → fall through to the permission mode (plan, default, etc.). This means most `Bash(echo *)`, `Bash(cat *)` entries in the settings.json allow list are redundant — auto-review.sh approves them as Tier 1 before the allow list is ever consulted.
-
-**Git commit/push/merge reclassification:** These are classified as risky (return 1) rather than safe. This ensures every `git commit`, `git push`, and `git merge` triggers a user permission prompt, enforcing Guardian agent dispatch (Sacred Practice #8). Trade-off: Guardian's own git calls also trigger the prompt, meaning the user approves twice (Guardian plan + actual command). Acceptable — one extra click for mechanical enforcement.
-
----
-
 ## Enforcement Patterns
 
 Three patterns recur across the hook system:
@@ -447,7 +418,7 @@ Three patterns recur across the hook system:
 
 | Hook | Denies with Correction |
 |------|------------------------|
-| **guard.sh** | `/tmp/` → denied, project `tmp/` path in message; `--force` → denied, `--force-with-lease` in message; `worktree remove` → denied, safe `cd`-first command in message |
+| **pre-bash.sh** | `/tmp/` → denied, project `tmp/` path in message; `--force` → denied, `--force-with-lease` in message; `worktree remove` → denied, safe `cd`-first command in message |
 
 ---
 
@@ -515,7 +486,7 @@ Hook registration in `../settings.json` → `hooks` object:
 ## Testing
 
 ```bash
-# Run the full test suite (162 tests)
+# Run the full test suite (160+ tests)
 bash tests/run-hooks.sh
 
 # Run a targeted subset with --scope (faster feedback during hook development)
