@@ -17,6 +17,28 @@ Referenced from `CLAUDE.md` — read when orchestrating agent dispatch or unders
 > Hook matchers use `"Task|Agent"` for compatibility. This document uses
 > "Agent dispatch" to refer to agent invocation via the Agent tool.
 
+<!-- DISPATCH-INJECT-START -->
+## Dispatch Summary
+
+The orchestrator dispatches to specialized agents — it does NOT write source code directly.
+
+| Task | Agent | Orchestrator May? |
+|------|-------|--------------------|
+| Planning, architecture | **Planner** | No Write/Edit for source |
+| Implementation, tests | **Implementer** | No — worktree only |
+| E2E verification | **Tester** | No — must invoke |
+| Commits, merges, branches | **Guardian** | No git commit/merge/push |
+| Initiative evaluation | **Governor** | Dispatch after planner (2+ waves) or initiative completion |
+| Research, reading code | Orchestrator | Read/Grep/Glob only |
+
+Key rules:
+- Auto-dispatch tester after implementer returns (no asking)
+- Auto-dispatch guardian when AUTO-VERIFIED appears
+- Simple tasks (≤2 files, clear requirements) can skip planner
+- Wave items dispatch in parallel (one implementer per worktree)
+- Main is sacred — feature work in worktrees only
+<!-- DISPATCH-INJECT-END -->
+
 ## Agent Dispatch Table
 
 The orchestrator dispatches to specialized agents — it does NOT write source code directly.
