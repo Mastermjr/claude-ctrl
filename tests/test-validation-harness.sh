@@ -189,7 +189,9 @@ echo "--- guardian-success ---"
     tid=$(setup_fixture "guardian-success" "$proj" "$start_sha")
 
     # Write start SHA so finalize_trace can compare it
-    echo "$start_sha" > "${CLAUDE_DIR}/.guardian-start-sha"
+    _gs_phash=$(project_hash "$proj")
+    mkdir -p "${CLAUDE_DIR}/state/${_gs_phash}"
+    echo "$start_sha" > "${CLAUDE_DIR}/state/${_gs_phash}/guardian-start-sha"
 
     # Advance HEAD so current SHA differs from start SHA
     echo "more work" >> "$proj/file.txt"
@@ -220,7 +222,9 @@ echo "--- guardian-partial ---"
     tid=$(setup_fixture "guardian-partial" "$proj" "$start_sha")
 
     # Write start SHA — same as current HEAD, so no change detected
-    echo "$start_sha" > "${CLAUDE_DIR}/.guardian-start-sha"
+    _gp_phash=$(project_hash "$proj")
+    mkdir -p "${CLAUDE_DIR}/state/${_gp_phash}"
+    echo "$start_sha" > "${CLAUDE_DIR}/state/${_gp_phash}/guardian-start-sha"
 
     # No new commit — HEAD stays the same
     finalize_trace "$tid" "$proj" "guardian" 2>/dev/null
@@ -247,7 +251,9 @@ echo "--- guardian-failure ---"
     start_sha=$(git -C "$proj" rev-parse HEAD)
     tid=$(setup_fixture "guardian-failure" "$proj" "$start_sha")
 
-    echo "$start_sha" > "${CLAUDE_DIR}/.guardian-start-sha"
+    _gf_phash=$(project_hash "$proj")
+    mkdir -p "${CLAUDE_DIR}/state/${_gf_phash}"
+    echo "$start_sha" > "${CLAUDE_DIR}/state/${_gf_phash}/guardian-start-sha"
 
     finalize_trace "$tid" "$proj" "guardian" 2>/dev/null
     outcome=$(get_outcome "$tid")

@@ -393,11 +393,12 @@ finalize_trace() {
     if [[ "$agent_type" == "guardian" ]]; then
         # Guardian success: HEAD SHA changed (commit occurred)
         # Check CLAUDE_DIR env var first (set by production hooks), then derive from project.
-        # Using two locations handles both production (CLAUDE_DIR set) and test environments
-        # (CLAUDE_DIR may be a test-scoped temp dir).
+        # Using state/{phash}/guardian-start-sha path — legacy dotfile path removed (DEC-STATE-DOTFILE-002).
         local _claude_dir_local="${CLAUDE_DIR:-}"
         [[ -z "$_claude_dir_local" ]] && _claude_dir_local="${project_root}/.claude"
-        local _start_sha_file="${_claude_dir_local}/.guardian-start-sha"
+        local _tl_phash
+        _tl_phash=$(project_hash "$project_root" 2>/dev/null || echo "")
+        local _start_sha_file="${_claude_dir_local}/state/${_tl_phash}/guardian-start-sha"
         local _current_sha=""
         local _start_sha=""
         _current_sha=$(git -C "$project_root" rev-parse HEAD 2>/dev/null || echo "")

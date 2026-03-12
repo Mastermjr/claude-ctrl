@@ -112,7 +112,9 @@ get_outcome() {
 
     # Record start SHA, then make a new commit
     start_sha=$(git -C "$proj" rev-parse HEAD)
-    echo "$start_sha" > "${CLAUDE_DIR}/.guardian-start-sha"
+    _t1_phash=$(project_hash "$proj")
+    mkdir -p "${CLAUDE_DIR}/state/${_t1_phash}"
+    echo "$start_sha" > "${CLAUDE_DIR}/state/${_t1_phash}/guardian-start-sha"
 
     echo "commit during test" >> "$proj/file.txt"
     git -C "$proj" add file.txt
@@ -139,7 +141,9 @@ get_outcome() {
 
     # Record start SHA but don't make a new commit
     start_sha=$(git -C "$proj" rev-parse HEAD)
-    echo "$start_sha" > "${CLAUDE_DIR}/.guardian-start-sha"
+    _t2_phash=$(project_hash "$proj")
+    mkdir -p "${CLAUDE_DIR}/state/${_t2_phash}"
+    echo "$start_sha" > "${CLAUDE_DIR}/state/${_t2_phash}/guardian-start-sha"
 
     # Summary must be >50 chars to trigger "partial" (not "skipped") when no HEAD change
     echo "# Guardian ran but made no commit — reviewed staged files and provided advisory" > "${tdir}/summary.md"
@@ -163,7 +167,9 @@ get_outcome() {
 
     # Record start SHA but don't advance HEAD
     start_sha=$(git -C "$proj" rev-parse HEAD)
-    echo "$start_sha" > "${CLAUDE_DIR}/.guardian-start-sha"
+    _t3_phash=$(project_hash "$proj")
+    mkdir -p "${CLAUDE_DIR}/state/${_t3_phash}"
+    echo "$start_sha" > "${CLAUDE_DIR}/state/${_t3_phash}/guardian-start-sha"
 
     echo "# Guardian encountered MERGE CONFLICT — merge aborted" > "${tdir}/summary.md"
     finalize_trace "$tid" "$proj" "guardian" 2>/dev/null
