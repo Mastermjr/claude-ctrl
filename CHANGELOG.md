@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - `feature/rm-proof-epoch`: Remove dead `.proof-epoch` flat file — SQLite `proof_state.epoch` column is sole epoch authority since W5-2; removed touch/cleanup from session-init.sh and session-end.sh, removed from core-lib.sh protected files registry, updated gate descriptions in pre-write.sh (DEC-STATE-DOTFILE-001)
+- `feature/remove-legacy-dotfiles`: Remove legacy dotfile read/write paths and migrate Gate A to SQLite — trace-lib.sh and post-task.sh fixed to use `state/{phash}/` instead of legacy `.guardian-start-sha` and `.last-tester-trace` paths; subagent-start.sh and check-guardian.sh legacy writes/fallbacks removed; task-track.sh Gate A proof check migrated from flat-file `resolve_proof_file()` to `proof_state_get()`, fixing Guardian dispatch deadlock caused by W5-2 removing flat-file writes (DEC-STATE-DOTFILE-002, DEC-STATE-DOTFILE-003)
 
 ### Fixed
 - `worktree-agent-a526b1e3`: Proof gate deadlock when post-task.sh summary.md detection fails — 5-component interlock: loud advisory + signal file (C1), tester dispatch breadcrumb in task-track.sh (C2), AUTOVERIFY relay detection in prompt-submit.sh (C3), .last-tester-trace at SubagentStart (C4), emergency Check 9 override with 300s TTL (C5); 17 dedicated tests (DEC-AV-LOUD-FAIL-001, DEC-AV-BREADCRUMB-001/002, DEC-AV-RELAY-001, DEC-AV-OVERRIDE-001)
