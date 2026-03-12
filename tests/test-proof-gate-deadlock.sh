@@ -5,7 +5,7 @@
 #   Component 1: post-task.sh emits advisory (not silent exit) when SUMMARY_TEXT empty
 #   Component 2: task-track.sh writes tester-dispatch-session breadcrumb on tester dispatch
 #   Component 3: prompt-submit.sh promotes proof when AUTOVERIFY: CLEAN in orchestrator prompt
-#   Component 4: subagent-start.sh writes .last-tester-trace at trace creation time
+#   Component 4: subagent-start.sh writes last-tester-trace at trace creation time (state/ path only)
 #   Component 5: pre-bash.sh allows proof-status write when .autoverify-failed signal active
 #
 # Usage: ( cd /path/to/worktree && bash tests/test-proof-gate-deadlock.sh )
@@ -87,7 +87,6 @@ teardown() {
     # TEST_PROJECT_PATH kept alive for CLAUDE_PROJECT_DIR -d check; removed in final_cleanup.
     rm -f "${TEST_HOOK_CLAUDE_DIR}/.autoverify-failed" 2>/dev/null || true
     rm -f "${TEST_HOOK_CLAUDE_DIR}/.agent-findings" 2>/dev/null || true
-    rm -f "${TEST_HOOK_CLAUDE_DIR}/.last-tester-trace" 2>/dev/null || true
     rm -f "${TEST_STATE_DIR}/last-tester-trace" 2>/dev/null || true
     rm -f "${TEST_STATE_DIR}/tester-dispatch-session" 2>/dev/null || true
     rm -f "${TEST_STATE_DIR}/proof-status" 2>/dev/null || true
@@ -247,9 +246,9 @@ teardown
 mkdir -p "$TEST_STATE_DIR"
 
 # ---
-# COMPONENT 4: subagent-start.sh writes .last-tester-trace at trace creation
+# COMPONENT 4: subagent-start.sh writes last-tester-trace at trace creation
 # ---
-section "Component 4: subagent-start.sh writes .last-tester-trace at trace creation"
+section "Component 4: subagent-start.sh writes last-tester-trace at trace creation"
 
 _C4_INPUT=$(printf '{"agent_type":"tester","prompt":"verify","cwd":"%s","session_id":"%s"}' \
     "$WORKTREE_DIR" "$TEST_SESSION_ID")
@@ -257,7 +256,7 @@ _C4_INPUT=$(printf '{"agent_type":"tester","prompt":"verify","cwd":"%s","session
 _C4_OUT="" _C4_ERR=""
 run_hook "subagent-start.sh" "$_C4_INPUT" _C4_OUT _C4_ERR || true
 
-# Test 4.1: project-scoped breadcrumb
+# Test 4.1: project-scoped breadcrumb (new canonical path)
 _LTT_SCOPED="${TEST_STATE_DIR}/last-tester-trace"
 if [[ -f "$_LTT_SCOPED" ]]; then
     pass "4.1: project-scoped last-tester-trace written at trace creation"
@@ -266,12 +265,12 @@ else
     echo "    STDERR: $(echo "$_C4_ERR" | grep -i 'breadcrumb\|tester' | head -3)"
 fi
 
-# Test 4.2: legacy path breadcrumb
+# Test 4.2: legacy dotfile path NOT written (DEC-STATE-DOTFILE-002 — dual-write window closed)
 _LTT_LEGACY="${TEST_HOOK_CLAUDE_DIR}/.last-tester-trace"
-if [[ -f "$_LTT_LEGACY" ]]; then
-    pass "4.2: legacy .last-tester-trace also written (backward compat)"
+if [[ ! -f "$_LTT_LEGACY" ]]; then
+    pass "4.2: legacy .last-tester-trace NOT written (legacy path removed)"
 else
-    fail "4.2: legacy .last-tester-trace NOT written at ${_LTT_LEGACY}"
+    fail "4.2: legacy .last-tester-trace still written at ${_LTT_LEGACY} — should be removed"
 fi
 
 # Test 4.3: breadcrumb is non-empty

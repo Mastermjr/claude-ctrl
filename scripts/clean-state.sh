@@ -243,13 +243,13 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. Guardian start SHA files (.guardian-start-sha-{phash})
+# 3. Guardian start SHA files (state/*/guardian-start-sha)
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "${BOLD}3. Guardian start SHA files (.guardian-start-sha*)${NC}"
+echo "${BOLD}3. Guardian start SHA files (state/*/guardian-start-sha)${NC}"
 FOUND_GUARDIAN=0
 
-for sha_file in "$CLAUDE_DIR"/.guardian-start-sha*; do
+for sha_file in "$CLAUDE_DIR"/state/*/guardian-start-sha; do
     [[ -f "$sha_file" ]] || continue
     FOUND_GUARDIAN=$((FOUND_GUARDIAN + 1))
     sha_val=$(cat "$sha_file" 2>/dev/null | tr -d '[:space:]' | head -c 12)
@@ -260,7 +260,7 @@ for sha_file in "$CLAUDE_DIR"/.guardian-start-sha*; do
     if [[ "$age_d" -gt 7 ]]; then
         report_stale_file "$sha_file" "SHA=${sha_val:-unknown}, age=${age_d}d (>7 days)" "guardian-sha"
     else
-        echo "  ${GREEN}[valid]${NC} $(basename "$sha_file"): sha=${sha_val:-unknown}, age=${age_h}h"
+        echo "  ${GREEN}[valid]${NC} $(basename "$(dirname "$sha_file")")/guardian-start-sha: sha=${sha_val:-unknown}, age=${age_h}h"
         echo ""
     fi
 done
@@ -268,20 +268,20 @@ done
 [[ "$FOUND_GUARDIAN" -eq 0 ]] && echo "  No guardian-start-sha files found." && echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Last tester trace files (.last-tester-trace-{phash})
+# 4. Last tester trace files (state/*/last-tester-trace)
 # ─────────────────────────────────────────────────────────────────────────────
 
-echo "${BOLD}4. Last tester trace files (.last-tester-trace*)${NC}"
+echo "${BOLD}4. Last tester trace files (state/*/last-tester-trace)${NC}"
 FOUND_TESTER=0
 
-for trace_file in "$CLAUDE_DIR"/.last-tester-trace*; do
+for trace_file in "$CLAUDE_DIR"/state/*/last-tester-trace; do
     [[ -f "$trace_file" ]] || continue
     FOUND_TESTER=$((FOUND_TESTER + 1))
     trace_val=$(cat "$trace_file" 2>/dev/null | tr -d '[:space:]')
     mtime=$(_file_mtime "$trace_file")
     now=$(date +%s)
     age_d=$(( (now - mtime) / 86400 ))
-    echo "  ${CYAN}[info]${NC} $(basename "$trace_file"): trace=${trace_val:-unknown}, age=${age_d}d"
+    echo "  ${CYAN}[info]${NC} $(basename "$(dirname "$trace_file")")/last-tester-trace: trace=${trace_val:-unknown}, age=${age_d}d"
     echo ""
 done
 

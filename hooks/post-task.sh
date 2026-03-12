@@ -125,7 +125,10 @@ _write_diagnostic_summary() {
     case "$agent_type" in
         guardian)
             local start_sha="" current_sha="" log_line=""
-            local sha_file="${CLAUDE_DIR:-$project_root/.claude}/.guardian-start-sha"
+            local _diag_claude_dir="${CLAUDE_DIR:-$project_root/.claude}"
+            local _diag_phash
+            _diag_phash=$(project_hash "$project_root" 2>/dev/null || echo "")
+            local sha_file="${_diag_claude_dir}/state/${_diag_phash}/guardian-start-sha"
             [[ -f "$sha_file" ]] && start_sha=$(cat "$sha_file" 2>/dev/null || echo "")
             current_sha=$(git -C "$project_root" rev-parse HEAD 2>/dev/null || echo "")
             if [[ -n "$start_sha" && -n "$current_sha" && "$start_sha" != "$current_sha" ]]; then
@@ -328,12 +331,8 @@ fi
 # This bypasses the marker race entirely — check-tester.sh writes the breadcrumb
 # AFTER finalize_trace deletes the marker, so it's always available.
 if [[ -z "$_AV_TRACE_ID" ]]; then
-    # Check new path first (state/{phash}/last-tester-trace), fall back to legacy
     _PHASH_PTB=$(project_hash "$PROJECT_ROOT")
     _BREADCRUMB="${CLAUDE_DIR}/state/${_PHASH_PTB}/last-tester-trace"
-    if [[ ! -f "$_BREADCRUMB" ]]; then
-        _BREADCRUMB="${CLAUDE_DIR}/.last-tester-trace"
-    fi
     if [[ -f "$_BREADCRUMB" ]]; then
         _candidate=$(cat "$_BREADCRUMB" 2>/dev/null)
         _cmf="${TRACE_STORE}/${_candidate}/manifest.json"
@@ -341,8 +340,7 @@ if [[ -z "$_AV_TRACE_ID" ]]; then
             _AV_TRACE_ID="$_candidate"
             log_info "POST-TASK" "found tester trace via breadcrumb: $_AV_TRACE_ID"
         fi
-        # Consume both breadcrumb locations
-        rm -f "${CLAUDE_DIR}/state/${_PHASH_PTB}/last-tester-trace" "${CLAUDE_DIR}/.last-tester-trace"
+        rm -f "${CLAUDE_DIR}/state/${_PHASH_PTB}/last-tester-trace"
     fi
 fi
 

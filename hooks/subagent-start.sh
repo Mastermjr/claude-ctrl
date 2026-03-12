@@ -66,24 +66,30 @@ case "$AGENT_TYPE" in
         fi
         # DUAL-WRITE: dotfile .active-TYPE-SESSION-PHASH already written by init_trace() above.
 
-        # Write .last-tester-trace breadcrumb at trace creation time for tester agents.
+        # Write last-tester-trace breadcrumb at trace creation time for tester agents.
         #
         # @decision DEC-AV-BREADCRUMB-002
-        # @title Write .last-tester-trace at SubagentStart init_trace time (not SubagentStop)
+        # @title Write last-tester-trace at SubagentStart init_trace time (not SubagentStop)
         # @status accepted
         # @rationale The breadcrumb was previously only written by check-tester.sh (SubagentStop),
-        #   which does not fire reliably. post-task.sh Tier 0 reads .last-tester-trace to find the
+        #   which does not fire reliably. post-task.sh Tier 0 reads last-tester-trace to find the
         #   active tester trace without needing SubagentStop. Writing the breadcrumb HERE, at trace
         #   creation time (SubagentStart fires reliably for testers), guarantees the breadcrumb
         #   exists before PostToolUse:Task fires. This eliminates the race where Tier 0 fails because
-        #   check-tester.sh never ran (SubagentStop skipped). Both project-scoped and legacy paths
-        #   are written for backward compatibility with the dual-path check in post-task.sh Tier 0.
+        #   check-tester.sh never ran (SubagentStop skipped).
+        #
+        # @decision DEC-STATE-DOTFILE-002
+        # @title Remove legacy dotfile paths for guardian-start-sha and last-tester-trace
+        # @status accepted
+        # @rationale Both breadcrumb files already write to state/{phash}/ paths. Legacy
+        #   dotfile writes were retained during State Unification dual-write window.
+        #   Window is now closed — all readers migrated to state/{phash}/ path. trace-lib.sh
+        #   and post-task.sh were the last holdouts reading only the legacy path.
         if [[ "$AGENT_TYPE" == "tester" && -n "$TRACE_ID" ]]; then
             _BCRUMB_PHASH=$(project_hash "$PROJECT_ROOT")
             _BCRUMB_STATE_DIR="${CLAUDE_DIR}/state/${_BCRUMB_PHASH}"
             mkdir -p "$_BCRUMB_STATE_DIR" 2>/dev/null || true
             echo "$TRACE_ID" > "${_BCRUMB_STATE_DIR}/last-tester-trace" 2>/dev/null || true
-            echo "$TRACE_ID" > "${CLAUDE_DIR}/.last-tester-trace" 2>/dev/null || true
             log_info "SUBAGENT-START" "tester trace breadcrumb written: ${TRACE_ID}"
         fi
         ;;
@@ -364,7 +370,6 @@ case "$AGENT_TYPE" in
         _PHASH_GSS=$(project_hash "$PROJECT_ROOT")
         mkdir -p "${CLAUDE_DIR}/state/${_PHASH_GSS}" 2>/dev/null || true
         git -C "$PROJECT_ROOT" rev-parse HEAD > "${CLAUDE_DIR}/state/${_PHASH_GSS}/guardian-start-sha" 2>/dev/null || true
-        git -C "$PROJECT_ROOT" rev-parse HEAD > "${CLAUDE_DIR}/.guardian-start-sha" 2>/dev/null || true  # legacy
         # Inject test status
         TEST_STATUS_FILE="${CLAUDE_DIR}/.test-status"
         if [[ -f "$TEST_STATUS_FILE" ]]; then

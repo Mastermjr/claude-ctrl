@@ -272,6 +272,21 @@ else
     fail_test "last-tester-trace state writes still present in check-tester.sh"
 fi
 
+run_test "Fix 4: subagent-start.sh does NOT write legacy .last-tester-trace dotfile (DEC-STATE-DOTFILE-002)"
+# Legacy dotfile write removed — only state/{phash}/last-tester-trace is written
+if ! grep -q '\.last-tester-trace"' "$HOOKS_DIR/subagent-start.sh"; then
+    pass_test
+else
+    fail_test "Legacy .last-tester-trace write still present in subagent-start.sh"
+fi
+
+run_test "Fix 4: subagent-start.sh does NOT write legacy .guardian-start-sha dotfile (DEC-STATE-DOTFILE-002)"
+if ! grep -q '\.guardian-start-sha"' "$HOOKS_DIR/subagent-start.sh"; then
+    pass_test
+else
+    fail_test "Legacy .guardian-start-sha write still present in subagent-start.sh"
+fi
+
 # =============================================================================
 # Fix 5: detect_workflow_id() function in source-lib.sh
 # =============================================================================

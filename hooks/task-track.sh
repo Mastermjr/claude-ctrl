@@ -293,20 +293,28 @@ if [[ "$AGENT_TYPE" == "guardian" ]]; then
             log_info "guardian-proof-gate" "plan-only merge bypass (@plan-update or @no-source in prompt) — all staged files are plan-related — proof gate skipped" 2>/dev/null || true
         fi
     fi
-    PROOF_FILE=$(resolve_proof_file)
-    [[ ! -f "$PROOF_FILE" ]] && PROOF_FILE=""
-    if [[ "$_PROOF_BYPASS" != "true" && -n "$PROOF_FILE" && -f "$PROOF_FILE" ]]; then
-        if validate_state_file "$PROOF_FILE" 2; then
-            PROOF_STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
-        else
-            PROOF_STATUS="corrupt"
-        fi
+    # --- Gate A: proof-of-work via SQLite (sole authority since W5-2) ---
+    # @decision DEC-STATE-DOTFILE-003
+    # @title Migrate Gate A proof check from flat-file to proof_state_get()
+    # @status accepted
+    # @rationale This was a missed W2-1 migration site. resolve_proof_file() returns a path
+    #   to a flat file that no longer exists (flat-file writes removed in W5-2), causing
+    #   validate_state_file() to fail → "corrupt" status → Guardian dispatch blocked.
+    #   All other proof gate readers already use proof_state_get(). This completes the migration.
+    PROOF_STATUS=""
+    _GA_HAS_PROOF=""
+    _GA_PSG=$(proof_state_get 2>/dev/null || true)
+    if [[ -n "$_GA_PSG" ]]; then
+        PROOF_STATUS=$(printf '%s' "$_GA_PSG" | cut -d'|' -f1)
+        _GA_HAS_PROOF=true
+    fi
+    if [[ "$_PROOF_BYPASS" != "true" && -n "$_GA_HAS_PROOF" ]]; then
         if [[ "$PROOF_STATUS" != "verified" ]]; then
             _write_gate_denied_trace "guardian" "gate-a-proof" "Proof status is '${PROOF_STATUS}' (requires 'verified')" 2>/dev/null || true
             emit_deny "Cannot dispatch Guardian: proof-of-work is '$PROOF_STATUS' (requires 'verified'). Dispatch tester or complete verification before dispatching Guardian."
         fi
     fi
-    if [[ "$_PROOF_BYPASS" == "true" || -n "$PROOF_FILE" ]]; then
+    if [[ "$_PROOF_BYPASS" == "true" || -n "$_GA_HAS_PROOF" ]]; then
         # Pre-create guardian marker to close dispatch race (Issue #151).
         # track.sh (PostToolUse:Write|Edit) checks .active-guardian-* to skip proof
         # invalidation during Guardian's merge cycle. Without this, any Write/Edit between
