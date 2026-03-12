@@ -16,7 +16,7 @@
 **Languages:** Bash (85%), Markdown (10%), JSON/Python (5%)
 **Root:** `/Users/turla/.claude`
 **Created:** 2026-02-06
-**Last updated:** 2026-03-09
+**Last updated:** 2026-03-12
 
 The Claude Code configuration directory that shapes how Claude Code operates across all projects. It enforces development practices via hooks (deterministic shell scripts intercepting every tool call), four specialized agents (Planner, Implementer, Tester, Guardian), skills, and session instructions. Instructions guide; hooks enforce.
 
@@ -189,13 +189,17 @@ project's institutional memory.
 | 2026-03-09 | DEC-STATE-UNIFY-005 | state-unification | Event ledger with consumer checkpoints | Append-only events table with per-consumer offsets; enables async governor triggers, observatory signals, cross-session coordination |
 | 2026-03-09 | DEC-STATE-UNIFY-006 | state-unification | Lint enforcement gated on migration completion | Cannot deny dotfile I/O while hooks still use it; enforce only after W5-1 complete |
 | 2026-03-09 | DEC-STATE-UNIFY-007 | state-unification | Version-gated fallback for backward compatibility | Graceful mixed-version handling during dual-read window; multiple Claude instances may run different code |
+| 2026-03-12 | DEC-STATE-UNIFY-008 | state-unification | Single SQLite DB for state + events + observatory signals | ~365K events/year (~180MB); WAL handles concurrency; second DB only for large blobs |
+| 2026-03-12 | DEC-STATE-UNIFY-009 | state-unification | Events are institutional memory — never deleted | User directive: archive to cold storage, never discard; observatory organizes history |
+| 2026-03-12 | DEC-STATE-UNIFY-010 | state-unification | Observatory converges into event ledger as consumer | Unifies observatory into same coordination substrate as governor triggers and proof transitions |
 
 ---
 
 ## Active Initiatives
 
 ### Initiative: Governance Efficiency
-**Status:** reverted (2b1f32a, 2026-03-10)
+**Status:** completed
+**Reverted:** 2b1f32a, 2026-03-10
 **Revert Rationale:** All 5 commits reverted (2,524 lines removed). W1 keyword cache keyed on GIT_DIRTY_COUNT — invalidated on every file write, 0% hit rate. W2 cross-hook caching added complexity without proportional benefit. Two out-of-scope commits (T2 backstop a94b562, governor wiring eed29d1) landed during same session — T2 blocked auto-verify with impossible regex, governor wiring injected signals unconditionally. Cumulative effect: governance signal overload degrading agent performance. See #222 for governor wiring redesign. The underlying goal (reduce overhead) remains valid; implementation approach was flawed.
 **Started:** 2026-03-09
 **Goal:** Reduce governance overhead (60-310% token excess on easy tasks) through targeted signal noise reduction, caching, and deduplication — without weakening any safety gates.
@@ -778,8 +782,9 @@ Main is sacred. The `db-safety` branch was created from main for this initiative
 ---
 
 ### Initiative: State Unification
-**Status:** active
+**Status:** completed
 **Started:** 2026-03-09
+**Completed:** 2026-03-12
 **Goal:** Replace the four overlapping state management eras (dotfiles, state.json+jq, atomic tmp->mv, shadow SQLite) with SQLite as sole authority -- typed schema, migration discipline, event-driven coordination, and lint enforcement to prevent regression.
 
 > The hook system's state management has four overlapping eras coexisting simultaneously: raw dotfiles, jq+flock on state.json, atomic tmp->mv with monotonic lattice, and SQLite WAL. SQLite was added as Wave 1 of the Robust State Management initiative but ALL writes are best-effort shadows (`type state_update &>/dev/null && ... || true`). Flat files remain authoritative. This dual-authority system has produced 20+ state-related fixes across 755 commits, with 5 recurring failure patterns: session ID loss (5 independent fixes), proof file location instability (3 paths for same data), TTL-based marker falsification (3+ fixes), marker false positives (glob-based detection errors), and partial write corruption. Every new hook that touches state must navigate this archaeological layering. Additionally, all write transactions use `BEGIN;` instead of `BEGIN IMMEDIATE;`, creating a deadlock window under concurrent hook processes. This initiative eliminates the flat-file layer entirely, promotes SQLite to sole authority, adds typed schema with migration discipline, and introduces an event ledger for async coordination.
@@ -834,7 +839,7 @@ Main is sacred. The `db-safety` branch was created from main for this initiative
 
 **Nice-to-Have (P1)**
 
-- REQ-P1-SU-001: `state_gc_events` for event table garbage collection -- consumer-based (delete events older than oldest checkpoint)
+- REQ-P1-SU-001: ~~`state_gc_events` for event table garbage collection~~ **Superseded by DEC-STATE-UNIFY-009** — events are institutional memory, never deleted. Future: archive to cold storage (events_archive table).
 - REQ-P1-SU-002: Migration rollback support -- `_migrations` table tracks rollback SQL for each migration
 - REQ-P1-SU-003: `state_history_query` for structured history queries (by key, time range, source)
 
@@ -1086,6 +1091,54 @@ All 9 P0 requirements pass their acceptance criteria. SQLite is the sole authori
 - `hooks/core-lib.sh` -- protected registry update, read_test_status migration (W5-2)
 - `hooks/lint.sh` -- new dotfile I/O deny rule (W5-2)
 
+<!--
+@decision DEC-STATE-UNIFY-008
+@title Single SQLite DB for state + events + observatory signals
+@status accepted
+@rationale Scale analysis: ~365K events/year at ~500 bytes each = ~180MB annually.
+  Well within SQLite's capabilities (tested to TB scale). WAL mode handles concurrent
+  hook access (many readers, one writer). Only risk: long-running analytical queries
+  delaying WAL checkpointing. Solved with BEGIN DEFERRED snapshot reads or DB copy
+  for analytics. A second database is only warranted for large blobs (raw traces).
+  Structured event data belongs in the same DB as the state it describes.
+-->
+
+- DEC-STATE-UNIFY-008: Single SQLite DB for state + events + observatory signals
+  Addresses: REQ-P2-SU-001.
+  Rationale: Scale analysis shows ~365K events/year (~180MB). WAL mode handles concurrent hook access. Checkpoint contention from long analytics queries solved with snapshot reads (`BEGIN DEFERRED`). A second DB is only warranted for large blobs (raw trace files). All structured data — proof_state, agent_markers, events, observatory signals — belongs in one database.
+
+<!--
+@decision DEC-STATE-UNIFY-009
+@title Events are institutional memory — never deleted
+@status accepted
+@rationale User directive: events are the complete record of how the system has been
+  functioning. The observatory organizes and derives insight from this history.
+  Efficiency comes from better indexing and archival (hot/cold storage), not deletion.
+  state_gc_events() call removed from stop.sh. Future: archive old events to
+  events_archive table or JSONL export for cold storage. See issue #229.
+  Supersedes the GC design in DEC-STATE-UNIFY-005.
+-->
+
+- DEC-STATE-UNIFY-009: Events are institutional memory — never deleted
+  Addresses: REQ-P1-SU-001 (supersedes).
+  Rationale: User directive — events are the system's institutional memory, the complete record of how the system has been functioning. The observatory organizes and derives insight from this history. Efficiency comes from better indexing and archival (hot/cold storage via `events_archive` table), not deletion. `state_gc_events()` call removed from stop.sh.
+
+<!--
+@decision DEC-STATE-UNIFY-010
+@title Observatory converges into event ledger as a consumer
+@status accepted
+@rationale The observatory currently reads flat trace files and produces suggestions.
+  With the event ledger in place, observatory signals (trace analysis results,
+  improvement suggestions, pattern detections) should be emitted as events and
+  consumed via state_events_since("observatory"). This unifies the observatory
+  into the same coordination substrate as governor triggers and proof transitions.
+  Follow-on initiative, not blocking for State Unification completion.
+-->
+
+- DEC-STATE-UNIFY-010: Observatory converges into event ledger as a consumer
+  Addresses: REQ-P2-SU-001, REQ-P2-SU-002.
+  Rationale: With the event ledger in place, observatory signals should be emitted as events and consumed via `state_events_since("observatory")`. Unifies observatory into the same coordination substrate as governor triggers and proof transitions. Follow-on work.
+
 ##### Decision Log
 <!-- Guardian appends here after wave completion -->
 
@@ -1125,6 +1178,7 @@ Main is sacred. Each wave dispatches parallel worktrees:
 | Robust State Management | 2026-03-02 to 2026-03-05 | 2 (of 7 planned) | DEC-RSM-REGISTRY-001 through DEC-RSM-SELFCHECK-001 (6 decisions) | No |
 | Prompt Purpose Restoration | 2026-03-07 to 2026-03-09 | 3 (W1-1, W1-2, W2-1) | DEC-PROMPT-001, DEC-PROMPT-002, DEC-PROMPT-003, DEC-PROMPT-004 | No |
 | Governance Signal Audit | 2026-03-07 to 2026-03-09 | 1 (W1-3) | DEC-AUDIT-002, DEC-RECK-013 | No |
+| State Unification | 2026-03-09 to 2026-03-12 | 6 (W1-W6) | DEC-STATE-UNIFY-001 through DEC-STATE-UNIFY-010 (10 decisions) | No |
 
 ### Governance Efficiency — Summary
 
@@ -1215,6 +1269,19 @@ Produced a comprehensive governance signal map documenting all 24 hook registrat
 
 W2-2 (formalize optimization proposals) deemed unnecessary (DEC-RECK-013) — the 7 proposals in the signal map are already actionable. 1 architectural decision (DEC-AUDIT-002) plus closure decision (DEC-RECK-013). Issue closed: #145.
 
+### State Unification — Summary
+
+Replaced four overlapping state management eras (dotfiles, state.json+jq, atomic tmp->mv, shadow SQLite) with SQLite as sole authority. Six waves over 3 days:
+
+1. **W1-1: Schema + Migration Framework** (feature/su-w1-schema): `_migrations` table, idempotent runner, `BEGIN IMMEDIATE` upgrade. #213
+2. **W1-2: Proof State Typed Table** (feature/su-w1-proof-table): `proof_state` table with monotonic lattice, dual-read fallback. #214
+3. **W2-1: Hook Migration** (feature/su-w2-proof-migration): 7 hooks migrated from flat-file proof I/O to proof_state API, dual-write preserved. #215
+4. **W3-W4: Markers + Events** (merged earlier): `agent_markers` table with PID liveness, `events` + `event_checkpoints` tables with consumer pattern. #216-#218
+5. **W5-1/W5-2: Completion** (feature/state-unify-w5-2): Removed all flat-file fallback paths, dual-read window closed, lint enforcement active, legacy code removed. Discovered and fixed critical bugs: epoch reset deadlock (#227 — lattice permanently blocked after first merge), silent error swallowing (#228 — `|| true` hiding sole-authority failures). #219-#220
+6. **W6-1: Event Integration** (feature/state-unify-w6-1): Event GC removed per user directive — events are institutional memory, never deleted. Observatory and governor wired as event consumers. #221
+
+All 9 P0 requirements satisfied. SQLite is the sole authoritative state store — zero flat-file state I/O. Key bugs fixed: epoch reset (DEC-EPOCH-RESET-001/002), error propagation (DEC-EPOCH-RESET-003), malformed workflow_id cleanup (DEC-EPOCH-RESET-004). Architectural decisions: single DB for all structured data (DEC-STATE-UNIFY-008), no event deletion (DEC-STATE-UNIFY-009), observatory convergence as follow-on (DEC-STATE-UNIFY-010). 10 decisions total (DEC-STATE-UNIFY-001 through 010). Issues closed: #213, #214, #215, #220, #221, #224, #225, #227, #228, #229. Remaining: #223 (state.db file-operation protection gap), #226 (DB-SAFE-A1 heredoc false positive).
+
 ---
 
 ## Parked Issues
@@ -1226,9 +1293,9 @@ Issues not belonging to any active initiative. Tracked for future consideration.
 | #15 | ExitPlanMode spin loop fix | Blocked on upstream claude-code#26651 |
 | #14 | PreToolUse updatedInput support | Blocked on upstream claude-code#26506 |
 | #13 | Deterministic agent return size cap | Blocked on upstream claude-code#26681 |
-| #37 | Close Write-tool loophole for .proof-status bypass | **Active** — Phase 0 of Robust State Management |
+| #37 | Close Write-tool loophole for .proof-status bypass | Mitigated — SQLite is sole authority (State Unification); flat-file bypass no longer affects proof gate. File-level state.db protection tracked in #223. |
 | #36 | Evaluate Opus for implementer agent | Not in remediation scope |
 | #25 | Create unified model provider library | Not in remediation scope |
-| SQLite Unified State Store (#128-#134) | SQLite WAL state backend replacing flat-file state. Wave 1 (core API + tests) merged to main. Waves 2-4 pending: hook integration, migration, cleanup. 8 planning decisions (DEC-SQLITE-001 through 008). | **Superseded** by State Unification initiative (active). Wave 1 code (state-lib.sh API) is the foundation that State Unification builds on. Remaining waves (hook integration, migration, cleanup) are covered by State Unification W2-W5. |
+| SQLite Unified State Store (#128-#134) | SQLite WAL state backend replacing flat-file state. 8 planning decisions (DEC-SQLITE-001 through 008). | **Superseded** — fully completed by State Unification initiative (2026-03-12). Wave 1 API was the foundation; all remaining waves delivered. |
 | Operational Mode System (#114-#118) | 4-tier mode taxonomy (Observe/Amend/Patch/Build) with escalation engine and hook integration. 9 planning decisions. Deep-research validated. | Ambitious for current project scale. Revisit when multi-user or multi-project usage patterns emerge. |
 | Backlog Auto-Capture (cancelled) | Automatic issue creation from conversation keywords. 5 planning decisions. | Cancelled (DEC-RECK-006): manual /backlog command is sufficient. prompt-submit.sh already auto-detects deferred-work language. |
