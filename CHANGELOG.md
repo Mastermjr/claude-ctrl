@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `feature/dispatch-inject`: Dynamic dispatch summary injection — DISPATCH.md maintains a delimited summary section that session-init.sh extracts and injects into session context at startup, single source of truth for dispatch routing; CLAUDE.md v2.4 slims dispatch rules to pointer, removes redundant paragraph (DEC-DISPATCH-INJECT-001)
 - `worktree-agent-a72614e7`: Agent context injection optimization — shared-protocols.md reduced 37% (2568->1626 bytes), subagent-start.sh now uses section-aware extraction with per-agent-type conditional injection (governor skips CWD Safety, implementer gets lockfile reminder), HTML comment stripping prevents @decision annotations from entering agent context (DEC-PROMPT-002)
 
+### Removed
+- `feature/rm-proof-epoch`: Remove dead `.proof-epoch` flat file — SQLite `proof_state.epoch` column is sole epoch authority since W5-2; removed touch/cleanup from session-init.sh and session-end.sh, removed from core-lib.sh protected files registry, updated gate descriptions in pre-write.sh (DEC-STATE-DOTFILE-001)
+
 ### Fixed
 - `worktree-agent-a526b1e3`: Proof gate deadlock when post-task.sh summary.md detection fails — 5-component interlock: loud advisory + signal file (C1), tester dispatch breadcrumb in task-track.sh (C2), AUTOVERIFY relay detection in prompt-submit.sh (C3), .last-tester-trace at SubagentStart (C4), emergency Check 9 override with 300s TTL (C5); 17 dedicated tests (DEC-AV-LOUD-FAIL-001, DEC-AV-BREADCRUMB-001/002, DEC-AV-RELAY-001, DEC-AV-OVERRIDE-001)
 
