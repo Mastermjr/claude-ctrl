@@ -72,28 +72,29 @@ fi
 # These tests validate the Guardian gate behavior in task-track.sh
 
 # Helper to run task-track.sh with mock input
-# resolve_proof_file() uses CLAUDE_DIR to locate the proof-status file.
-# We set CLAUDE_DIR="$TEMP_REPO/.claude" so the hook reads from our isolated dir.
-# Proof-status is written to the new canonical path: state/{phash}/proof-status.
+# Gate A now reads proof state via proof_state_get() (SQLite sole authority since W5-2).
+# We seed the SQLite DB via proof_state_set() with PROJECT_ROOT pointing to the temp repo.
+# The flat-file path is no longer relevant to Gate A.
 run_task_track() {
     local agent_type="$1"
-    local proof_file="$2"  # Proof-status content or "missing"
+    local proof_file="$2"  # Proof-status content (pipe-delimited) or "missing"
 
     # Create a temp git repo (not meta-repo)
     local TEMP_REPO
     TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-pg-repo-XXXXXX")
+    _CLEANUP_DIRS+=("$TEMP_REPO")
     git -C "$TEMP_REPO" init > /dev/null 2>&1
     mkdir -p "$TEMP_REPO/.claude"
 
-    # Compute project hash for this temp repo (matches what task-track.sh will compute)
-    local PHASH
-    PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
-
-    # Set up proof-status at new canonical path (state/{phash}/proof-status) if not missing.
-    # Also write to old path for migration-fallback coverage.
+    # Seed SQLite proof_state table if not "missing".
+    # proof_state_get() queries SQLite; flat-file writes are not read by Gate A.
     if [[ "$proof_file" != "missing" ]]; then
-        mkdir -p "$TEMP_REPO/.claude/state/${PHASH}"
-        echo "$proof_file" > "$TEMP_REPO/.claude/state/${PHASH}/proof-status"
+        local proof_status
+        proof_status=$(echo "$proof_file" | cut -d'|' -f1)
+        # Use proof_state_set to write through the same path task-track.sh reads.
+        # Source the state-lib directly (same hooks dir) with isolated PROJECT_ROOT.
+        PROJECT_ROOT="$TEMP_REPO" CLAUDE_DIR="$TEMP_REPO/.claude" \
+            bash -c "source '${HOOKS_DIR}/source-lib.sh'; require_state; proof_state_set '${proof_status}' 'test-setup'" 2>/dev/null || true
     fi
 
     # Mock input JSON
@@ -110,18 +111,12 @@ EOF
 )
 
     # Run hook with mocked environment.
-    # CLAUDE_DIR is set to the isolated .claude dir so resolve_proof_file() finds
-    # the test's proof-status file rather than ~/.claude's real state.
-    # CLAUDE_PROJECT_DIR must prefix the bash invocation (right side of pipe),
-    # not the echo (left side). See Issue #53.
+    # CLAUDE_PROJECT_DIR / PROJECT_ROOT scoped to temp repo so proof_state_get()
+    # reads from the isolated SQLite DB, not ~/.claude real state.
     local OUTPUT
     OUTPUT=$(cd "$TEMP_REPO" && \
              echo "$INPUT_JSON" | CLAUDE_PROJECT_DIR="$TEMP_REPO" CLAUDE_DIR="$TEMP_REPO/.claude" bash "$HOOKS_DIR/task-track.sh" 2>&1)
     local EXIT_CODE=$?
-
-    # Cleanup - ensure we're not in TEMP_REPO before deleting
-    cd "$PROJECT_ROOT"
-    rm -rf "$TEMP_REPO"
 
     # Return output and exit code
     echo "$OUTPUT"
@@ -193,28 +188,17 @@ EOF
 
 echo "$INPUT_JSON" | CLAUDE_PROJECT_DIR="$TEMP_REPO" CLAUDE_DIR="$TEMP_REPO/.claude" bash "$HOOKS_DIR/task-track.sh" > /dev/null 2>&1
 
-# Check new canonical path (state/{phash}/proof-status) written by Gate C.2
-_IMPL_NEW_PROOF="$TEMP_REPO/.claude/state/${IMPL_PHASH}/proof-status"
-_IMPL_OLD_PROOF="$TEMP_REPO/.claude/.proof-status-${IMPL_PHASH}"
-if [[ -f "$_IMPL_NEW_PROOF" ]]; then
-    STATUS=$(cut -d'|' -f1 "$_IMPL_NEW_PROOF")
-    if [[ "$STATUS" == "needs-verification" ]]; then
-        pass_test
-    else
-        fail_test "Created state/${IMPL_PHASH}/proof-status with wrong status: $STATUS"
-    fi
-elif [[ -f "$_IMPL_OLD_PROOF" ]]; then
-    STATUS=$(cut -d'|' -f1 "$_IMPL_OLD_PROOF")
-    if [[ "$STATUS" == "needs-verification" ]]; then
-        pass_test
-    else
-        fail_test "Created .proof-status-${IMPL_PHASH} with wrong status: $STATUS"
-    fi
+# Gate C.2 writes proof state to SQLite (sole authority since W5-2).
+# Query via proof_state_get with PROJECT_ROOT scoped to the temp repo.
+_IMPL_SQLITE_STATUS=$(PROJECT_ROOT="$TEMP_REPO" CLAUDE_DIR="$TEMP_REPO/.claude" \
+    bash -c "source '${HOOKS_DIR}/source-lib.sh'; require_state; proof_state_get 2>/dev/null | cut -d'|' -f1" 2>/dev/null || echo "")
+if [[ "$_IMPL_SQLITE_STATUS" == "needs-verification" ]]; then
+    pass_test
+elif [[ -n "$_IMPL_SQLITE_STATUS" ]]; then
+    fail_test "Gate C wrote wrong status to SQLite: ${_IMPL_SQLITE_STATUS} (expected needs-verification)"
 else
-    fail_test "Implementer did not create proof-status file (checked new and old paths)"
+    fail_test "Implementer did not create proof state in SQLite (proof_state_get returned empty)"
 fi
-
-rm -rf "$TEMP_REPO"
 
 # --- Test 11: gate activation only when missing ---
 run_test "Gate C: Implementer does not overwrite existing .proof-status"
