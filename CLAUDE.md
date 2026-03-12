@@ -1,4 +1,4 @@
-# CLAUDE.md — v2.3
+# CLAUDE.md — v2.4
 
 This file provides guidance to Claude Code when working in any project. It is loaded every session, so it must stay lean. Detailed procedures live in referenced docs — read them when relevant.
 
@@ -75,14 +75,8 @@ When commands produce verbose output (build logs, test results, git diffs):
 
 ## Dispatch Rules
 
-The orchestrator dispatches to specialized agents — it does NOT write source code directly. See `docs/DISPATCH.md` for the full dispatch protocol including routing table, gates, and interruption handling.
-
-Key principles:
-- Orchestrator researches and dispatches; agents implement
-- Main is sacred — feature work in worktrees only
-- Auto-dispatch tester after implementer returns (no asking)
-- Auto-dispatch guardian when AUTO-VERIFIED appears
-- Simple tasks (≤2 file bug fixes, clear requirements, existing plan) can skip planner — see docs/DISPATCH.md "Simple Task Fast Path"
+The orchestrator dispatches to specialized agents — it does NOT write source code directly.
+Full protocol: `docs/DISPATCH.md`. Summary injected at session start.
 
 ## Sacred Practices
 
@@ -103,8 +97,6 @@ These are not mere technical rules — they are sacred practices that honor the 
 ## Code is Truth
 
 The codebase is the primary source of truth. Document each function and file header with intended use, rationale, and implementation specifics. Add `@decision` annotations to significant files (50+ lines). Hooks enforce this automatically — you work normally, the hooks enforce the rest.
-
-I won't rely on abandoned fragmentary documentation that grows stale. Instead, I document the code at the top of each function and each file to describe the intended use, the rationale, and the implementation specifics. This approach is applied recursively upward for every function → file → component so that truth flows upward and is current and reliable at every step. My peers can rely on my work always and will delight in using what I create.
 
 When code and plan diverge: **HOW** divergence (algorithm, library) → code wins, @decision captures rationale. **WHAT** divergence (wrong feature, missing scope) → plan wins, requires user approval.
 

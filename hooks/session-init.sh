@@ -660,6 +660,24 @@ else
     CONTEXT_PARTS+=("Plan: not found (required before implementation)")
 fi
 
+# --- Dispatch summary injection (maintained in docs/DISPATCH.md) ---
+# @decision DEC-DISPATCH-INJECT-001
+# @title Inject dispatch summary from docs/DISPATCH.md into session context
+# @status accepted
+# @rationale The orchestrator needs dispatch rules every session but the full
+#   docs/DISPATCH.md is ~300 lines. The DISPATCH-INJECT-START/END markers in
+#   docs/DISPATCH.md delimit a compact summary (~20 lines) with the key routing
+#   rules. Injecting it here ensures every session has orchestrator dispatch
+#   rules without loading the full protocol doc. Placed after MASTER_PLAN.md
+#   injection so plan context comes first (higher priority).
+DISPATCH_FILE="$CLAUDE_DIR/docs/DISPATCH.md"
+if [[ -f "$DISPATCH_FILE" ]]; then
+  DISPATCH_SUMMARY=$(awk '/<!-- DISPATCH-INJECT-START -->/{found=1; next} /<!-- DISPATCH-INJECT-END -->/{found=0} found' "$DISPATCH_FILE")
+  if [[ -n "$DISPATCH_SUMMARY" ]]; then
+    CONTEXT_PARTS+=("$DISPATCH_SUMMARY")
+  fi
+fi
+
 # --- Doc freshness status ---
 # Advisory injection — stale docs surfaced alongside plan staleness.
 # get_doc_freshness uses cached results (DEC-DOCFRESH-002) so startup cost is
