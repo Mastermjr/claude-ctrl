@@ -889,6 +889,19 @@ if [[ -d "$TRACE_STORE" ]]; then
         CONTEXT_PARTS+=("Migrated: removed legacy .proof-status (replaced by scoped .proof-status-${_PHASH})")
     fi
 
+    # @decision DEC-EPOCH-RESET-004
+    # @title Clean malformed workflow_ids in proof_state table at session start
+    # @status accepted
+    # @rationale Manual testing / probing can write proof_state rows with malformed
+    #   workflow_ids like "_main" (no 8-char hex prefix). These rows are unreachable
+    #   by any hook (workflow_id() always returns a valid hash_name format) and
+    #   accumulate as test debris. Cleaning them at session start prevents confusion
+    #   in state diagnostics. Valid workflow_ids match: 8-char-hex-hash underscore name.
+    #   The "_main" entry was written by source="probe" — not a real hook (#228 test debris).
+    if declare -f _state_sql >/dev/null 2>&1; then
+        _state_sql "DELETE FROM proof_state WHERE workflow_id NOT GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]_*';" 2>/dev/null || true
+    fi
+
     # Surface last completed trace for current project
     if [[ -f "$TRACE_STORE/index.jsonl" ]]; then
         PROJECT_NAME=$(basename "$PROJECT_ROOT")

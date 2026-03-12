@@ -126,8 +126,8 @@ Source with: `source "$(dirname "$0")/log.sh"`
 | `detect_project_root` | Returns `$CLAUDE_PROJECT_DIR` → git root → `$HOME` (fallback chain) |
 | `is_same_project(dir)` | Compares `git rev-parse --git-common-dir` for current project vs target dir. Returns 0 if same repo (handles worktrees). Defined in `guard.sh` |
 | `extract_git_target_dir(cmd)` | Parses `cd /path && git ...` or `git -C /path ...` to find git target directory. Falls back to CWD. Defined in `guard.sh` |
-| `resolve_proof_file <root>` | Finds `.proof-status` via breadcrumb-based worktree resolution (DEC-PROOF-PATH-002) |
-| `write_proof_status <status> [root]` | Atomic write to all 3 proof-status paths (worktree, project-scoped, legacy) |
+| `resolve_proof_file <root>` | **Deprecated (W5-2)** — returns empty string. Proof state is now in SQLite via `proof_state_get()`/`proof_state_set()` in `state-lib.sh`. |
+| `write_proof_status <status> [root]` | Writes proof status to SQLite via `proof_state_set()` (W5-2: SQLite-only, no flat-file writes). Enforces monotonic lattice atomically. |
 | `log_info <stage> <msg>` | Human-readable stderr log |
 | `log_json <stage> <msg>` | Structured JSON stderr log |
 
@@ -444,7 +444,7 @@ Hooks communicate across events through state files in the project's `.claude/` 
 | File | Written By | Read By | Contents |
 |------|-----------|---------|----------|
 | `.test-status` | test-runner.sh | guard.sh (evidence gate), test-gate.sh, session-summary.sh, check-implementer.sh, check-guardian.sh, subagent-start.sh | `result\|fail_count\|timestamp` — cleared at session start by session-init.sh to prevent stale passes from satisfying the commit gate |
-| `.proof-status` | tester agent writes `pending`, prompt-submit.sh writes `verified` on user approval, check-tester.sh writes `verified` on auto-verify (High confidence, clean e2e) | guard.sh (evidence gate), track.sh (invalidation), check-tester.sh, task-track.sh (Guardian gate) | `status\|timestamp` — `verified` or `pending`. prompt-submit.sh (user approval) and check-tester.sh (auto-verify) can write `verified`. guard.sh Check 9 blocks Bash tool writes but not hook file operations. track.sh resets to `pending` when source files change after verification |
+| `state/state.db` → `proof_state` table | log.sh `write_proof_status()` → `proof_state_set()`, check-tester.sh, prompt-submit.sh, task-track.sh | guard.sh (evidence gate), check-guardian.sh, pre-bash.sh, post-write.sh | SQLite-backed proof state via `state-lib.sh` API: `proof_state_set(status, source)` / `proof_state_get()` (returns `status\|epoch\|updated_at\|updated_by`). Monotonic lattice enforced by `state_cas()`. Flat-file `.proof-status-{phash}` is **deprecated** — no longer written since W5-2. `resolve_proof_file()` is deprecated (returns empty). |
 | `.plan-drift` | surface.sh | plan-check.sh (staleness scoring) | Structured key=value: `unplanned_count`, `unimplemented_count`, `missing_decisions`, `total_decisions`, `source_files_changed`, `unaddressed_p0s`, `nogo_count` |
 | `.agent-findings` | check-planner.sh, check-implementer.sh, check-guardian.sh | session-init.sh, prompt-submit.sh, compact-preserve.sh | `agent_type\|issue1;issue2` — cleared after injection (one-shot delivery) |
 | `.preserved-context` | compact-preserve.sh | session-init.sh | Full session state snapshot — injected after compaction, then deleted (one-time use) |
