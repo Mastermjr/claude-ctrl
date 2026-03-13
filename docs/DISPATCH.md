@@ -17,6 +17,28 @@ Referenced from `CLAUDE.md` — read when orchestrating agent dispatch or unders
 > Hook matchers use `"Task|Agent"` for compatibility. This document uses
 > "Agent dispatch" to refer to agent invocation via the Agent tool.
 
+<!-- DISPATCH-INJECT-START -->
+## Dispatch Summary
+
+The orchestrator dispatches to specialized agents — it does NOT write source code directly.
+
+| Task | Agent | Orchestrator May? |
+|------|-------|--------------------|
+| Planning, architecture | **Planner** | No Write/Edit for source |
+| Implementation, tests | **Implementer** | No — worktree only |
+| E2E verification | **Tester** | No — must invoke |
+| Commits, merges, branches | **Guardian** | No git commit/merge/push |
+| Initiative evaluation | **Governor** | Dispatch after planner (2+ waves) or initiative completion |
+| Research, reading code | Orchestrator | Read/Grep/Glob only |
+
+Key rules:
+- Auto-dispatch tester after implementer returns (no asking)
+- Auto-dispatch guardian when AUTO-VERIFIED appears
+- Simple tasks (≤2 files, clear requirements) can skip planner
+- Wave items dispatch in parallel (one implementer per worktree)
+- Main is sacred — feature work in worktrees only
+<!-- DISPATCH-INJECT-END -->
+
 ## Agent Dispatch Table
 
 The orchestrator dispatches to specialized agents — it does NOT write source code directly.
@@ -27,6 +49,7 @@ The orchestrator dispatches to specialized agents — it does NOT write source c
 | Implementation, tests | **Implementer** | No — must invoke implementer. Orchestrator controls the full cycle (implement → test → verify → commit). |
 | E2E verification, demos | **Tester** | No — must invoke tester |
 | Commits, merges, branches | **Guardian** | No git commit/merge/push/branch -d/-D |
+| Plan/initiative evaluation | **Governor** | No — dispatch after planner (2+ waves), after initiative completion, before reckoning |
 | Worktree creation (bootstrap) | Orchestrator | Yes — `git worktree add` before implementer dispatch |
 | Research, reading code | Orchestrator / Explore | Read/Grep/Glob only |
 | Post-guardian health check | Orchestrator | Invoke `/diagnose` when check-guardian.sh suggests it |
@@ -55,6 +78,38 @@ Detection: `git ls-files --error-unmatch MASTER_PLAN.md` (exit 0 = tracked = ame
 
 The orchestrator owns worktree creation because it is infrastructure, not source code.
 Gate C.1 in task-track.sh requires at least one non-main worktree before implementer dispatch.
+
+### Simple Task Fast Path
+
+<!--
+@decision DEC-DISPATCH-002
+@title Simple Task Fast Path — skip planner for clearly-simple tasks
+@status accepted
+@rationale Benchmark data shows 60-310% token overhead on easy tasks from governance
+  ceremony that doesn't scale with complexity. Allowing the orchestrator to skip planning
+  for clearly-simple tasks reduces overhead while maintaining safety through worktrees,
+  tests, and @decision annotations.
+-->
+
+Not every task needs full ceremony. The orchestrator MAY skip the planner and dispatch
+the implementer directly when ALL of these hold:
+
+- Task scope is ≤2 files (clear from the request)
+- No architectural decisions needed (no new patterns, no API design)
+- An active MASTER_PLAN.md already exists (amendment context available)
+- The task is a bug fix, typo correction, or small enhancement to existing code
+
+When using the fast path:
+- The implementer still works in a worktree (Sacred Practice #2)
+- The implementer still runs tests (Sacred Practice #4)
+- The implementer still creates @decision annotations for non-obvious choices
+- But NO planner dispatch, NO MASTER_PLAN.md amendment, NO issue creation
+
+**Escalation signals** (abandon fast path, invoke planner):
+- Task touches ≥3 files or creates new modules
+- Task requires new interfaces or API design
+- Task has ambiguous requirements or multiple valid approaches
+- Implementation reveals unexpected complexity
 
 ## TEST_SCOPE Signal
 
@@ -89,6 +144,22 @@ own worktree, with its own tester→guardian cycle.
 
 **Auto-dispatch to Tester:** After the implementer returns successfully (tests pass, no blocking issues), dispatch the tester automatically with the implementer's trace context. Do NOT ask "should I verify?" — just dispatch the tester.
 
+**Auto-dispatch to Governor:** The governor operates in two modes — health pulse (fast, ~3-5K tokens) and full evaluation (~15-20K tokens). Dispatch rules:
+
+- **Pre-implementation (planner returns 2+ waves):** Dispatch governor in **pulse mode** by default. If pulse returns "drifting" or "stale" with flags, escalate to full evaluation before dispatching implementer.
+- **Post-completion (all phases merged):** Full evaluation (rare, high-leverage — always worth the cost).
+- **Reckoning-input (Phase 2 of /reckoning):** Full evaluation.
+- **Health pulse (orchestrator judgment):** Dispatch when session-init signals stale docs/plan, after change bursts or ad-hoc commits outside the plan, or periodically in meta-infrastructure projects (~/.claude). The orchestrator decides — no mechanical threshold.
+
+Governor results are always advisory:
+- **Pulse: healthy** = continue normally
+- **Pulse: drifting/stale** = review flags, consider full evaluation before proceeding
+- **Full: proceed** = continue to implementation normally
+- **Full: caution** = present concerns to user before dispatching implementer
+- **Full: block** = present to user and wait for guidance before proceeding
+
+After initiative completion (all phases merged, before `compress_initiative()`), dispatch the governor for post-completion full evaluation.
+
 **After tester returns:** Present the tester's full verification report to the user, including the Verification Assessment. Do NOT summarize it into a keyword demand. Engage in Q&A about the evidence. When the user expresses approval, prompt-submit.sh handles the gate transition automatically.
 
 ## Auto-Verify Fast Path
@@ -104,6 +175,8 @@ When the orchestrator receives this system-reminder:
 
 If auto-verify doesn't trigger, the manual flow applies: present the tester's
 report, engage in Q&A, user approval triggers prompt-submit.sh gate transition.
+
+When post-task.sh emits `AUTOVERIFY EXPECTED` (tester met criteria but omitted signal), the orchestrator MAY dispatch Guardian with `INFER-VERIFY` in the prompt. Guardian performs its own inference check and proceeds with a softer approval if criteria are confirmed. This is a fallback, not a replacement for the primary auto-verify path.
 
 ## Manual Approval Fast Path
 
@@ -121,6 +194,8 @@ AUTO-VERIFY-APPROVED`. This is functionally equivalent to the auto-verify path a
 - Tester dispatch: requires implementer to have returned with tests passing
 - Guardian dispatch: requires `.proof-status = verified` when file exists (PreToolUse:Task|Agent gate in task-track.sh). Missing file = no gate (bootstrap path — implementer dispatch activates the gate by writing `needs-verification`)
 - The user's approval (verified, approved, lgtm, looks good, ship it) triggers `.proof-status = verified` via prompt-submit.sh — no agent can write it
+- INFER-VERIFY dispatches still require proof-status to be at least pending (not missing).
+- Governor dispatch: no proof-status gate, no worktree gate. Governor is read-only and advisory.
 
 ## Trace and Recovery Protocols
 

@@ -53,7 +53,7 @@ if [[ "${HOOK_GATE_SCAN:-}" == "1" ]]; then
     exit 0
 fi
 
-HOOK_INPUT=$(read_input)
+init_hook
 FILE_PATH=$(get_field '.tool_input.file_path')
 
 # Exit silently if no file path
@@ -150,25 +150,49 @@ if [[ -e "$(dirname "$FILE_PATH")" ]]; then
             #   the guardian marker before task-track.sh writes the canonical format.
             #   When cut -d'|' -f2 produces non-numeric output, fall back to file mtime.
             #   A recently-created file (within GUARDIAN_ACTIVE_TTL) is still active.
-            _pw_now=$(date +%s)
-            for _gm in "${TRACE_STORE:-$HOME/.claude/traces}/.active-guardian-"*; do
-                if [[ -f "$_gm" ]]; then
-                    _marker_ts=$(cut -d'|' -f2 "$_gm" 2>/dev/null || echo "")
-                    # Fallback: no pipe delimiter → use file mtime
-                    if [[ ! "$_marker_ts" =~ ^[0-9]+$ ]]; then
-                        _marker_ts=$(_file_mtime "$_gm")
-                    fi
-                    if [[ "$_marker_ts" =~ ^[0-9]+$ && $(( _pw_now - _marker_ts )) -lt ${GUARDIAN_ACTIVE_TTL:-600} ]]; then
-                        _guardian_active=true; break
-                    fi
-                fi
-            done
+            #
+            # @decision DEC-STATE-UNIFY-004
+            # @title W3-2: SQLite PRIMARY marker check in post-write.sh with dotfile fallback
+            # @status accepted
+            # @rationale marker_query provides PID liveness — dead-PID markers excluded.
+            #   SQLite detection is tried first; dotfile glob is FALLBACK (W5-2 remove)
+            #   for pre-migration markers. Both guardian and autoverify markers are checked.
 
-            # Check auto-verify markers (same TTL — protects verified→guardian gap)
+            # --- W3-2: PRIMARY — SQLite marker_query (guardian and autoverify) ---
+            declare -f require_state >/dev/null 2>&1 && require_state 2>/dev/null || true
+            if declare -f marker_query >/dev/null 2>&1; then
+                _pw_sql_guardian=$(marker_query "guardian" 2>/dev/null || echo "")
+                if [[ -n "$_pw_sql_guardian" ]]; then
+                    _guardian_active=true
+                else
+                    _pw_sql_autoverify=$(marker_query "autoverify" 2>/dev/null || echo "")
+                    [[ -n "$_pw_sql_autoverify" ]] && _guardian_active=true
+                fi
+            fi
+
+            # --- W3-2: FALLBACK — dotfile glob (W5-2 remove when SQLite is sole source) ---
+            if [[ "$_guardian_active" == "false" ]]; then
+                _pw_now=$(date +%s)
+                for _gm in "${TRACE_STORE:-$HOME/.claude/traces}/.active-guardian-"*; do
+                    if [[ -f "$_gm" ]]; then
+                        _marker_ts=$(cut -d'|' -f2 "$_gm" 2>/dev/null || echo "")
+                        # Fallback: no pipe delimiter → use file mtime
+                        if [[ ! "$_marker_ts" =~ ^[0-9]+$ ]]; then
+                            _marker_ts=$(_file_mtime "$_gm")
+                        fi
+                        if [[ "$_marker_ts" =~ ^[0-9]+$ && $(( _pw_now - _marker_ts )) -lt ${GUARDIAN_ACTIVE_TTL:-600} ]]; then
+                            _guardian_active=true; break
+                        fi
+                    fi
+                done
+            fi
+
+            # Check auto-verify markers — FALLBACK dotfile (W5-2 remove)
             # @decision DEC-PROOF-RACE-001: Auto-verify markers created by post-task.sh and
             # check-tester.sh protect the window between "verified" write and Guardian dispatch.
             # Same TTL as guardian markers prevents permanent blocking from crashes.
             if [[ "$_guardian_active" == "false" ]]; then
+                _pw_now=$(date +%s)
                 for _avm in "${TRACE_STORE:-$HOME/.claude/traces}/.active-autoverify-"*; do
                     if [[ -f "$_avm" ]]; then
                         _marker_ts=$(cut -d'|' -f2 "$_avm" 2>/dev/null || echo "")
@@ -213,6 +237,10 @@ if [[ -e "$(dirname "$FILE_PATH")" ]]; then
                         fi
                         # Only downgrade: verified→pending (not committed→pending, etc.)
                         if [[ "$_wf_current" == "verified" || "$_wf_current" == "needs-verification" || -z "$_wf_current" ]]; then
+                            # --- W2-1: PRIMARY write to SQLite via proof_state_set (DEC-STATE-UNIFY-004) ---
+                            declare -f proof_state_set >/dev/null 2>&1 && \
+                                PROJECT_ROOT="$PROJECT_ROOT" proof_state_set "pending" "post-write-wf" 2>/dev/null || true
+                            # DUAL-WRITE: flat file (W5-2 remove when all readers migrated to proof_state_get)
                             printf 'pending|%s\n' "$(date +%s)" > "${_wf_proof_file}.tmp" && \
                                 mv "${_wf_proof_file}.tmp" "$_wf_proof_file" || true
                         fi
@@ -221,6 +249,10 @@ if [[ -e "$(dirname "$FILE_PATH")" ]]; then
                         # || true: write_proof_status returns 1 if the monotonic lattice
                         # (DEC-PROOF-LATTICE-001) rejects verified→pending without an epoch reset.
                         # Non-fatal: if the epoch reset isn't set up, proof stays verified.
+                        # --- W2-1: PRIMARY write to SQLite via proof_state_set (DEC-STATE-UNIFY-004) ---
+                        declare -f proof_state_set >/dev/null 2>&1 && \
+                            PROJECT_ROOT="$PROJECT_ROOT" proof_state_set "pending" "post-write-main" 2>/dev/null || true
+                        # DUAL-WRITE: flat file (W5-2 remove when all readers migrated to proof_state_get)
                         write_proof_status "pending" "$PROJECT_ROOT" || true
                     fi
                 fi

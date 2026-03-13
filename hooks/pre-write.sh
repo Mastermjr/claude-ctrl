@@ -68,7 +68,7 @@ if [[ "${HOOK_GATE_SCAN:-}" == "1" ]]; then
     exit 0
 fi
 
-HOOK_INPUT=$(read_input)
+init_hook
 FILE_PATH=$(get_field '.tool_input.file_path')
 TOOL_NAME=$(get_field '.tool_name')
 
@@ -152,6 +152,26 @@ else
         _DO_BRANCH_CHECK=true  # already-tracked MASTER_PLAN.md: enforce branch guard
     elif is_source_file "$FILE_PATH" && ! is_skippable_path "$FILE_PATH"; then
         _DO_BRANCH_CHECK=true
+    # Governance-critical markdown files are as critical as source code.
+    # agents/*.md, docs/*.md, CLAUDE.md, and ARCHITECTURE.md define agent behavior
+    # and system governance — changes propagate immediately to all future dispatches.
+    # Two features (b4f2b6c, f5f45a1) bypassed governance by modifying these files
+    # on main without worktrees. Protecting them like source closes this gap.
+    #
+    # @decision DEC-RECK-011
+    # @title Extend branch guard to governance-critical markdown
+    # @status accepted
+    # @rationale agents/*.md, docs/*.md, CLAUDE.md define agent behavior and system
+    #   governance. Changes propagate immediately to all future agent dispatches.
+    #   Two features (b4f2b6c, f5f45a1) bypassed governance by modifying these files
+    #   on main without worktrees. Protecting them like source closes this gap.
+    #   MASTER_PLAN.md is handled separately above (bootstrap exception).
+    #   The check is scoped to main/master — worktree branches are always allowed.
+    elif [[ "$FILE_PATH" =~ /agents/[^/]+\.md$ || \
+            "$FILE_PATH" =~ /docs/[^/]+\.md$ || \
+            "$(basename "$FILE_PATH")" == "CLAUDE.md" || \
+            "$(basename "$FILE_PATH")" == "ARCHITECTURE.md" ]]; then
+        _DO_BRANCH_CHECK=true
     fi
 
     if [[ "$_DO_BRANCH_CHECK" == "true" ]]; then
@@ -170,6 +190,11 @@ else
                 if [[ -z "$GIT_DIR" || ! -f "$GIT_DIR/MERGE_HEAD" ]]; then
                     if [[ "$(basename "$FILE_PATH")" == "MASTER_PLAN.md" ]]; then
                         emit_deny "BLOCKED: MASTER_PLAN.md is already tracked. Amend it in a worktree, not on main. Create a worktree: git worktree add .worktrees/feature-name -b feature/name"
+                    elif [[ "$FILE_PATH" =~ /agents/[^/]+\.md$ || \
+                            "$FILE_PATH" =~ /docs/[^/]+\.md$ || \
+                            "$(basename "$FILE_PATH")" == "CLAUDE.md" || \
+                            "$(basename "$FILE_PATH")" == "ARCHITECTURE.md" ]]; then
+                        emit_deny "BLOCKED: Cannot write governance-critical markdown (agents/*.md, docs/*.md, CLAUDE.md, ARCHITECTURE.md) on $CURRENT_BRANCH branch. These files define agent behavior and propagate to all future dispatches — changes require the same worktree isolation as source code (DEC-RECK-011).\n\nAction: git worktree add .worktrees/feature-name -b feature/name, then dispatch Implementer."
                     else
                         emit_deny "BLOCKED: Cannot write source code on $CURRENT_BRANCH branch. Sacred Practice #2: Main is sacred.\n\nAction: Invoke the Guardian agent to create an isolated worktree for this work."
                     fi

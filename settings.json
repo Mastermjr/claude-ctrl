@@ -81,6 +81,7 @@
     "ask": [],
     "defaultMode": "plan"
   },
+  "model": "opus",
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "context7",
@@ -148,6 +149,16 @@
             "type": "command",
             "command": "$HOME/.claude/hooks/pre-ask.sh",
             "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/pre-mcp.sh",
+            "timeout": 10
           }
         ]
       }
@@ -298,6 +309,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "governor",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/check-governor.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PreCompact": [
@@ -339,9 +360,13 @@
     "command": "$HOME/.claude/scripts/statusline.sh"
   },
   "autoUpdatesChannel": "latest",
+  "voiceEnabled": true,
   "skipDangerousModePermissionPrompt": true,
   "installation": {
     "method": "native"
   },
-  "model": "opus"
+  "effortLevel": "high",
+  "enabledPlugins": {
+    "frontend-design@claude-code-plugins": true
+  }
 }

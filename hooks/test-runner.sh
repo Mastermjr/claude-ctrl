@@ -19,7 +19,7 @@ set -euo pipefail
 
 source "$(dirname "$0")/source-lib.sh"
 
-HOOK_INPUT=$(read_input)
+init_hook
 FILE_PATH=$(get_field '.tool_input.file_path')
 
 # Exit silently if no file path or file doesn't exist

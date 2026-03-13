@@ -22,15 +22,37 @@ require_session
 
 enable_fail_closed "task-track"
 
-HOOK_INPUT=$(read_input)
+init_hook
 AGENT_TYPE=$(get_field '.tool_input.subagent_type')
 AGENT_TYPE="${AGENT_TYPE:-unknown}"
 
 PROJECT_ROOT=$(detect_project_root)
 CLAUDE_DIR=$(get_claude_dir)
 
-# Track spawn (subagent-start.sh handles git/plan state and statusline cache)
-track_subagent_start "$PROJECT_ROOT" "$AGENT_TYPE"
+# Extract session label: worktree name from prompt (preferred) or agent description.
+# This gives each concurrent session a unique Line 3 in the statusline.
+#
+# @decision DEC-SESSION-LABEL-004
+# @title Extract session label at dispatch time in task-track.sh
+# @status accepted
+# @rationale task-track.sh fires PreToolUse:Task|Agent, giving it full access to the
+# dispatch payload (tool_input.description, tool_input.prompt). The worktree name is
+# the most useful identifier — it's unique per-feature and human-readable. The
+# description is the fallback for dispatches without an explicit worktree. Extracted
+# once at dispatch time and stored in the tracker; every subsequent cache refresh
+# preserves it until the agent stops.
+_AGENT_DESC=$(get_field '.tool_input.description' 2>/dev/null || echo "")
+_AGENT_PROMPT=$(get_field '.tool_input.prompt' 2>/dev/null || echo "")
+_SESSION_LABEL=""
+# Extract worktree name from prompt: matches .worktrees/NAME or .worktrees/NAME/
+if [[ "$_AGENT_PROMPT" =~ \.worktrees/([^/[:space:]]+) ]]; then
+    _SESSION_LABEL="${BASH_REMATCH[1]}"
+fi
+# Fall back to agent description when no worktree found in prompt
+_SESSION_LABEL="${_SESSION_LABEL:-$_AGENT_DESC}"
+
+# Track spawn — pass session label so statusline can show per-session context on Line 3
+track_subagent_start "$PROJECT_ROOT" "$AGENT_TYPE" "$_SESSION_LABEL"
 
 # In scan mode: emit all gate declarations and exit cleanly.
 if [[ "${HOOK_GATE_SCAN:-}" == "1" ]]; then
@@ -57,17 +79,198 @@ esac
 require_trace
 mkdir -p "$TRACE_STORE" 2>/dev/null || true
 
+# --- Helper: Write a gate-denied trace record ---
+# Called before any emit_deny() that represents a gate blocking an agent dispatch.
+# Creates a minimal completed trace with outcome="gate-denied" so the observatory
+# can count and filter blocked dispatches separately from real crashes.
+#
+# Unlike init_trace(), this does NOT create an .active-* marker — the agent never
+# started, so no marker lifecycle management is needed. The trace is written
+# directly as completed (status=completed, duration=0) so finalize_trace() in
+# post-task.sh skips it (nothing to finalize).
+#
+# @decision DEC-GATE-DENIED-001
+# @title Write gate-denied trace records to prevent observatory metric skew
+# @status accepted
+# @rationale When task-track.sh denies an agent dispatch, no trace is created.
+#   post-task.sh's universal fallback (DEC-POST-TASK-FALLBACK-001) fires after every
+#   Task/Agent tool completion, including denied ones. It calls finalize_trace on
+#   whatever active trace it finds, producing 0-duration crashed/unknown traces that
+#   inflate skipped/crashed counts and skew outcome distributions in the observatory.
+#   Fix: write a minimal gate-denied trace at deny time with outcome="gate-denied".
+#   post-task.sh finds this trace (via marker scan) and skips finalization because
+#   status=completed. The observatory can filter gate-denied traces separately.
+#   Issue #174.
+_write_gate_denied_trace() {
+    local agent_type="$1"
+    local gate_name="$2"
+    local deny_reason="$3"
+    local session_id="${CLAUDE_SESSION_ID:-$(date +%s)}"
+    local timestamp
+    timestamp=$(date +%Y%m%d-%H%M%S)
+    local hash
+    hash=$(echo "${session_id}" | ${_SHA256_CMD:-shasum -a 256} 2>/dev/null | cut -c1-6)
+    local trace_id="${agent_type}-${timestamp}-${hash}"
+    local trace_dir="${TRACE_STORE}/${trace_id}"
+
+    mkdir -p "${trace_dir}/artifacts" 2>/dev/null || return 0
+
+    local project_name
+    project_name=$(basename "$PROJECT_ROOT")
+    local branch
+    branch=$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    local now_iso
+    now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # Write completed manifest directly — no active marker, no lifecycle hooks.
+    # status=completed prevents post-task.sh from calling finalize_trace on it.
+    cat > "${trace_dir}/manifest.json" <<MANIFEST 2>/dev/null || return 0
+{
+  "version": "1",
+  "trace_id": "${trace_id}",
+  "agent_type": "${agent_type}",
+  "session_id": "${session_id}",
+  "project": "${PROJECT_ROOT}",
+  "project_name": "${project_name}",
+  "branch": "${branch}",
+  "started_at": "${now_iso}",
+  "finished_at": "${now_iso}",
+  "status": "completed",
+  "outcome": "gate-denied",
+  "duration_seconds": 0,
+  "gate": "${gate_name}",
+  "deny_reason": "${deny_reason}"
+}
+MANIFEST
+
+    # Write a minimal summary so the trace isn't classified as "crashed" by other checks
+    echo "# Gate Denied: ${gate_name}" > "${trace_dir}/summary.md" 2>/dev/null || true
+    echo "Agent dispatch blocked at ${gate_name}: ${deny_reason}" >> "${trace_dir}/summary.md" 2>/dev/null || true
+
+    # Index the trace for observatory querying
+    index_trace "$trace_id" 2>/dev/null || true
+}
+
 # --- Gate A.0: Duplicate guardian detection ---
 # Prevents burst dispatch: if another Guardian is already active for this project,
 # deny the new dispatch. Fixes RC7 — 5 guardians spawned in 38 seconds.
+#
+# @decision DEC-STALE-MARKER-004
+# @title Gate A.0 validates trace status before denying Guardian dispatch
+# @status accepted
+# @rationale The original Gate A.0 only checked marker age (< 600s TTL), causing
+#   false blocks in three scenarios:
+#   1. Guardian completes but finalize_trace() fails to clean the marker (timeout
+#      race, session crash) — the marker lingers, blocking the next dispatch.
+#   2. A new session starts — old session's markers persist until 30-min cleanup.
+#   3. A pre-dispatch marker was written (line 139 below) but init_trace() in
+#      SubagentStart never ran (API rate limit, agent refused to start).
+#
+#   Fix mirrors Gate B's DEC-STALE-MARKER-003 pattern: read marker content, look
+#   up the trace manifest status, and clean stale markers rather than blocking.
+#
+#   Three content formats handled:
+#   - trace_id (no | separator): look up manifest.status; if completed/crashed →
+#     marker is stale, clean and allow.
+#   - "pre-dispatch|<epoch>": agent never called init_trace(). The embedded epoch
+#     determines staleness: if > 120s old, agent never started → clean and allow.
+#   - Anything else (unknown format): treat as stale, clean and allow.
+#
+#   Only emit_deny when the trace manifest shows status="active" (genuine conflict)
+#   or when a pre-dispatch marker is < 120s old (agent startup window).
+#
+# @decision DEC-STATE-UNIFY-004
+# @title W3-2: SQLite PRIMARY marker detection in Gate A.0 with dotfile fallback
+# @status accepted
+# @rationale marker_query provides PID liveness self-healing — dead-PID markers
+#   are automatically marked 'crashed' and excluded from results, eliminating the
+#   TTL-only staleness problem. Dotfile glob is kept as FALLBACK (W5-2 remove)
+#   for markers written by init_trace() before W3-2 migration completes.
 if [[ "$AGENT_TYPE" == "guardian" ]]; then
     _PHASH_A0=$(project_hash "$PROJECT_ROOT")
-    _EXISTING_MARKER=$(find "$TRACE_STORE" -name ".active-guardian-*-${_PHASH_A0}" -newer "$TRACE_STORE" -mmin -10 2>/dev/null | head -1)
-    if [[ -n "$_EXISTING_MARKER" ]]; then
-        # Check if the marker is within TTL (600s)
-        _MARKER_AGE=$(( $(date +%s) - $(_file_mtime "$_EXISTING_MARKER") ))
-        if [[ "$_MARKER_AGE" -lt 600 ]]; then
-            emit_deny "Cannot dispatch Guardian: another Guardian is already active for this project (marker: $(basename "$_EXISTING_MARKER"), age: ${_MARKER_AGE}s). Wait for it to complete or clean stale markers."
+
+    # --- W3-2: PRIMARY detection via SQLite marker_query ---
+    # require_state is idempotent; already called above via require_trace path.
+    require_state 2>/dev/null || true
+    _A0_SQL_MARKERS=$(marker_query "guardian" "$(workflow_id 2>/dev/null || echo "main")" 2>/dev/null || echo "")
+
+    if [[ -n "$_A0_SQL_MARKERS" ]]; then
+        # Active guardian found in SQLite — check if pre-dispatch or genuinely active
+        _A0_SQL_STATUS=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f4 | head -1)
+        _A0_SQL_CREATED=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f6 | head -1)
+        _A0_NOW=$(date +%s)
+        _A0_MARKER_AGE=$(( _A0_NOW - ${_A0_SQL_CREATED:-0} ))
+
+        if [[ "$_A0_SQL_STATUS" == "pre-dispatch" ]]; then
+            if [[ "$_A0_MARKER_AGE" -ge 120 ]]; then
+                # Pre-dispatch marker is stale — agent never started. Clean SQLite marker.
+                _A0_SQL_SESSION=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f2 | head -1)
+                _A0_SQL_WF=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f3 | head -1)
+                marker_update "guardian" "$_A0_SQL_SESSION" "$_A0_SQL_WF" "crashed" 2>/dev/null || true
+                # Also clean dotfile fallback (W5-2 remove)
+                rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                # Fall through — no deny
+            else
+                _write_gate_denied_trace "guardian" "gate-a0-duplicate" "Guardian dispatch in progress (age: ${_A0_MARKER_AGE}s, SQLite pre-dispatch)" 2>/dev/null || true
+                emit_deny "Cannot dispatch Guardian: a Guardian dispatch is in progress for this project (age: ${_A0_MARKER_AGE}s). Wait for agent startup to complete or for the 120s window to expire."
+            fi
+        elif [[ "$_A0_SQL_STATUS" == "active" ]]; then
+            _A0_SQL_TRACE=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f7 | head -1)
+            # Check if the trace manifest confirms active status
+            _A0_MANIFEST="${TRACE_STORE}/${_A0_SQL_TRACE}/manifest.json"
+            _A0_MF_STATUS="unknown"
+            [[ -n "$_A0_SQL_TRACE" && -f "$_A0_MANIFEST" ]] && \
+                _A0_MF_STATUS=$(jq -r '.status // "unknown"' "$_A0_MANIFEST" 2>/dev/null || echo "unknown")
+            if [[ "$_A0_MF_STATUS" == "completed" || "$_A0_MF_STATUS" == "crashed" ]]; then
+                # Trace finalized but SQLite marker not cleaned — stale.
+                _A0_SQL_SESSION=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f2 | head -1)
+                _A0_SQL_WF=$(echo "$_A0_SQL_MARKERS" | cut -d'|' -f3 | head -1)
+                marker_update "guardian" "$_A0_SQL_SESSION" "$_A0_SQL_WF" "completed" 2>/dev/null || true
+                rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                # Fall through — no deny
+            else
+                _write_gate_denied_trace "guardian" "gate-a0-duplicate" "Another Guardian already active (SQLite marker, age: ${_A0_MARKER_AGE}s)" 2>/dev/null || true
+                emit_deny "Cannot dispatch Guardian: another Guardian is already active for this project (age: ${_A0_MARKER_AGE}s). Wait for it to complete or clean stale markers."
+            fi
+        fi
+    else
+        # --- W3-2: FALLBACK — dotfile glob detection (W5-2 remove) ---
+        _EXISTING_MARKER=$(find "$TRACE_STORE" -name ".active-guardian-*-${_PHASH_A0}" -newer "$TRACE_STORE" -mmin -10 2>/dev/null | head -1)
+        if [[ -n "$_EXISTING_MARKER" ]]; then
+            # Check if the marker is within TTL (600s)
+            _MARKER_AGE=$(( $(date +%s) - $(_file_mtime "$_EXISTING_MARKER") ))
+            if [[ "$_MARKER_AGE" -lt 600 ]]; then
+                # Read marker content to distinguish active vs stale markers.
+                _MARKER_CONTENT=$(cat "$_EXISTING_MARKER" 2>/dev/null || echo "")
+
+                if [[ "$_MARKER_CONTENT" == "pre-dispatch|"* ]]; then
+                    _PD_EPOCH=$(echo "$_MARKER_CONTENT" | cut -d'|' -f2)
+                    _PD_AGE=$(( $(date +%s) - ${_PD_EPOCH:-0} ))
+                    if [[ "$_PD_AGE" -ge 120 ]]; then
+                        rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                        # Fall through — no deny
+                    else
+                        _write_gate_denied_trace "guardian" "gate-a0-duplicate" "Guardian dispatch in progress (marker age: ${_MARKER_AGE}s, dispatch age: ${_PD_AGE}s)" 2>/dev/null || true
+                        emit_deny "Cannot dispatch Guardian: a Guardian dispatch is in progress for this project (marker age: ${_MARKER_AGE}s, dispatch age: ${_PD_AGE}s). Wait for agent startup to complete or for the 120s window to expire."
+                    fi
+                elif [[ "$_MARKER_CONTENT" != *"|"* && -n "$_MARKER_CONTENT" ]]; then
+                    _A0_MANIFEST="${TRACE_STORE}/${_MARKER_CONTENT}/manifest.json"
+                    _A0_STATUS=$(jq -r '.status // "unknown"' "$_A0_MANIFEST" 2>/dev/null || echo "unknown")
+                    if [[ "$_A0_STATUS" == "completed" || "$_A0_STATUS" == "crashed" ]]; then
+                        rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                        # Fall through — no deny
+                    elif [[ "$_A0_STATUS" == "active" ]]; then
+                        _write_gate_denied_trace "guardian" "gate-a0-duplicate" "Another Guardian already active (trace: ${_MARKER_CONTENT}, age: ${_MARKER_AGE}s)" 2>/dev/null || true
+                        emit_deny "Cannot dispatch Guardian: another Guardian is already active for this project (trace: ${_MARKER_CONTENT}, age: ${_MARKER_AGE}s). Wait for it to complete or clean stale markers."
+                    else
+                        rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                        # Fall through — no deny
+                    fi
+                else
+                    rm -f "${TRACE_STORE}/.active-guardian-"*"-${_PHASH_A0}" 2>/dev/null || true
+                    # Fall through — no deny
+                fi
+            fi
         fi
     fi
 fi
@@ -91,11 +294,46 @@ if [[ "$AGENT_TYPE" == "guardian" ]]; then
     #   could be abused to bypass the gate on source changes. Mitigation: the annotation
     #   is documented and explicit; any misuse is visible in the dispatch prompt audit
     #   trail (traces). See #105.
+    #
+    # @decision DEC-RECK-011b
+    # @title Narrow @plan-update bypass to plan-only commits
+    # @status accepted
+    # @rationale @plan-update was designed for MASTER_PLAN.md amendments that don't
+    #   need testing. It was being used (or could be used) to bypass proof gates on
+    #   commits that include agents/*.md and docs/*.md changes. Verify staged files
+    #   before granting bypass: only allow if ALL staged files are plan-related
+    #   (MASTER_PLAN.md, CHANGELOG.md, decision-config*.json, decisions*.json).
+    #   If any other file is staged, deny the bypass and require proper verification.
     _GUARD_PROMPT=$(get_field '.tool_input.prompt' 2>/dev/null || echo "")
     _PROOF_BYPASS=false
     if echo "$_GUARD_PROMPT" | grep -qE '@plan-update|@no-source'; then
-        _PROOF_BYPASS=true
-        log_info "guardian-proof-gate" "plan-only merge bypass (@plan-update or @no-source in prompt) — proof gate skipped" 2>/dev/null || true
+        # Check staged files — only grant bypass if ALL staged files are plan-related
+        _STAGED_FILES=$(git -C "$PROJECT_ROOT" diff --cached --name-only 2>/dev/null || echo "")
+        _NON_PLAN_FILES=""
+        if [[ -n "$_STAGED_FILES" ]]; then
+            while IFS= read -r _staged_f; do
+                [[ -z "$_staged_f" ]] && continue
+                _basename_f=$(basename "$_staged_f")
+                # Plan-allowed files: MASTER_PLAN.md, CHANGELOG.md, decision-config*.json, decisions*.json
+                case "$_basename_f" in
+                    MASTER_PLAN.md|CHANGELOG.md|decision-config*.json|decisions*.json)
+                        ;; # Allowed — plan-related file
+                    *)
+                        _NON_PLAN_FILES="${_NON_PLAN_FILES:+$_NON_PLAN_FILES, }$_staged_f"
+                        ;;
+                esac
+            done <<< "$_STAGED_FILES"
+        fi
+
+        if [[ -n "$_NON_PLAN_FILES" ]]; then
+            # Non-plan files staged — refuse the bypass, require proper verification
+            log_info "guardian-proof-gate" "@plan-update bypass DENIED: non-plan files staged: $_NON_PLAN_FILES" 2>/dev/null || true
+            _write_gate_denied_trace "guardian" "gate-a-plan-bypass" "@plan-update bypass denied: non-plan files staged" 2>/dev/null || true
+            emit_deny "Cannot bypass proof gate with @plan-update: non-plan files are staged ($_NON_PLAN_FILES). @plan-update is only valid when ALL staged files are plan-related (MASTER_PLAN.md, CHANGELOG.md, decision-config*.json). Remove staged non-plan files or complete verification before dispatching Guardian."
+        else
+            _PROOF_BYPASS=true
+            log_info "guardian-proof-gate" "plan-only merge bypass (@plan-update or @no-source in prompt) — all staged files are plan-related — proof gate skipped" 2>/dev/null || true
+        fi
     fi
     PROOF_FILE=$(resolve_proof_file)
     [[ ! -f "$PROOF_FILE" ]] && PROOF_FILE=""
@@ -106,6 +344,7 @@ if [[ "$AGENT_TYPE" == "guardian" ]]; then
             PROOF_STATUS="corrupt"
         fi
         if [[ "$PROOF_STATUS" != "verified" ]]; then
+            _write_gate_denied_trace "guardian" "gate-a-proof" "Proof status is '${PROOF_STATUS}' (requires 'verified')" 2>/dev/null || true
             emit_deny "Cannot dispatch Guardian: proof-of-work is '$PROOF_STATUS' (requires 'verified'). Dispatch tester or complete verification before dispatching Guardian."
         fi
     fi
@@ -134,7 +373,15 @@ if [[ "$AGENT_TYPE" == "guardian" ]]; then
         mkdir -p "$TRACE_STORE" 2>/dev/null || true
         # Guardian is taking over — auto-verify protection no longer needed.
         # Clean project-scoped auto-verify markers before creating the guardian marker.
+        # W3-2: Also clean SQLite autoverify markers.
+        marker_update "autoverify" "$_SESSION" "$(workflow_id 2>/dev/null || echo "main")" "completed" 2>/dev/null || true
         rm -f "${TRACE_STORE}/.active-autoverify-"*"-${_PHASH}" 2>/dev/null || true
+
+        # --- W3-2: PRIMARY — SQLite pre-dispatch marker (DEC-STATE-UNIFY-004) ---
+        _TT_WF_ID=$(workflow_id 2>/dev/null || echo "main")
+        marker_create "guardian" "$_SESSION" "$_TT_WF_ID" "$$" "" "pre-dispatch" 2>/dev/null || true
+
+        # DUAL-WRITE: dotfile (W5-2 remove)
         _GUARDIAN_MARKER="${TRACE_STORE}/.active-guardian-${_SESSION}-${_PHASH}"
         echo "pre-dispatch|$(date +%s)" > "$_GUARDIAN_MARKER"
 
@@ -259,6 +506,7 @@ if [[ "$AGENT_TYPE" == "tester" ]]; then
             fi
 
             if [[ "$IMPL_STATUS" == "active" ]]; then
+                _write_gate_denied_trace "tester" "gate-b-impl-active" "Implementer trace '${IMPL_TRACE}' is still active" 2>/dev/null || true
                 emit_deny "Cannot dispatch tester: implementer trace '$IMPL_TRACE' is still active. Wait for the implementer to return before verifying."
             fi
         fi
@@ -290,6 +538,27 @@ if [[ "$AGENT_TYPE" == "tester" ]]; then
     # DISABLED: if [[ -n "$TESTER_TRACE_ID" ]]; then
     # DISABLED:     log_info "TASK-TRACK" "initialized tester trace=${TESTER_TRACE_ID}"
     # DISABLED: fi
+
+    # --- Tester dispatch breadcrumb (DEC-AV-BREADCRUMB-001) ---
+    # Write session+epoch to state/{phash}/tester-dispatch-session so post-task.sh
+    # can locate the tester trace more reliably on Tier -1 (before all other tiers).
+    # This breadcrumb is consumed by a Tier -1 check added to post-task.sh.
+    #
+    # @decision DEC-AV-BREADCRUMB-001
+    # @title Write tester-dispatch-session breadcrumb at PreToolUse:Task time
+    # @status accepted
+    # @rationale post-task.sh (PostToolUse:Task) needs to locate the tester's trace
+    #   to read summary.md. The existing detection tiers (active marker, .last-tester-trace,
+    #   session scan, project scan) all fail when SubagentStop doesn't fire reliably.
+    #   Writing a breadcrumb at dispatch time (PreToolUse:Task fires before SubagentStart)
+    #   gives post-task.sh the session_id that the tester will use, enabling targeted
+    #   trace lookup without relying on SubagentStop. The breadcrumb contains the
+    #   orchestrator's session_id and the dispatch epoch for staleness checks.
+    _TDS_PHASH=$(project_hash "$PROJECT_ROOT")
+    _TDS_SESSION="${CLAUDE_SESSION_ID:-$$}"
+    mkdir -p "${CLAUDE_DIR}/state/${_TDS_PHASH}" 2>/dev/null || true
+    echo "${_TDS_SESSION}|$(date +%s)" > "${CLAUDE_DIR}/state/${_TDS_PHASH}/tester-dispatch-session" 2>/dev/null || true
+    log_info "TASK-TRACK" "tester dispatch breadcrumb written: session=${_TDS_SESSION}"
 fi
 
 # --- Gate C: Implementer dispatch activates proof gate ---
@@ -326,6 +595,7 @@ if [[ "$AGENT_TYPE" == "implementer" ]]; then
     #   dispatched from the main worktree requires at least one linked worktree to exist.
     # Guard: git commands require a git repo. Non-git projects can't have worktrees.
     if ! git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree &>/dev/null; then
+        _write_gate_denied_trace "implementer" "gate-c1-no-git" "Not a git repository: ${PROJECT_ROOT}" 2>/dev/null || true
         emit_deny "Cannot dispatch implementer: '$PROJECT_ROOT' is not a git repository. Initialize with: git init"
     fi
     MAIN_WT=$(git -C "$PROJECT_ROOT" worktree list --porcelain 2>/dev/null \
@@ -340,6 +610,7 @@ if [[ "$AGENT_TYPE" == "implementer" ]]; then
         WORKTREE_COUNT=$(git -C "$PROJECT_ROOT" worktree list --porcelain 2>/dev/null \
             | grep -c '^worktree ' || echo "0")
         if [[ "$WORKTREE_COUNT" -le 1 ]]; then
+            _write_gate_denied_trace "implementer" "gate-c1-no-worktree" "No linked worktree found (branch: ${CURRENT_BRANCH})" 2>/dev/null || true
             emit_deny "Cannot dispatch implementer from main worktree (branch: '$CURRENT_BRANCH'). Sacred Practice #2: create a worktree first. Use: git worktree add .worktrees/<name> -b feature/<name>"
         fi
     fi
@@ -367,8 +638,17 @@ if [[ "$AGENT_TYPE" == "implementer" ]]; then
         _IMPL_WORKFLOW=$(echo "$_IMPL_PROMPT" | grep -oE '\.worktrees/[^/ ]+' | head -1 | sed 's|\.worktrees/||')
     fi
 
+    # Load state-lib for proof_state_set (W2-1 migration).
+    # require_state is safe to call multiple times (idempotent guard in state-lib.sh).
+    require_state 2>/dev/null || true
+
     if [[ "$_IMPL_WORKFLOW" != "main" && -n "$_IMPL_WORKFLOW" ]]; then
         # Workflow-scoped proof activation
+        # --- W2-1: PRIMARY write via proof_state_set (DEC-STATE-UNIFY-004) ---
+        # proof_state_set uses workflow_id() which auto-detects the worktree context.
+        # The workflow-specific path is handled by workflow_id() in state-lib.sh.
+        proof_state_set "needs-verification" "task-track" 2>/dev/null || true
+        # DUAL-WRITE: flat file (W5-2 remove when all readers migrated)
         _WF_PROOF_DIR="${CLAUDE_DIR}/state/${_PHASH}/worktrees/${_IMPL_WORKFLOW}"
         _WF_PROOF="${_WF_PROOF_DIR}/proof-status"
         mkdir -p "$_WF_PROOF_DIR" 2>/dev/null || true
@@ -379,10 +659,18 @@ if [[ "$AGENT_TYPE" == "implementer" ]]; then
         fi
     else
         # Project-wide proof activation (backward compatible: no worktree in prompt)
+        # --- W2-1: PRIMARY write via proof_state_set (DEC-STATE-UNIFY-004) ---
         _NEW_PROOF="${CLAUDE_DIR}/state/${_PHASH}/proof-status"
         _OLD_PROOF="${CLAUDE_DIR}/.proof-status-${_PHASH}"
         if [[ ! -f "$_NEW_PROOF" && ! -f "$_OLD_PROOF" ]]; then
+            # proof_state_set is PRIMARY; write_proof_status adds flat-file dual-write
             write_proof_status "needs-verification" "$PROJECT_ROOT"
+        else
+            # File exists — only update SQLite if not already needs-verification
+            _tc_current=$(proof_state_get 2>/dev/null | cut -d'|' -f1 || echo "")
+            if [[ "$_tc_current" != "needs-verification" ]]; then
+                proof_state_set "needs-verification" "task-track" 2>/dev/null || true
+            fi
         fi
     fi
 fi

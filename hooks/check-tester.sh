@@ -249,7 +249,17 @@ if [[ "$PROOF_STATUS" == "pending" || "$PROOF_STATUS" == "needs-verification" ]]
         _AV_SESSION_CT="${CLAUDE_SESSION_ID:-$$}"
         _AV_PHASH_CT=$(project_hash "$PROJECT_ROOT")
         mkdir -p "$TRACE_STORE" 2>/dev/null || true
+
+        # --- W3-2: PRIMARY — SQLite marker_create for autoverify (DEC-STATE-UNIFY-004) ---
+        require_state 2>/dev/null || true
+        _AV_WF_CT=$(workflow_id 2>/dev/null || echo "main")
+        marker_create "autoverify" "$_AV_SESSION_CT" "$_AV_WF_CT" "$$" "" "active" 2>/dev/null || true
+        # DUAL-WRITE: dotfile (W5-2 remove)
         echo "auto-verify|$(date +%s)" > "${TRACE_STORE}/.active-autoverify-${_AV_SESSION_CT}-${_AV_PHASH_CT}"
+        # --- W2-1: PRIMARY write to SQLite via proof_state_set (DEC-STATE-UNIFY-004) ---
+        declare -f proof_state_set >/dev/null 2>&1 && \
+            PROJECT_ROOT="$PROJECT_ROOT" proof_state_set "verified" "check-tester-autoverify" 2>/dev/null || true
+        # DUAL-WRITE: flat file (W5-2 remove when all readers migrated to proof_state_get)
         write_proof_status "verified" "$PROJECT_ROOT"
         AUTO_VERIFIED=true
     fi
@@ -343,9 +353,20 @@ fi
 # Safety net (DEC-TESTER-003): if proof-status is missing and RESPONSE_TEXT is
 # non-empty, auto-write "pending" so the manual approval flow can proceed.
 # This handles testers that forgot to write .proof-status.
+# @decision DEC-PROOF-DUALWRITE-001
+# @title Replace direct proof-status writes with write_proof_status() calls
+# @status accepted
+# @rationale Direct writes to $PROOF_FILE only update one path (whichever
+#   resolve_proof_file() returned). write_proof_status() dual-writes to both
+#   state/{phash}/proof-status (new) and .proof-status-{phash} (legacy),
+#   keeping them in sync. Fixes bug #81: proof gate stuck on needs-verification
+#   because tester wrote verified to legacy path while gate read from new path.
 if [[ "$PROOF_STATUS" == "missing" && -n "$RESPONSE_TEXT" ]]; then
-    mkdir -p "$(dirname "$PROOF_FILE")"
-    echo "pending|$(date +%s)" > "$PROOF_FILE"
+    # --- W2-1: PRIMARY write to SQLite via proof_state_set (DEC-STATE-UNIFY-004) ---
+    declare -f proof_state_set >/dev/null 2>&1 && \
+        PROJECT_ROOT="$PROJECT_ROOT" proof_state_set "pending" "check-tester-safetynet" 2>/dev/null || true
+    # DUAL-WRITE: flat file (W5-2 remove when all readers migrated to proof_state_get)
+    write_proof_status "pending" "$PROJECT_ROOT"
     PROOF_STATUS="pending"
 fi
 
@@ -610,7 +631,7 @@ elif [[ "$PROOF_STATUS" == "pending" ]]; then
     # Auto-verify was attempted above but AV_FAIL was set.
     # Check if AUTOVERIFY signal was present but failed secondary validation.
     if echo "$RESPONSE_TEXT" | grep -q 'AUTOVERIFY: CLEAN'; then
-        append_audit "$PROJECT_ROOT" "auto_verify_rejected" "Tester signaled AUTOVERIFY: CLEAN but secondary validation failed"
+        append_audit "$PROJECT_ROOT" "auto_verify_advisory" "AUTOVERIFY signal found in response but Phase 1 disabled (CLAUDE_ENABLE_SUBAGENT_AUTOVERIFY unset); advisory-only path"
     fi
     DIRECTIVE="TESTER COMPLETE: The tester has presented a verification report with evidence, methodology assessment, and confidence level. Present the full report to the user — do NOT reduce it to a keyword demand. The user can approve (approved, lgtm, looks good, verified, ship it), request more testing, or ask questions. Do NOT tell the user to 'say verified'. Guardian dispatch requires .proof-status = verified (prompt-submit.sh writes this on user approval)."
     # Inject trace evidence into directive (DEC-EVGATE-003, defense-in-depth)

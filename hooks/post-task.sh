@@ -50,7 +50,7 @@ source "$(dirname "$0")/source-lib.sh"
 require_trace
 require_session
 
-HOOK_INPUT=$(read_input)
+init_hook
 TOOL_NAME=$(echo "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
 SUBAGENT_TYPE=$(echo "$HOOK_INPUT" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")
 
@@ -282,10 +282,10 @@ fi
 # --- Safety net: if proof-status missing, create needs-verification ---
 # If somehow there is no proof-status file at all, create a needs-verification
 # entry so the approval flow can still proceed (mirrors check-tester.sh DEC-TESTER-003).
+# DEC-PROOF-DUALWRITE-001 (see check-tester.sh): use write_proof_status for dual-write
 if [[ "$PROOF_STATUS" == "missing" ]]; then
     log_info "POST-TASK" "proof-status missing — writing needs-verification (safety net)"
-    mkdir -p "$(dirname "$PROOF_FILE")"
-    echo "needs-verification|$(date +%s)" > "$PROOF_FILE"
+    write_proof_status "needs-verification" "$PROJECT_ROOT"
     PROOF_STATUS="needs-verification"
 fi
 
@@ -432,9 +432,43 @@ if [[ -z "$SUMMARY_TEXT" ]]; then
     done
 fi
 
-# No summary available after all fallbacks — cannot auto-verify, exit gracefully
+# No summary available after all fallbacks — emit advisory instead of silent exit.
+#
+# @decision DEC-AV-LOUD-FAIL-001
+# @title Replace silent exit with advisory when all summary.md detection tiers fail
+# @status accepted
+# @rationale The original silent exit (exit 0) left the orchestrator with no signal
+#   that auto-verify had failed. The proof stayed at needs-verification, Guardian was
+#   blocked at Gate A, and force-writing proof-status via Bash was blocked by pre-bash.sh
+#   Check 9. This created a complete deadlock with no recovery path visible to the
+#   orchestrator. The fix emits an advisory that (1) tells the orchestrator what happened,
+#   (2) explains how to recover (relay AUTOVERIFY: CLEAN in next prompt to trigger
+#   Component 3 in prompt-submit.sh), (3) writes .autoverify-failed signal for
+#   Component 5 emergency override, and (4) writes .agent-findings for next-prompt
+#   injection. Silent failure is never acceptable (CLAUDE.md Behavioral Policy #127).
 if [[ -z "$SUMMARY_TEXT" ]]; then
-    log_info "POST-TASK" "no summary.md content available — skipping auto-verify"
+    log_info "POST-TASK" "all 4 summary.md detection tiers failed — emitting advisory (DEC-AV-LOUD-FAIL-001)"
+    append_audit "$PROJECT_ROOT" "autoverify_loud_fail" \
+        "post-task: all summary.md tiers failed; emitting advisory and writing .autoverify-failed"
+
+    # Write .autoverify-failed signal for Component 5 emergency override in pre-bash.sh.
+    # Format: failed|epoch|session_id — Component 5 validates session and age (<300s).
+    echo "failed|$(date +%s)|${CLAUDE_SESSION_ID:-$$}" > "${CLAUDE_DIR}/.autoverify-failed" 2>/dev/null || true
+
+    # Write .agent-findings for next-prompt injection via prompt-submit.sh.
+    _LF_FINDINGS="${CLAUDE_DIR}/.agent-findings"
+    _LF_FINDING="tester|Auto-verify chain failed: all summary.md detection tiers exhausted. Relay 'AUTOVERIFY: CLEAN' from tester output to recover."
+    if ! grep -qxF "$_LF_FINDING" "$_LF_FINDINGS" 2>/dev/null; then
+        echo "$_LF_FINDING" >> "$_LF_FINDINGS" 2>/dev/null || true
+    fi
+
+    _LF_MSG="AUTOVERIFY CHAIN FAILED: post-task.sh exhausted all 4 summary.md detection tiers (active marker, breadcrumb, session scan, project-scoped scan) and found no tester summary. The proof gate is at risk of deadlock (proof=${PROOF_STATUS}, Guardian blocked at Gate A). RECOVERY OPTIONS: (1) If the tester reported 'AUTOVERIFY: CLEAN' in its response, relay that text in your next prompt — prompt-submit.sh detects it and promotes proof-status to verified. (2) If the tester showed a clean run, relay its output and let the user approve with 'approved'/'lgtm'/'verified'. (3) Emergency override: .autoverify-failed signal is active — if necessary, a direct write to .proof-status will be allowed within 300s."
+    _LF_ESC=$(printf '%s' "$_LF_MSG" | jq -Rs .)
+    cat <<EOF
+{
+  "additionalContext": $_LF_ESC
+}
+EOF
     exit 0
 fi
 
@@ -468,7 +502,95 @@ fi
 
 # --- Check for AUTOVERIFY: CLEAN signal ---
 if ! echo "$SUMMARY_TEXT" | grep -q 'AUTOVERIFY: CLEAN'; then
-    log_info "POST-TASK" "AUTOVERIFY: CLEAN not found in summary.md — running completeness check"
+    log_info "POST-TASK" "AUTOVERIFY: CLEAN not found in summary.md — running inference check"
+
+    # --- Inference check: did tester write a clean assessment but forget the signal? ---
+    #
+    # @decision DEC-AV-MISS-001
+    # @title Detect objectively clean assessments missing AUTOVERIFY: CLEAN signal
+    # @status accepted
+    # @rationale The positive-default framing in tester.md (DEC-TESTER-AUTOVERIFY-001)
+    #   makes AUTOVERIFY: CLEAN the expected outcome for clean runs, but testers trained
+    #   on the old opt-in framing may still omit it. This inference check detects when
+    #   a High-confidence full-coverage assessment is present and the signal is merely
+    #   missing — rather than failing to auto-verify silently. A loud advisory surfaces
+    #   the gap to the orchestrator who can use INFER-VERIFY to dispatch Guardian
+    #   without a second tester run. The advisory does NOT write proof-status=verified;
+    #   that gate remains in place. This check runs BEFORE the completeness check so
+    #   a complete-but-signal-missing tester is not mis-classified as incomplete.
+    #   Issue #195.
+    _AV_MISS=false
+    if [[ -n "$SUMMARY_TEXT" ]]; then
+        # Extract Verification Assessment section (same scoping as secondary validation below)
+        _MISS_VA_START=$(echo "$SUMMARY_TEXT" | grep -n -E '^#{1,3} Verification Assessment' | head -1 | cut -d: -f1 || true)
+        if [[ -n "$_MISS_VA_START" ]]; then
+            _MISS_VALIDATION_TEXT=$(echo "$SUMMARY_TEXT" | tail -n +"${_MISS_VA_START}")
+        else
+            _MISS_VALIDATION_TEXT="$SUMMARY_TEXT"
+        fi
+
+        # Run inference criteria — mirrors secondary validation in the AUTOVERIFY path
+        _MISS_PASS=true
+
+        # Must have High confidence
+        if ! echo "$_MISS_VALIDATION_TEXT" | grep -qiE '(\*\*High\*\*|[Cc]onfidence:?\s*High|High confidence)'; then
+            _MISS_PASS=false
+            log_info "POST-TASK" "inference check: missing High confidence — no advisory"
+        fi
+
+        # Must NOT have Partially verified
+        if echo "$_MISS_VALIDATION_TEXT" | grep -qi 'Partially verified'; then
+            _MISS_PASS=false
+            log_info "POST-TASK" "inference check: Partially verified found — no advisory"
+        fi
+
+        # Must NOT have Medium or Low confidence
+        if echo "$_MISS_VALIDATION_TEXT" | grep -qiE '(\*\*(Medium|Low)\*\*|[Cc]onfidence:?\s*(Medium|Low)|(Medium|Low) confidence)'; then
+            _MISS_PASS=false
+            log_info "POST-TASK" "inference check: Medium/Low confidence found — no advisory"
+        fi
+
+        # Must NOT have non-environmental "Not tested" entries
+        _MISS_ENV_PATTERN='requires browser\|requires viewport\|requires screen reader\|requires mobile\|requires physical device\|requires hardware\|requires manual interaction\|requires human interaction\|requires GUI\|requires native app\|requires network'
+        _MISS_NOT_TESTED=$(echo "$_MISS_VALIDATION_TEXT" | grep -iE '(:\s*Not tested|\|\s*Not tested)' || true)
+        if [[ -n "$_MISS_NOT_TESTED" ]]; then
+            _MISS_NON_ENV=$(echo "$_MISS_NOT_TESTED" | grep -iv "$_MISS_ENV_PATTERN" || true)
+            if [[ -n "$_MISS_NON_ENV" ]]; then
+                _MISS_PASS=false
+                log_info "POST-TASK" "inference check: non-environmental Not tested found — no advisory"
+            fi
+        fi
+
+        # Must NOT have actionable Recommended Follow-Up (anything except None/empty)
+        # Extract just the Recommended Follow-Up section to avoid false positives
+        _MISS_FOLLOWUP=$(echo "$_MISS_VALIDATION_TEXT" | grep -A5 -i 'Recommended Follow-Up' | grep -v 'Recommended Follow-Up' | grep -v '^$' | grep -v '^---' || true)
+        if [[ -n "$_MISS_FOLLOWUP" ]]; then
+            if ! echo "$_MISS_FOLLOWUP" | grep -qiE '^None$|^-?\s*None\.?$|\|\s*None\s*\|'; then
+                _MISS_PASS=false
+                log_info "POST-TASK" "inference check: actionable Recommended Follow-Up found — no advisory"
+            fi
+        fi
+
+        [[ "$_MISS_PASS" == "true" ]] && _AV_MISS=true
+    fi
+
+    if [[ "$_AV_MISS" == "true" ]]; then
+        log_info "POST-TASK" "AUTOVERIFY EXPECTED: High-confidence full-coverage assessment missing AUTOVERIFY: CLEAN signal"
+        append_audit "$PROJECT_ROOT" "autoverify_expected_missing" \
+            "High-confidence assessment meets all auto-verify criteria but AUTOVERIFY: CLEAN signal was not emitted"
+
+        _MISS_ESCAPED=$(printf '%s' \
+            'AUTOVERIFY EXPECTED: Tester wrote High confidence with full coverage but omitted AUTOVERIFY: CLEAN signal. The assessment objectively meets all auto-verify criteria. Dispatch Guardian with INFER-VERIFY in the prompt to enable inference-based approval, or approve manually.' \
+            | jq -Rs .)
+        cat <<EOF
+{
+  "additionalContext": $_MISS_ESCAPED
+}
+EOF
+        exit 0
+    fi
+
+    log_info "POST-TASK" "inference check: criteria not met — running completeness check"
 
     # --- Completeness gate (adapted from check-tester.sh DEC-TESTER-002) ---
     # In PostToolUse, exit 2 doesn't block — Task already completed.

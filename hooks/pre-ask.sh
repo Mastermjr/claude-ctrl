@@ -50,7 +50,7 @@ if [[ "${HOOK_GATE_SCAN:-}" == "1" ]]; then
     exit 0
 fi
 
-HOOK_INPUT=$(read_input)
+init_hook
 
 # Enable case-insensitive regex matching for all gate pattern checks.
 # AskUserQuestion text may be capitalized ("Should we..." vs "should we...").

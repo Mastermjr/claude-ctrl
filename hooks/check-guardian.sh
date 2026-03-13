@@ -158,6 +158,16 @@ COMPLIANCE_GUARDIAN_INIT_EOF
     # finalize_trace MUST run before advisory checks (get_git_state etc.) to prevent stale markers.
     # See DEC-STALE-MARKER-001: advisory checks can consume the 5s budget before this runs.
     finalize_trace "$TRACE_ID" "$PROJECT_ROOT" "guardian" || true
+
+    # --- W3-2: PRIMARY — SQLite marker_update to 'completed' (DEC-STATE-UNIFY-004) ---
+    # finalize_trace already cleaned the dotfile marker (.active-guardian-*).
+    # Update the SQLite marker to 'completed' so marker_query reflects the transition.
+    # Uses session+workflow_id to scope the update. require_state is idempotent.
+    require_state 2>/dev/null || true
+    _CG_SESSION="${CLAUDE_SESSION_ID:-$$}"
+    _CG_WF_ID=$(workflow_id 2>/dev/null || echo "main")
+    marker_update "guardian" "$_CG_SESSION" "$_CG_WF_ID" "completed" "${TRACE_ID}" 2>/dev/null || true
+    # DUAL-WRITE: dotfile cleanup already handled by finalize_trace (W5-2 remove comment)
 fi
 
 get_git_state "$PROJECT_ROOT"
@@ -407,8 +417,12 @@ if [[ -n "$RESPONSE_TEXT" ]]; then
                 PROOF_VAL=""  # corrupt — skip cleanup (leave for manual review)
             fi
             if [[ "$PROOF_VAL" == "verified" ]]; then
+                # --- W2-1: PRIMARY write to SQLite via proof_state_set (DEC-STATE-UNIFY-004) ---
+                declare -f proof_state_set >/dev/null 2>&1 && \
+                    PROJECT_ROOT="$PROJECT_ROOT" proof_state_set "committed" "check-guardian" 2>/dev/null || true
+                # DUAL-WRITE: flat file (W5-2 remove when all readers migrated to proof_state_get)
                 write_proof_status "committed" "$PROJECT_ROOT"
-                # Clean both locations
+                # Clean both flat-file locations (W5-2: rm these lines when dual-write removed)
                 rm -f "$_NEW_PROOF" "$_OLD_PROOF"
                 log_info "CHECK-GUARDIAN" "Cleaned proof-status after successful commit"
             fi
@@ -418,6 +432,17 @@ if [[ -n "$RESPONSE_TEXT" ]]; then
         # If linked worktrees exist after merge, check for uncommitted changes and
         # attempt cleanup via worktree-roster sweep. Uses git worktree list directly
         # (no breadcrumb needed — breadcrumb system removed by DEC-PROOF-BREADCRUMB-001).
+        #
+        # @decision DEC-SWEEP-DEDUP-001
+        # @title Run worktree sweep once per merge, not once per worktree
+        # @status accepted
+        # @rationale Check 7b previously looped over all non-main worktrees, calling
+        #   sweep --auto for each. sweep already scans all worktrees internally, so
+        #   calling it N times produced N identical reports. With 6 worktrees, this was
+        #   65+ lines of noise in additionalContext per merge.
+        #   Fix: dirty-worktree detection still loops (each path must be individually
+        #   checked), but sweep is called once after the loop using the standard
+        #   WORKTREE_DIR (.worktrees/ parent). Empty sweep output is suppressed.
         GIT_WT_COUNT=$(git -C "$PROJECT_ROOT" worktree list --porcelain 2>/dev/null \
             | grep -c '^worktree ' || echo "0")
         if [[ "$GIT_WT_COUNT" -gt 1 ]]; then
@@ -428,18 +453,21 @@ if [[ -n "$RESPONSE_TEXT" ]]; then
                     WT_DIRTY=$(git -C "$_wt_path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
                     if [[ "$WT_DIRTY" -gt 0 ]]; then
                         ISSUES+=("WARN: Worktree $_wt_path still exists with $WT_DIRTY uncommitted change(s) — manual cleanup needed")
-                    else
-                        ROSTER_SCRIPT="$HOME/.claude/scripts/worktree-roster.sh"
-                        if [[ -x "$ROSTER_SCRIPT" ]]; then
-                            SWEEP_OUTPUT=$(WORKTREE_DIR="$(dirname "$_wt_path")" "$ROSTER_SCRIPT" sweep --auto 2>&1 || true)
-                            if [[ -n "$SWEEP_OUTPUT" ]]; then
-                                ISSUES+=("Post-merge cleanup: $SWEEP_OUTPUT")
-                            fi
-                        fi
                     fi
                 fi
             done < <(git -C "$PROJECT_ROOT" worktree list --porcelain 2>/dev/null \
                 | awk -v main="$MAIN_WT" '/^worktree /{path=$2} path && path != main {print path}')
+
+            # Run sweep ONCE (not per-worktree) — sweep already scans all worktrees.
+            # --auto mode suppresses empty categories (Husks: none, Orphans: none, etc.)
+            # so SWEEP_OUTPUT is non-empty only when there is something actionable.
+            ROSTER_SCRIPT="$HOME/.claude/scripts/worktree-roster.sh"
+            if [[ -x "$ROSTER_SCRIPT" ]]; then
+                SWEEP_OUTPUT=$("$ROSTER_SCRIPT" sweep --auto 2>&1 || true)
+                if [[ -n "$SWEEP_OUTPUT" ]]; then
+                    ISSUES+=("Post-merge cleanup: Sweep report (mode: auto): $SWEEP_OUTPUT")
+                fi
+            fi
         fi
     fi
 fi

@@ -18,7 +18,7 @@ set -euo pipefail
 
 source "$(dirname "$0")/source-lib.sh"
 
-HOOK_INPUT=$(read_input)
+init_hook
 NOTIFICATION_TYPE=$(get_field '.notification_type')
 MESSAGE=$(get_field '.message')
 MESSAGE="${MESSAGE:-Claude Code needs attention}"

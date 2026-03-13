@@ -36,11 +36,71 @@ _SESSION_LIB_VERSION=1
 # Plan phase and test status removed: statusline now sources those from stdin JSON.
 write_statusline_cache() {
     local root="$1"
-    local cache_file="$root/.claude/.statusline-cache-${CLAUDE_SESSION_ID:-$$}"
-    mkdir -p "$root/.claude"
+    # @decision DEC-DOUBLE-NEST-FIX-001
+    # @title write_statusline_cache: use double-nesting guard same as get_claude_dir()
+    # @status accepted
+    # @rationale When root is ~/.claude (the meta-project), appending "/.claude" produces
+    #   ~/.claude/.claude/ — a double-nested path. The fix mirrors get_claude_dir() in log.sh:
+    #   if root IS ~/.claude, use root directly; otherwise append .claude. This ensures cache
+    #   files land where statusline.sh and other consumers look for them.
+    local home_claude="${HOME}/.claude"
+    local _cache_dir
+    if [[ "${root%/}" == "${home_claude%/}" ]]; then
+        _cache_dir="$root"
+    else
+        _cache_dir="$root/.claude"
+    fi
+    local cache_file="${_cache_dir}/.statusline-cache-${CLAUDE_SESSION_ID:-$$}"
+    mkdir -p "$_cache_dir"
 
     # Subagent status (populates SUBAGENT_* globals)
     get_subagent_status "$root"
+
+    # @decision DEC-LIFETIME-PERSIST-001
+    # @title Read existing cache lifetime fields as fallback defaults in write_statusline_cache
+    # @status accepted
+    # @rationale write_statusline_cache() is called from 7 hooks, but only session-init.sh
+    # sets LIFETIME_TOKENS/LIFETIME_COST before calling it. Every other caller runs in a
+    # fresh process where these globals are unset, defaulting to 0 and overwriting the
+    # previously-good values that session-init.sh computed. Fix: read the existing cache
+    # file and use its lifetime values as the default when the caller has not set the globals.
+    # The caller's explicit value (when set) always wins — only the unset case falls back.
+    # This is safe: the first call ever produces 0 (no cache exists), session-init.sh writes
+    # the real values, and all subsequent callers preserve them without needing to know about them.
+    local _prev_lifetime_tokens=0
+    local _prev_lifetime_cost=0
+    if [[ -f "$cache_file" ]]; then
+        _prev_lifetime_tokens=$(jq -r '.lifetime_tokens // 0' "$cache_file" 2>/dev/null || echo 0)
+        _prev_lifetime_cost=$(jq -r '.lifetime_cost // 0' "$cache_file" 2>/dev/null || echo 0)
+    fi
+    # @decision DEC-SIBLING-CACHE-001
+    # @title Cross-PID sibling cache fallback for lifetime token/cost inheritance
+    # @status accepted
+    # @rationale CLAUDE_SESSION_ID propagation from read_input() fails due to
+    #   bash command-substitution subshell scoping (DEC-SID-PARENT-SHELL-001).
+    #   Even with Part 1 fix in session-init.sh, other hooks (prompt-submit.sh,
+    #   check-*.sh, stop.sh) still fall back to $$ for CLAUDE_SESSION_ID, creating
+    #   a new PID-keyed cache file each invocation. When the own cache file doesn't
+    #   exist (or has zero lifetime values), inherit from the most recent sibling
+    #   .statusline-cache-* file. This makes lifetime persistence robust regardless
+    #   of which PID a hook runs under. Explicit LIFETIME_TOKENS/LIFETIME_COST from
+    #   the caller always wins; sibling only fills in when both are zero/unset.
+    if (( _prev_lifetime_tokens == 0 )) && (( $(echo "${_prev_lifetime_cost:-0} == 0" | bc -l 2>/dev/null || echo 1) )); then
+        local _any_cache
+        _any_cache=$(ls -t "${_cache_dir}/.statusline-cache-"* 2>/dev/null | head -1 || true)
+        if [[ -n "$_any_cache" && -f "$_any_cache" && "$_any_cache" != "$cache_file" ]]; then
+            local _sib_tokens _sib_cost
+            _sib_tokens=$(jq -r '.lifetime_tokens // 0' "$_any_cache" 2>/dev/null || echo 0)
+            _sib_cost=$(jq -r '.lifetime_cost // 0' "$_any_cache" 2>/dev/null || echo 0)
+            # Only inherit when the sibling actually has values (don't adopt another zero)
+            if (( _sib_tokens > 0 )) || (( $(echo "${_sib_cost:-0} > 0" | bc -l 2>/dev/null || echo 0) )); then
+                _prev_lifetime_tokens="$_sib_tokens"
+                _prev_lifetime_cost="$_sib_cost"
+            fi
+        fi
+    fi
+    local _final_lifetime_tokens="${LIFETIME_TOKENS:-$_prev_lifetime_tokens}"
+    local _final_lifetime_cost="${LIFETIME_COST:-$_prev_lifetime_cost}"
 
     # Atomic write — only git/agent state, no plan or test fields
     # @decision DEC-CACHE-003
@@ -52,6 +112,16 @@ write_statusline_cache() {
     # session costs from .session-cost-history (REQ-P1-001). lifetime_tokens is the
     # running sum of all session tokens from .session-token-history (DEC-LIFETIME-TOKENS-003).
     # All fields default to 0 when not set so the cache is always valid JSON.
+    #
+    # @decision DEC-SESSION-LABEL-002
+    # @title Add session_label field to statusline cache for per-session Line 3 display
+    # @status accepted
+    # @rationale Concurrent sessions all read the same MASTER_PLAN.md initiative, so
+    # Line 3 is identical for all sessions. The session_label field carries the per-session
+    # context (worktree name or agent description) from get_subagent_status() into the
+    # per-session cache file. statusline.sh prefers session_label over initiative when
+    # present, giving each session a unique Line 3. Empty string when no agents active
+    # — statusline falls back to initiative display (backward compatible).
     local tmp_cache="${cache_file}.tmp.$$"
     jq -n \
         --arg dirty "${GIT_DIRTY_COUNT:-0}" \
@@ -62,13 +132,14 @@ write_statusline_cache() {
         --arg sa_total "${SUBAGENT_TOTAL_COUNT:-0}" \
         --arg todo_project "${TODO_PROJECT_COUNT:-0}" \
         --arg todo_global "${TODO_GLOBAL_COUNT:-0}" \
-        --arg lifetime_cost "${LIFETIME_COST:-0}" \
-        --arg lifetime_tokens "${LIFETIME_TOKENS:-0}" \
+        --arg lifetime_cost "$_final_lifetime_cost" \
+        --arg lifetime_tokens "$_final_lifetime_tokens" \
         --arg initiative "${PLAN_ACTIVE_INITIATIVE_NAME:-}" \
         --arg phase "${PLAN_IN_PROGRESS_PHASE:-}" \
         --arg active_initiatives "${PLAN_ACTIVE_INITIATIVES:-0}" \
         --arg total_phases "${PLAN_TOTAL_PHASES:-0}" \
-        '{dirty:($dirty|tonumber),worktrees:($wt|tonumber),updated:($ts|tonumber),agents_active:($sa_count|tonumber),agents_types:$sa_types,agents_total:($sa_total|tonumber),todo_project:($todo_project|tonumber),todo_global:($todo_global|tonumber),lifetime_cost:($lifetime_cost|tonumber),lifetime_tokens:($lifetime_tokens|tonumber),initiative:$initiative,phase:$phase,active_initiatives:($active_initiatives|tonumber),total_phases:($total_phases|tonumber)}' \
+        --arg session_label "${SUBAGENT_ACTIVE_LABEL:-}" \
+        '{dirty:($dirty|tonumber),worktrees:($wt|tonumber),updated:($ts|tonumber),agents_active:($sa_count|tonumber),agents_types:$sa_types,agents_total:($sa_total|tonumber),todo_project:($todo_project|tonumber),todo_global:($todo_global|tonumber),lifetime_cost:($lifetime_cost|tonumber),lifetime_tokens:($lifetime_tokens|tonumber),initiative:$initiative,phase:$phase,active_initiatives:($active_initiatives|tonumber),total_phases:($total_phases|tonumber),session_label:$session_label}' \
         > "$tmp_cache" && mv "$tmp_cache" "$cache_file"
 }
 
@@ -93,13 +164,33 @@ write_statusline_cache() {
 # $$ (current PID) is the fallback for environments without it.
 
 track_subagent_start() {
-    local root="$1" agent_type="$2"
+    local root="$1" agent_type="$2" session_label="${3:-}"
     local tracker="$root/.claude/.subagent-tracker-${CLAUDE_SESSION_ID:-$$}"
     mkdir -p "$root/.claude"
 
-    # Append start record (line-based for simplicity and atomicity)
-    echo "ACTIVE|${agent_type}|$(date +%s)" >> "$tracker"
-    type state_update &>/dev/null && state_update ".agents.${agent_type}.status" "active" "track_subagent_start" || true
+    # Append start record: 4-field format when label provided, 3-field otherwise (backward compat).
+    # Format: ACTIVE|<type>|<epoch>|<label>  or  ACTIVE|<type>|<epoch>
+    #
+    # @decision DEC-SESSION-LABEL-001
+    # @title Extend tracker record to 4-field format with optional session label
+    # @status accepted
+    # @rationale When multiple Claude Code sessions run concurrently on the same project,
+    #   Line 3 of the statusline shows the same initiative for all sessions. Adding a
+    #   session-specific label (worktree name or agent description) to the tracker lets
+    #   write_statusline_cache() propagate it into the cache, which statusline.sh then
+    #   prefers over the initiative. This gives each session a unique, meaningful Line 3.
+    #   3-field records (no label) continue to work — get_subagent_status() treats the
+    #   missing field as an empty label and falls back to initiative display.
+    if [[ -n "$session_label" ]]; then
+        echo "ACTIVE|${agent_type}|$(date +%s)|${session_label}" >> "$tracker"
+    else
+        echo "ACTIVE|${agent_type}|$(date +%s)" >> "$tracker"
+    fi
+    # W5-1: direct state_update (type guard removed; require_state called by callers)
+    state_update ".agents.${agent_type}.status" "active" "track_subagent_start" 2>/dev/null || true
+    # W5-1: emit lifecycle event to event ledger (best-effort; stdout suppressed — state_emit outputs row ID)
+    local _sa_start_session="${CLAUDE_SESSION_ID:-$$}"
+    state_emit "agent.started" "{\"type\":\"${agent_type}\",\"session\":\"${_sa_start_session}\"}" >/dev/null 2>/dev/null || true
 }
 
 track_subagent_stop() {
@@ -113,8 +204,11 @@ track_subagent_stop() {
     local found=false
     while IFS= read -r line; do
         if [[ "$found" == "false" && "$line" == "ACTIVE|${agent_type}|"* ]]; then
-            # Convert to DONE record
-            local start_epoch="${line##*|}"
+            # Convert to DONE record.
+            # Extract epoch from field 3 (not last field — 4-field records have a label as field 4).
+            # Format: ACTIVE|<type>|<epoch>  or  ACTIVE|<type>|<epoch>|<label>
+            local start_epoch
+            start_epoch=$(echo "$line" | cut -d'|' -f3)
             local now_epoch
             now_epoch=$(date +%s)
             local duration=$((now_epoch - start_epoch))
@@ -132,7 +226,11 @@ track_subagent_stop() {
     else
         rm -f "$tmp"
     fi
-    type state_update &>/dev/null && state_update ".agents.${agent_type}.status" "inactive" "track_subagent_stop" || true
+    # W5-1: direct state_update (type guard removed; require_state called by callers)
+    state_update ".agents.${agent_type}.status" "inactive" "track_subagent_stop" 2>/dev/null || true
+    # W5-1: emit lifecycle event to event ledger (best-effort; stdout suppressed — state_emit outputs row ID)
+    local _sa_stop_session="${CLAUDE_SESSION_ID:-$$}"
+    state_emit "agent.stopped" "{\"type\":\"${agent_type}\",\"session\":\"${_sa_stop_session}\"}" >/dev/null 2>/dev/null || true
 }
 
 get_subagent_status() {
@@ -142,6 +240,7 @@ get_subagent_status() {
     SUBAGENT_ACTIVE_COUNT=0
     SUBAGENT_ACTIVE_TYPES=""
     SUBAGENT_TOTAL_COUNT=0
+    SUBAGENT_ACTIVE_LABEL=""
 
     [[ ! -f "$tracker" ]] && return
 
@@ -160,6 +259,18 @@ get_subagent_status() {
 
     # Total = active + done
     SUBAGENT_TOTAL_COUNT=$(wc -l < "$tracker" 2>/dev/null | tr -d ' ')
+
+    # Session label: take the last NON-EMPTY 4th field from any active entry.
+    # 4-field format: ACTIVE|<type>|<epoch>|<label>
+    # 3-field format: ACTIVE|<type>|<epoch>  — field 4 is absent → skipped.
+    # Bug fix: the original `tail -1 | cut -d'|' -f4` always returned empty when the
+    # most recent dispatch had no label (e.g., Explore agents, or dispatches without
+    # .worktrees/ in the prompt). Now we scan all active entries and take the last
+    # non-empty label — so earlier labeled dispatches aren't overwritten by unlabeled ones.
+    local _last_active_label
+    _last_active_label=$(grep '^ACTIVE|' "$tracker" 2>/dev/null \
+        | awk -F'|' '$4 != "" {label=$4} END {print label}' || echo "")
+    SUBAGENT_ACTIVE_LABEL="${_last_active_label:-}"
 }
 
 # --- Session event log ---

@@ -101,6 +101,19 @@ fi
 
 _SRCLIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# @decision DEC-SRCLIB-FALLBACK-001
+# @title Validate _SRCLIB_DIR contains expected sibling files; fallback to canonical hooks dir
+# @status accepted
+# @rationale When tests in worktrees source source-lib.sh with a path that doesn't
+#   include the hooks/ directory segment (e.g., via a symlink or relative path that
+#   resolves differently), BASH_SOURCE[0] resolves to a directory that doesn't contain
+#   log.sh or core-lib.sh. The fallback to $HOME/.claude/hooks/ is always the canonical
+#   location — this is defensive: it preserves the happy path (direct sourcing from the
+#   hooks/ dir works unchanged) and only activates when the resolved directory is wrong.
+if [[ ! -f "${_SRCLIB_DIR}/log.sh" ]]; then
+    _SRCLIB_DIR="$HOME/.claude/hooks"
+fi
+
 source "${_SRCLIB_DIR}/log.sh"
 source "${_SRCLIB_DIR}/core-lib.sh"
 
@@ -269,9 +282,36 @@ require_state() {
     source "${_SRCLIB_DIR}/state-lib.sh"
 }
 # require_state is intentionally not called from production hooks.
+
+require_db_safety() {
+    [[ -n "${_DB_SAFETY_LIB_LOADED:-}" ]] && return 0
+    source "${_SRCLIB_DIR}/db-safety-lib.sh"
+}
+# require_db_safety is called from the Database Safety Checks section of pre-bash.sh.
+# It is loaded lazily — non-database commands never pay the parse cost.
+# See hooks/db-safety-lib.sh for DEC-DBSAFE-001 (modular architecture rationale).
+
+require_db_guardian() {
+    [[ -n "${_DB_GUARDIAN_LIB_LOADED:-}" ]] && return 0
+    source "${_SRCLIB_DIR}/db-guardian-lib.sh"
+}
+# require_db_guardian is called from the Database Safety Checks section of pre-bash.sh
+# when a destructive DB command is denied and the DB-GUARDIAN-REQUIRED signal needs to
+# be emitted. It is loaded lazily — only fired when an actual deny triggers handoff.
+# See hooks/db-guardian-lib.sh for DEC-DBGUARD-002 (JSON marshalling rationale).
 # state_update/state_read are used optionally via: type state_update &>/dev/null && ...
 # (in log.sh and session-lib.sh). Tests call require_state directly.
 # See test-proof-lifecycle.sh:T09 for the test coverage of this loader.
+
+require_db_guardian() {
+    [[ -n "${_DB_GUARDIAN_LIB_LOADED:-}" ]] && return 0
+    source "${_SRCLIB_DIR}/db-guardian-lib.sh"
+}
+# require_db_guardian is called by the DB Guardian agent at the start of every
+# database operation assessment. It loads the policy engine (D3), simulation
+# helpers (D4), and approval gate (D5). This is NOT loaded by pre-bash.sh —
+# it is an agent-layer library, not a hook-layer library.
+# See hooks/db-guardian-lib.sh for DEC-DBGUARD-001 (separation rationale).
 
 # verify_library_consistency
 #   Checks that all loaded library versions match the expected version.
@@ -300,16 +340,17 @@ verify_library_consistency() {
 
     # Check optionally-loaded domain libraries (only if loaded).
     # Format: VAR:LIBNAME:EXPECTED (EXPECTED defaults to expected_version if omitted).
-    # Per-library expected versions allow state-lib.sh to be at v2 while
-    # other libraries remain at v1 (DEC-SQLITE-001 Wave 1 rewrite).
+    # Per-library expected versions allow state-lib.sh to be at v3 while
+    # other libraries remain at v1 (DEC-SQLITE-001 Wave 1 rewrite bumped to v3).
     local lib_vars=(
-        "_STATE_LIB_VERSION:state-lib.sh:2"
+        "_STATE_LIB_VERSION:state-lib.sh:3"
         "_SESSION_LIB_VERSION:session-lib.sh"
         "_TRACE_LIB_VERSION:trace-lib.sh"
         "_PLAN_LIB_VERSION:plan-lib.sh"
         "_GIT_LIB_VERSION:git-lib.sh"
         "_DOC_LIB_VERSION:doc-lib.sh"
         "_CI_LIB_VERSION:ci-lib.sh"
+        "_DB_SAFETY_LIB_VERSION:db-safety-lib.sh:3"
     )
 
     for entry in "${lib_vars[@]}"; do

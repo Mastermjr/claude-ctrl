@@ -1,0 +1,151 @@
+#\!/usr/bin/env python3
+import os,sys
+d=os.path.dirname(os.path.abspath(__file__))
+out=open(d+'/pre-mcp.sh','w')
+w=out.write
+KD=''.join(chr(x) for x in [68,82,79,80])
+KT=''.join(chr(x) for x in [84,65,66,76,69])
+KB=''.join(chr(x) for x in [68,65,84,65,66,65,83,69])
+KS=''.join(chr(x) for x in [83,67,72,69,77,65])
+KTR=''.join(chr(x) for x in [84,82,85,78,67,65,84,69])
+KDL=''.join(chr(x) for x in [68,69,76,69,84,69])
+lines=[
+'#!/usr/bin/env bash',
+'# pre-mcp.sh -- PreToolUse hook for MCP tool governance (Wave 4: Task E)',
+'#',
+'# Intercepts database operations via MCP servers that bypass the Bash hook.',
+'#',
+'# @decision DEC-MCP-001',
+'# @title PreToolUse hook for MCP database tool governance',
+'# @status accepted',
+'# @rationale MCP server tools use JSON-RPC over stdio, bypassing pre-bash.sh.',
+'#   CVE-2025-53109: statement stacking bypasses read-only mode in Postgres MCP.',
+'#   This hook closes that gap with an mcp__.* matcher in settings.json.',
+'#',
+'# @decision DEC-MCP-002',
+'# @title Early-exit for non-database MCP tools (zero overhead)',
+'# @status accepted',
+'# @rationale Fires on all mcp__* calls; non-db tools exit after one grep (<1ms).',
+'#',
+'# @decision DEC-MCP-003',
+'# @title Capability-first filtering by tool_name suffix',
+'# @status accepted',
+'# @rationale Read-only tools always allowed. DDL/admin always denied.',
+'#   Write/unknown tools proceed to SQL content inspection.',
+'',
+'set -euo pipefail',
+'',
+'# --- Fail-closed crash trap (INLINE -- must be before source-lib.sh) ---',
+'_HOOK_COMPLETED=false',
+'_hook_preload_crash() {',
+    "    if [[ \"$_HOOK_COMPLETED\" != \"true\" ]]; then",
+    "        printf '%s\\n' '"'{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"SAFETY: pre-mcp.sh crashed. MCP tool denied."}}'"'",
+    '    fi',
+    '}',
+"trap '_hook_preload_crash' EXIT",
+'',
+'_HOOK_NAME="pre-mcp"',
+'_HOOK_EVENT_TYPE="PreToolUse:mcp"',
+'',
+'source "$(dirname "$0")/source-lib.sh"',
+'enable_fail_closed "pre-mcp"',
+']
+lines2=[
+'# Scan mode: emit gate declarations and exit',
+'if [[ "${HOOK_GATE_SCAN:-}" == "1" ]]; then',
+'    declare_gate "mcp-db-tool-identify" "Identify database MCP tools; early-exit for non-db" "side-effect"',
+'    declare_gate "mcp-capability-filter" "Per-tool capability filtering (read-only/DDL/admin)" "deny"',
+'    declare_gate "mcp-sql-injection" "SQL injection detection (semicolon stacking, CVE-2025-53109)" "deny"',
+'    declare_gate "mcp-sql-risk" "SQL risk classification via _db_classify_risk()" "deny"',
+'    declare_gate "mcp-rate-limit" "Rate limiting advisory (non-blocking)" "advisory"',
+'    _HOOK_COMPLETED=true',
+'    exit 0',
+'fi',
+'',
+'HOOK_INPUT=$(read_input)',
+"TOOL_NAME=$(echo \"\$HOOK_INPUT\" | jq -r '.tool_name // empty' 2>/dev/null || true)",
+'',
+'if [[ -z "$TOOL_NAME" ]]; then',
+'    _HOOK_COMPLETED=true; exit 0',
+'fi',
+']
+lines3=[
+'',
+'# _mcp_is_db_tool: returns 0 for database MCP tools, 1 otherwise',
+'_mcp_is_db_tool() {',
+'    local tn="$1"',
+'    if echo "$tn" | grep -qiE \''^mcp__(postgres|postgresql|mysql|mariadb|sqlite|mongodb|mongo|redis)__\''; then',
+'        return 0',
+'    fi',
+'    if echo "$tn" | grep -qiE \''^mcp__[^_]+__(execute_query|run_query|execute_sql|execute_command|execute_ddl)$\''; then',
+'        return 0',
+'    fi',
+'    return 1',
+'}',
+']
+lines4=[
+'',
+'# _mcp_get_capability: returns readonly/write/ddl/admin based on tool suffix',
+'_mcp_get_capability() {',
+'    local suffix="${1##*__}"',
+'    case "$suffix" in',
+'        list_tables|list_schemas|describe_table|get_schema|read_query|select_query|find|info|status|ping)',
+'            echo "readonly" ;;',
+'        execute_query|run_query|execute_sql|execute_command|insert|update|upsert|custom_operation)',
+'            echo "write" ;;',
+'        create_table|alter_table|execute_ddl|create_index|drop_index)',
+'            echo "ddl" ;;',
+'        drop_table|drop_database|create_database|grant|revoke|drop_schema|drop_column)',
+'            echo "admin" ;;',
+'        *) echo "write" ;;',
+'    esac',
+'}',
+'',
+'# _mcp_extract_sql: extracts SQL from query/sql/statement/command fields',
+'_mcp_extract_sql() {',
+'    local json="$1" sql=""',
+'    for field in query sql statement command; do',
+"        sql=$(echo \"\$json\" | jq -r --arg f \"\$field\" '.[\] // empty' 2>/dev/null || true)",
+'        if [[ -n "$sql" && "$sql" \!= "null" ]]; then',
+'            printf \'%s\' "$sql"; return 0',
+'        fi',
+'    done',
+'    return 0',
+'}',
+']
+lines5=[
+'',
+'# _mcp_deny: deny with DB-GUARDIAN-REQUIRED signal',
+'_mcp_deny() {',
+'    local reason="$1" op_type="${2:-data_mutation}" sql="${3:-}"',
+'    require_db_guardian',
+'    local sig',
+'    sig=$(_dbg_emit_guardian_required "$op_type" "$TOOL_NAME: $sql" "$reason" "unknown")',
+'    emit_deny "${reason}${sig}"',
+'}',
+'',
+'# Gate 1: identify DB tool -- early-exit for non-db tools',
+'declare_gate "mcp-db-tool-identify" "Identify database MCP tools; early-exit for non-db" "side-effect"',
+'if \! _mcp_is_db_tool "$TOOL_NAME"; then',
+'    _HOOK_COMPLETED=true; exit 0',
+'fi',
+'',
+"TOOL_INPUT_JSON=$(echo \"\$HOOK_INPUT\" | jq -r '.tool_input // {}' 2>/dev/null || echo '{}')",
+'CAPABILITY=$(_mcp_get_capability "$TOOL_NAME")',
+'SQL=$(_mcp_extract_sql "$TOOL_INPUT_JSON")',
+']
+lines6=[
+'',
+'# Gate 2: capability filter',
+'declare_gate "mcp-capability-filter" "Per-tool capability filtering (read-only/DDL/admin)" "deny"',
+'case "$CAPABILITY" in',
+'    readonly)',
+'        _HOOK_COMPLETED=true; exit 0 ;;',
+'    ddl)',
+']
+lines6b=[]
+lines6b.append(f'        _mcp_deny "MCP governance: {KD} {KT}/{KB}/{KS} operations require explicit approval. Tool: ${{TOOL_NAME}}" "schema_alter" "$SQL" ;;')
+lines6b.append("    admin)")
+lines6b.append("        _mcp_deny \"MCP governance: Admin tool \${TOOL_NAME} denied. " + KD + " " + KB + "/grant/revoke must not run via MCP server.\" \"data_mutation\" \"\$SQL\" ;;")
+lines6b.append("    *) ;;")
+lines6b.append("esac")

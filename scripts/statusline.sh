@@ -1,36 +1,32 @@
 #!/usr/bin/env bash
-# statusline.sh — Claude Code 3-line status bar with per-line ANSI-aware truncation.
+# statusline.sh — Claude Code 4-line status bar with per-line ANSI-aware truncation.
 #
 # Purpose: Reads JSON from stdin (model, workspace, cost, context window, tokens),
 # reads .statusline-cache-<SESSION_ID> for git/agent state, reads .todo-count for todos,
-# and outputs 2-3 ANSI-formatted lines, each independently truncated to terminal width.
+# and outputs 4 ANSI-formatted lines, each independently truncated to terminal width.
 #
 # @decision DEC-CACHE-002
-# @title Three-line status bar: metrics (Line 1) + project context (Line 2) + initiative banner (Line 3)
+# @title Four-line status bar redesign (was 3-line in v2)
 # @status accepted
-# @rationale Single-line statuslines on wide monitors are hard to scan because
-# project context and session metrics compete for the same horizontal space.
-# Splitting into lines gives each domain its own visual lane:
-#   Line 1 (metrics): model, context bar, tokens, cost, duration, lines, cache %
-#   Line 2 (project): workspace, git state, agents, todos
-#   Line 3 (initiative highlight bar, conditional): bold cyan banner at the bottom
-# Line 3 is omitted when no active initiative exists so the display stays 2 lines
-# for idle/non-plan sessions. Each line independently truncates with "..." at
-# terminal width — no single-line compromise needed.
+# @rationale The original 3-line layout packed all 8 metrics onto one line. With the
+# 65-char right-panel reservation (DEC-STATUSLINE-TERMWIDTH-003), "Project Lifetime"
+# was dropped at any COLUMNS <= 125. The 4-line layout gives primary metrics their own
+# line (Line 2) and secondary metrics their own line (Line 3), dramatically reducing
+# segment dropping. See DEC-STATUSLINE-4LINE-001 for full design rationale.
 # Removed: time (HH:MM:SS), plan phase inline segment, test status, community
 # segment, version, worktree-roster stale detection (PID-based).
 # Added: context window bar, cost (~$X.XX), duration (ms to human), lines
-# changed, cache %, token count (tokens: Nk), initiative highlight bar (bottom).
+# changed, cache %, token count (tokens: Nk), initiative highlight bar (Line 4).
 #
 # @decision DEC-STATUSLINE-001
-# @title Domain clustering for project-context line (Line 2) segments
+# @title Domain clustering for project-context line (Line 1) segments
 # @status accepted
 # @rationale Grouping related segments with explicit labels reduces cognitive
-# load when scanning the statusline. Line 2 clusters: workspace ("where am I"),
+# load when scanning the statusline. Line 1 clusters: workspace ("where am I"),
 # git state with dirty:/wt: labels ("repo state"), agents: with type list
 # ("what work is active"), todos: count ("pending work"). Labels make numeric
 # values unambiguous — "8 dirty" is less clear than "dirty: 8". Model display
-# name moved to Line 1 (metrics line) so the project line stays workspace-focused.
+# name is on Line 3 (secondary metrics) so the project line stays workspace-focused.
 #
 # @decision DEC-STATUSLINE-002
 # @title Token count segment with K/M notation and usage-based color
@@ -43,12 +39,13 @@
 #
 # Input (stdin): JSON with .model.display_name, .workspace.current_dir,
 #   .cost.*, .context_window.*
-# Output (stdout): 2-3 ANSI-formatted lines, each truncated to terminal width with ...
+# Output (stdout): 4 ANSI-formatted lines, each truncated to terminal width with ...
 #
 # Line layout (top to bottom):
-#   Line 1 (metrics):  model │ [context bar] │ tks: Nk │ ~$cost │ duration │ +lines/-lines │ cache %
-#   Line 2 (project):  workspace │ dirty: N  wt: N │ agents: N (types) │ todos: Np Ng
-#   Line 3 (highlight bar, conditional): Initiative Name (Phase N/M): Phase Title  ← bold cyan, bottom
+#   Line 1 (project):  workspace │ dirty: N  wt: N │ agents │ todos: Np Ng
+#   Line 2 (primary):  [context bar] N% │ Nktks(+subs Stks) │ ~$cost(Σ~$total) │ Project Lifetime: ∑Tk tks
+#   Line 3 (secondary): model │ cache N% │ duration │ +N/-N lines
+#   Line 4 (highlight, conditional): Initiative Name (Phase N/M): Phase Title  ← bold cyan, bottom
 #
 # @decision DEC-STATUSLINE-DEPS-001
 # @title Statusline configuration dependency chain
@@ -100,9 +97,75 @@ IFS=$'\t' read -r model workspace workspace_dir cost_usd duration_ms \
 # ---------------------------------------------------------------------------
 # Read .statusline-cache (git state + agents)
 # ---------------------------------------------------------------------------
-CACHE_FILE="${workspace_dir:+$workspace_dir/.claude/.statusline-cache-${CLAUDE_SESSION_ID:-$$}}"
+# @decision DEC-DOUBLE-NEST-FIX-002
+# @title statusline.sh CACHE_FILE: double-nesting guard for ~/.claude workspace
+# @status accepted
+# @rationale When workspace_dir is ~/.claude (meta-project), appending "/.claude" produces
+#   ~/.claude/.claude/ — a double-nested path that does not match where write_statusline_cache()
+#   writes the file (fixed in DEC-DOUBLE-NEST-FIX-001). Inline the same guard here:
+#   if workspace_dir is HOME/.claude, use workspace_dir directly as the cache dir.
+#   statusline.sh is standalone (no source-lib.sh), so we replicate the logic inline.
+_sl_cache_dir=""
+if [[ -n "${workspace_dir:-}" ]]; then
+    if [[ "${workspace_dir%/}" == "${HOME%/}/.claude" ]]; then
+        _sl_cache_dir="$workspace_dir"
+    else
+        _sl_cache_dir="$workspace_dir/.claude"
+    fi
+fi
+CACHE_FILE="${_sl_cache_dir:+${_sl_cache_dir}/.statusline-cache-${CLAUDE_SESSION_ID:-$$}}"
 # Fallback to home .claude if workspace_dir is empty
 [[ -z "$workspace_dir" ]] && CACHE_FILE="$HOME/.claude/.statusline-cache-${CLAUDE_SESSION_ID:-$$}"
+
+# @decision DEC-DUALBAR-004
+# @title Cache file discovery fallback for missing CLAUDE_SESSION_ID
+# @status accepted
+# @rationale CLAUDE_SESSION_ID is not exported to the statusline subprocess (same issue
+# as DEC-DUALBAR-003). Hooks write the cache using the real session ID; the statusline
+# constructs a path using $$ (PID). Discovery fallback: find the most recent
+# .statusline-cache-* file in the workspace .claude/ dir. This works because:
+# (1) typically one active session per workspace, (2) even with multiple sessions,
+# the most recent cache is most relevant.
+if [[ ! -f "$CACHE_FILE" ]]; then
+  _cache_dir="${CACHE_FILE%/*}"
+  if [[ -d "$_cache_dir" ]]; then
+    # ls may return exit 1 when no files match glob; || true prevents set -e from triggering.
+    _latest_cache=$(ls -t "$_cache_dir"/.statusline-cache-* 2>/dev/null | head -1 || true)
+    [[ -n "$_latest_cache" && -f "$_latest_cache" ]] && CACHE_FILE="$_latest_cache"
+  fi
+  unset _cache_dir _latest_cache
+fi
+
+# @decision DEC-CACHE-PRUNE-001
+# @title Time-based cache pruning: delete files older than 1 hour instead of keeping 3 newest
+# @status accepted
+# @rationale The original count-based pruning (ls -t | tail -n +4 | xargs rm -f) kept only
+#   the 3 newest cache files. With concurrent sessions, every session runs its own statusline
+#   render, and the "3 newest" pruning deletes other active sessions' cache files. A session
+#   whose cache is deleted loses its lifetime token display (shows 0 until next hook update).
+#   Time-based pruning (delete files older than 1 hour) is safe: active sessions update their
+#   cache every few minutes, so a 1-hour threshold is far above normal update intervals while
+#   still cleaning up orphaned files from crashed sessions. The >10 count threshold prevents
+#   running mtime stat calls on every render during normal (1-3 session) operation.
+#   Supersedes the count-based pruning from DEC-CACHE-001 era.
+_cache_dir="${CACHE_FILE%/*}"
+if [[ -d "$_cache_dir" ]]; then
+  _cache_count=$(ls "$_cache_dir"/.statusline-cache-* 2>/dev/null | wc -l | tr -d ' ' || true)
+  if (( ${_cache_count:-0} > 10 )); then
+    # Delete cache files older than 1 hour (mtime > 3600s ago)
+    _now_ts=$(date +%s)
+    for _cf in "$_cache_dir"/.statusline-cache-*; do
+      [[ -f "$_cf" ]] || continue
+      _cf_mtime=$(_file_mtime "$_cf")
+      if (( _now_ts - _cf_mtime > 3600 )); then
+        rm -f "$_cf" 2>/dev/null || true
+      fi
+    done
+    unset _now_ts _cf _cf_mtime
+  fi
+  unset _cache_count
+fi
+unset _cache_dir
 
 cache_dirty=0
 cache_wt=0
@@ -117,6 +180,7 @@ cache_initiative=""
 cache_phase=""
 cache_active_inits=0
 cache_total_phases=0
+cache_session_label=""
 
 # @decision DEC-TODO-SPLIT-002
 # @title Read todo_project/todo_global from cache with -1 sentinel for absent fields
@@ -143,13 +207,14 @@ if [[ -f "$CACHE_FILE" ]]; then
     (.initiative // ""),
     (.phase // ""),
     (.active_initiatives // 0 | tostring),
-    (.total_phases // 0 | tostring)
+    (.total_phases // 0 | tostring),
+    (.session_label // "")
   ] | join("\u001f")' "$CACHE_FILE" 2>/dev/null \
-    || printf '0\x1f0\x1f0\x1f\x1f-1\x1f-1\x1f0\x1f0\x1f0\x1f\x1f\x1f0\x1f0')
+    || printf '0\x1f0\x1f0\x1f\x1f-1\x1f-1\x1f0\x1f0\x1f0\x1f\x1f\x1f0\x1f0\x1f')
   IFS=$'\x1f' read -r cache_dirty cache_wt cache_agents cache_agents_types \
     cache_todo_project cache_todo_global cache_lifetime_cost cache_lifetime_tokens \
     cache_subagent_tokens cache_initiative cache_phase \
-    cache_active_inits cache_total_phases <<< "$cache_vars"
+    cache_active_inits cache_total_phases cache_session_label <<< "$cache_vars"
 fi
 
 # ---------------------------------------------------------------------------
@@ -165,14 +230,119 @@ if [[ -f "$TODO_CACHE" ]]; then
   [[ "$todo_count" =~ ^[0-9]+$ ]] || todo_count=0
 fi
 
+
+# ---------------------------------------------------------------------------
+# Baseline capture: system overhead percentage for dual-color context bar.
+#
+# @decision DEC-DUALBAR-002
+# @title Baseline fingerprint: hash of config mtimes + model for invalidation
+# @status accepted
+# @rationale The system overhead percentage (baseline_pct) represents CLAUDE.md,
+# settings.json, hooks dir, and model baked into each new conversation. It is stable
+# within a session but drifts when config files change or model switches. A fingerprint
+# hash (md5 of mtimes + model) detects this drift. Two additional invalidation triggers:
+#   - Compaction: ctx_pct drops below saved baseline (conversation was cleared).
+#   - Missing file: new session, capture fresh.
+# Storage: .statusline-baseline (one per workspace — no session suffix).
+# Format: fingerprint|baseline_pct (single line, pipe-delimited).
+# Fingerprint computation: fast stat calls + md5, < 5ms.
+#
+# @decision DEC-DUALBAR-003
+# @title Remove session-scoped baseline filename — use single workspace-scoped file
+# @status accepted
+# @rationale The previous filename included ${CLAUDE_SESSION_ID:-$$}. CLAUDE_SESSION_ID
+# is NOT exported to the statusline subprocess, so $$ (the bash PID) was used instead —
+# unique per invocation. Every render created a new baseline file and captured the current
+# percentage, meaning baseline == current pct always, producing 0 conversation blocks
+# (the entire bar rendered as system color). Fix: use a single .statusline-baseline file
+# per workspace. The fingerprint already handles invalidation on config drift or model
+# switch; compaction detection (ctx_pct < baseline) handles session boundaries.
+# Session-scoped naming added no value and actively broke the dual-color bar.
+# ---------------------------------------------------------------------------
+# Use the same double-nesting guard as CACHE_FILE above (_sl_cache_dir already computed)
+BASELINE_FILE="${_sl_cache_dir:+${_sl_cache_dir}/.statusline-baseline}"
+[[ -z "$workspace_dir" ]] && BASELINE_FILE="$HOME/.claude/.statusline-baseline"
+
+baseline_pct=0
+
+# Compute current fingerprint (mtime of key config files + model name)
+_claude_md_mtime=$(_file_mtime "$HOME/.claude/CLAUDE.md")
+_settings_mtime=$(_file_mtime "$HOME/.claude/settings.json")
+_hooks_mtime=$(_file_mtime "$HOME/.claude/hooks")
+_current_fp=$(printf '%s' "${_claude_md_mtime}:${_settings_mtime}:${model}:${_hooks_mtime}" \
+  | md5 -q 2>/dev/null || \
+  printf '%s' "${_claude_md_mtime}:${_settings_mtime}:${model}:${_hooks_mtime}" \
+  | md5sum 2>/dev/null | cut -d' ' -f1 || \
+  echo "nohash")
+
+# Read saved baseline (fingerprint|pct)
+_saved_fp="" _saved_pct=0
+if [[ -f "$BASELINE_FILE" ]]; then
+  _baseline_raw=$(cat "$BASELINE_FILE" 2>/dev/null || echo "")
+  _saved_fp="${_baseline_raw%%|*}"
+  _saved_pct="${_baseline_raw##*|}"
+  [[ "$_saved_pct" =~ ^[0-9]+$ ]] || _saved_pct=0
+fi
+
+# Determine if baseline needs recapture:
+#   a) No saved baseline yet (file missing or empty)
+#   b) Fingerprint changed (config drift / model switch)
+#   c) ctx_pct < saved baseline (compaction happened — context was cleared)
+_ctx_pct_int="${ctx_pct%.*}"
+[[ "$_ctx_pct_int" =~ ^[0-9]+$ ]] || _ctx_pct_int=0
+
+_baseline_valid=false
+if [[ -n "$_saved_fp" && "$_saved_fp" == "$_current_fp" && "$_saved_pct" -le "$_ctx_pct_int" ]]; then
+  _baseline_valid=true
+  baseline_pct="$_saved_pct"
+fi
+
+# Recapture if invalid and ctx_pct is a real reading (not -1).
+# Only set baseline_pct if the write succeeds — if the workspace dir does not
+# exist (e.g. test harness using /tmp/p), the write fails and we stay single-color.
+if [[ "$_baseline_valid" == "false" && "$ctx_pct" != "-1" && "$ctx_pct" != "" && "$_ctx_pct_int" -gt 0 ]]; then
+  if printf '%s|%s' "$_current_fp" "$_ctx_pct_int" > "$BASELINE_FILE" 2>/dev/null; then
+    baseline_pct="$_ctx_pct_int"
+    # One-time cleanup: remove proliferated per-session/per-PID baseline files from the
+    # old naming scheme (.statusline-baseline-SESSION_ID or .statusline-baseline-PID).
+    # These were created by the $$ bug (DEC-DUALBAR-003): every render spawned a fresh
+    # PID, so each render wrote a new file. Cleaning on first successful baseline write
+    # removes the clutter without a separate migration pass.
+    _baseline_dir="${BASELINE_FILE%/*}"
+    for _old_bl in "$_baseline_dir"/.statusline-baseline-*; do
+      [[ -f "$_old_bl" ]] && rm -f "$_old_bl" 2>/dev/null || true
+    done
+    unset _baseline_dir _old_bl
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 sep='\033[2m│\033[0m'
 
-# build_context_bar pct — render 12-char progress bar with color
+# build_context_bar pct [baseline_pct] — render 12-char progress bar with color.
+# When baseline_pct is provided and > 0, renders THREE visual regions:
+#   [▓▓▓█████████░] 79%
+#    ^^^               <- dim/muted color: system overhead baseline
+#       ^^^^^^^^       <- severity color: conversation content
+#                ^^    <- empty: remaining capacity
+# When baseline_pct is 0 or absent, falls back to single-color behavior (backward compat).
+#
+# @decision DEC-DUALBAR-001
+# @title Dual-color context bar: system overhead (dark grey ESC[90m) + conversation (█ severity)
+# @status accepted
+# @rationale The single-color context bar conflates system overhead (CLAUDE.md, tools,
+# hooks) with actual conversation content. Users can't tell how much real capacity they
+# have left. Splitting into dark grey system blocks (█ ESC[90m) and bright conversation
+# blocks (█ severity color) makes the overhead visible without making it alarming.
+# ESC[2m (dim) was invisible on dark terminals — ESC[90m (bright black / dark grey) is
+# clearly visible as "filled" while remaining subordinate to the severity colors.
+# The baseline is captured on first valid reading and invalidated on compaction (pct drop)
+# or config drift (fingerprint). Bar remains backward compatible: no baseline → single-color.
 build_context_bar() {
   local pct=$1
+  local baseline_pct="${2:-0}"
 
   if [[ "$pct" == "-1" || "$pct" == "" ]]; then
     # Before first API call: all-empty bar, dim
@@ -189,10 +359,6 @@ build_context_bar() {
   local filled=$(( pct_int * 12 / 100 ))
   local empty=$(( 12 - filled ))
 
-  local bar_fill="" bar_empty="" i
-  for (( i=0; i<filled; i++ )); do bar_fill+="█"; done
-  for (( i=0; i<empty;  i++ )); do bar_empty+="░"; done
-
   local color
   if   (( pct_int >= 90 )); then color="1;31"
   elif (( pct_int >= 75 )); then color="31"
@@ -200,7 +366,39 @@ build_context_bar() {
   else                           color="32"
   fi
 
-  printf '\033[%sm[%s%s] %d%%\033[0m' "$color" "$bar_fill" "$bar_empty" "$pct_int"
+  # Dual-color mode: when baseline_pct is provided and valid
+  local baseline_int=0
+  if [[ -n "$baseline_pct" && "$baseline_pct" != "0" ]]; then
+    baseline_int="${baseline_pct%.*}"
+    (( baseline_int < 0 )) && baseline_int=0
+    (( baseline_int > 100 )) && baseline_int=100
+  fi
+
+  if (( baseline_int > 0 )); then
+    # Map baseline to blocks, clamp so it never exceeds filled
+    local sys_blocks=$(( baseline_int * 12 / 100 ))
+    (( sys_blocks > filled )) && sys_blocks=$filled
+    local conv_blocks=$(( filled - sys_blocks ))
+
+    # Build three regions
+    local bar_sys="" bar_conv="" bar_empty="" i
+    for (( i=0; i<sys_blocks;   i++ )); do bar_sys+="█"; done
+    for (( i=0; i<conv_blocks;  i++ )); do bar_conv+="█"; done
+    for (( i=0; i<empty;        i++ )); do bar_empty+="░"; done
+
+    # Render: [dark-grey_sys severity_conv dim_empty] pct%
+    # System: dark grey (ESC[90m) full blocks — visible but subordinate to severity color.
+    # Conversation: severity-colored full blocks. Empty: dim light shade (ESC[2m, recede).
+    # All filled regions use █ — color alone distinguishes them.
+    printf '\033[90m[%s\033[0m\033[%sm%s\033[2m%s\033[90m]\033[0m \033[%sm%d%%\033[0m' \
+      "$bar_sys" "$color" "$bar_conv" "$bar_empty" "$color" "$pct_int"
+  else
+    # Single-color fallback (no baseline)
+    local bar_fill="" bar_empty="" i
+    for (( i=0; i<filled; i++ )); do bar_fill+="█"; done
+    for (( i=0; i<empty;  i++ )); do bar_empty+="░"; done
+    printf '\033[%sm[%s%s] %d%%\033[0m' "$color" "$bar_fill" "$bar_empty" "$pct_int"
+  fi
 }
 
 # format_duration ms — convert milliseconds to human-readable string
@@ -219,7 +417,7 @@ format_duration() {
 
 # format_tokens count — convert raw token count to K/M notation
 # < 1000: raw (e.g. 500)
-# 1000-999999: Nk (e.g. 145k)
+# 1000-999999: NK (e.g. 145K)
 # >= 1000000: N.NM (e.g. 1.5M)
 format_tokens() {
   local count=$1
@@ -234,7 +432,7 @@ format_tokens() {
     local frac=$(( tenths % 10 ))
     printf '%d.%dM' "$whole" "$frac"
   elif (( count >= 1000 )); then
-    printf '%dk' "$(( count / 1000 ))"
+    printf '%dK' "$(( count / 1000 ))"
   else
     printf '%d' "$count"
   fi
@@ -321,7 +519,13 @@ if (( total_input > 0 && cache_read > 0 )); then
 fi
 
 # ---------------------------------------------------------------------------
-# LINE 3 (bottom): Initiative highlight bar (conditional — only when active initiative exists)
+# LINE 3 (bottom): Session label (when agent active) OR initiative banner
+#
+# Priority:
+#   1. cache_session_label non-empty → show worktree/description for THIS session
+#   2. cache_initiative non-empty    → show initiative + phase (current behavior)
+#   3. Both empty                    → Line 3 omitted (2-line fallback)
+#
 # @decision DEC-STATUSLINE-003
 # @title Full initiative banner as bottom highlight bar (Line 3)
 # @status accepted
@@ -337,9 +541,24 @@ fi
 # Line 3 is omitted and output stays 2 lines (backward compatible).
 # When multiple initiatives are active, "(+N more)" suffix is appended.
 # Color: bold cyan — visually prominent but not alarming.
+#
+# @decision DEC-SESSION-LABEL-003
+# @title Prefer session_label over initiative on Line 3 when agent is dispatched
+# @status accepted
+# @rationale When multiple Claude Code sessions run concurrently on the same project,
+# all sessions show the same MASTER_PLAN.md initiative on Line 3. The session_label
+# (worktree name or agent description) is session-specific — written into the per-session
+# cache file by write_statusline_cache() via get_subagent_status(). Showing the label
+# instead of the initiative lets the user identify which session is doing what at a glance.
+# Fallback to initiative preserves backward compatibility when no agent is dispatched.
+# Color is identical (bold cyan) — no new visual language introduced.
 # ---------------------------------------------------------------------------
 line0=""
-if [[ -n "$cache_initiative" ]]; then
+if [[ -n "$cache_session_label" ]]; then
+  # Session-specific label: worktree name or agent description for this dispatch.
+  # Displayed as bold cyan — same visual weight as initiative, distinct content.
+  line0=$(printf '\033[1;36m%s\033[0m' "$cache_session_label")
+elif [[ -n "$cache_initiative" ]]; then
   _banner="$cache_initiative"
 
   # Extract phase number and title from "#### Phase N: Title -- Subtitle"
@@ -387,16 +606,20 @@ if [[ -n "$cache_initiative" ]]; then
 fi
 
 # Terminal width — must be resolved before the responsive layout sections below.
-# @decision DEC-STATUSLINE-TERMWIDTH-002
-# @title Clamp small COLUMNS to 120 — let Claude Code UI handle final clipping
+# @decision DEC-STATUSLINE-TERMWIDTH-003
+# @title Reserve 65 chars for Claude Code right-panel, clamp floor to 60
 # @status accepted
-# @rationale Claude Code provides COLUMNS for the statusline display area, but small
-# values (including 0 from subprocess context) cause aggressive responsive dropping that
-# removes useful segments. At term_w=120 the full metrics line (~94 chars) fits with zero
-# drops. Display order already puts most-important segments first (context bar → tks →
-# cost), so natural UI clipping shows the best content when the area is narrow.
+# @rationale Claude Code renders right-aligned info on the same lines as the custom
+# statusline ("Context left until auto-compact: N% · /model ..."), consuming ~60-70
+# visible characters. Without reserving this space, the responsive drop system uses
+# full COLUMNS, produces segments that overflow into the right panel, and Claude Code's
+# UI clips them — causing the metrics line to collapse to just the context bar.
+# Subtracting 65 chars from COLUMNS gives the responsive system the true available
+# width. Floor of 60 prevents negative/tiny widths from dropping everything.
+# Supersedes DEC-STATUSLINE-TERMWIDTH-002.
 term_w="${COLUMNS:-0}"
-(( term_w < 80 )) && term_w=120
+(( term_w > 65 )) && term_w=$(( term_w - 65 )) || term_w=60
+(( term_w < 60 )) && term_w=60
 (( term_w > 200 )) && term_w=200
 
 # ---------------------------------------------------------------------------
@@ -450,7 +673,7 @@ _p1_t_3=""; _p1_w_3=0; _p1_p_3=4
 if (( cache_agents > 0 )); then
   # Read subagent tracker for elapsed time and type
   _agent_type="" _agent_elapsed=""
-  _tracker_file="${workspace_dir:+$workspace_dir/.claude/.subagent-tracker-${CLAUDE_SESSION_ID:-$$}}"
+  _tracker_file="${_sl_cache_dir:+${_sl_cache_dir}/.subagent-tracker-${CLAUDE_SESSION_ID:-$$}}"
   [[ -z "$workspace_dir" ]] && _tracker_file="$HOME/.claude/.subagent-tracker-${CLAUDE_SESSION_ID:-$$}"
   if [[ -f "$_tracker_file" ]]; then
     _active_line=$(grep '^ACTIVE|' "$_tracker_file" 2>/dev/null | head -1)
@@ -484,7 +707,7 @@ if (( cache_agents > 0 )); then
 
   # Read file count from .session-changes-*
   _file_count=""
-  _changes_file="${workspace_dir:+$workspace_dir/.claude/.session-changes-${CLAUDE_SESSION_ID:-$$}}"
+  _changes_file="${_sl_cache_dir:+${_sl_cache_dir}/.session-changes-${CLAUDE_SESSION_ID:-$$}}"
   [[ -z "$workspace_dir" ]] && _changes_file="$HOME/.claude/.session-changes-${CLAUDE_SESSION_ID:-$$}"
   if [[ -f "$_changes_file" ]]; then
     _fc=$(wc -l < "$_changes_file" 2>/dev/null | tr -d ' ')
@@ -493,7 +716,7 @@ if (( cache_agents > 0 )); then
 
   # Read current file from .agent-progress (stale guard: ignore if >30min old)
   _current_file=""
-  _progress_file="${workspace_dir:+$workspace_dir/.claude/.agent-progress}"
+  _progress_file="${_sl_cache_dir:+${_sl_cache_dir}/.agent-progress}"
   [[ -z "$workspace_dir" ]] && _progress_file="$HOME/.claude/.agent-progress"
   if [[ -f "$_progress_file" ]]; then
     _progress_mtime=$(_file_mtime "$_progress_file")
@@ -591,31 +814,52 @@ _append_p1_seg() {
 [[ $_p1_drop_4 -eq 0 ]] && _append_p1_seg "$_p1_t_4"
 
 # ---------------------------------------------------------------------------
-# LINE 1 (metrics): Model + context bar + tokens + cost + duration + lines + cache
-# Responsive layout: build segments as parallel arrays, drop lowest priority
-# segments first when total width exceeds terminal width.
+# @decision DEC-STATUSLINE-4LINE-001
+# @title 4-line statusline layout: split metrics into primary (Line 2) and secondary (Line 3)
+# @status accepted
+# @rationale The original 3-line layout packed all 8 metric segments onto one line. With a
+#   65-char right-panel reservation (term_w = COLUMNS - 65), the responsive drop loop would
+#   eliminate "Project Lifetime: ∑5.7M tks" (priority 4) at any COLUMNS <= 125. The user
+#   explicitly requested a 4th line rather than aggressive dropping: "It's stupid how much
+#   it compresses. May as well just push the lines down by one if that'll fix the room."
 #
+#   New layout:
+#     Line 1: workspace | dirty | wt | agents | todos     (unchanged)
+#     Line 2: [ctx bar] | NK tks | ~$cost | ∑Lifetime tks (primary — drop only lifetime at extreme width)
+#     Line 3: model | cache N% | duration | +N/-N lines   (secondary — drops from lowest priority up)
+#     Line 4: Initiative Name (+N more)                   (initiative banner — unchanged, just moved to line 4)
+#
+#   This dramatically reduces segment dropping. Line 2 with only 4 segments (ctx+tks+cost+lifetime)
+#   fits at any terminal width without dropping, except possibly lifetime at very narrow (<60) effective widths.
+#   Line 3 overflow segments drop independently from their own responsive loop without affecting Line 2.
+#   Always emit 4 newlines for stable height (same DEC-STATUSLINE-005 reasoning extended to 4 lines).
+#   Supersedes the 3-line layout described in DEC-CACHE-002.
+#
+# LINE 2 (primary metrics): context bar + tokens + cost + lifetime
 # Priority table (lower number = higher priority, dropped last):
-#   1 = [context bar] N%     (drives user behavior)
-#   2 = tks: Nk(+Sk)        (token consumption)
-#   3 = ~$cost (Σ~$total)   (cost with lifetime)
-#   4 = ΣNk lifetime tokens  (cumulative across sessions)
-#   5 = model name           (usually known, nice-to-have)
-#   6 = cache N%             (efficiency metric)
-#   7 = duration             (session time)
-#   8 = +N/-N lines          (drops first)
+#   1 = [context bar] N%                      (always kept)
+#   2 = NK tks(+subs S tks)                   (token consumption)
+#   3 = ~$cost (Σ~$total)                     (cost with lifetime annotation)
+#   4 = Project Lifetime: ∑NK tks             (drops only at extreme width)
+#
+# LINE 3 (secondary metrics): model + cache% + duration + lines
+# Priority table:
+#   1 = model name                            (always kept — can be dropped in extremis)
+#   2 = cache N%                              (efficiency metric)
+#   3 = duration                              (session time)
+#   4 = +N/-N lines                           (drops first)
 # ---------------------------------------------------------------------------
 
 # Token count segment with subagent breakdown and project lifetime
 # @decision DEC-LIFETIME-TOKENS-001
-# @title Display token usage as: tks: Nk(+Sk) │ ΣTk — main, subagent, and project total
+# @title Display token usage as: NK tks(+subs SK tks) │ Project Lifetime: ∑TK tks
 # @status accepted
-# @rationale New format separates subagent contribution in-line (+Sk dim suffix) and
-# places the project lifetime Σ as a distinct segment after a separator. This is more
-# scannable than the previous (Σ) parenthetical: the eye lands on the current session
-# total first, the subagent cost is a minor annotation, and the cumulative Σ only
-# appears when there is genuine history (past sessions). The shorter "tks:" label saves
-# horizontal space. Supersedes DEC-SUBAGENT-TOKENS-004 and the inline (Σ) from v1.
+# @rationale Updated format (issue #160) makes each part self-labelling: "tks" directly
+# follows the count (no colon-separated label), "subs" prefix on the subagent count
+# clarifies its source, and "Project Lifetime: ∑" gives the grand total a human-readable
+# prefix. The ∑ symbol (not Σ) matches the Unicode mathematical summation character
+# requested in issue #160. Previous format: "tks: Nk(+Sk) │ ΣTk".
+# Supersedes DEC-SUBAGENT-TOKENS-004 and the inline (Σ) from v1.
 total_tokens_int="${total_tokens%.*}"
 total_tokens_int=$(( total_tokens_int ))
 tokens_str=$(format_tokens "$total_tokens_int")
@@ -640,26 +884,28 @@ cache_lifetime_tokens_int=$(( ${cache_lifetime_tokens_int:-0} ))
 # to ~/.claude/.claude for the ~/.claude project itself (double-nesting). session-end.sh
 # reads from get_claude_dir() which correctly strips the second .claude. Fix: mirror
 # that logic here — use workspace_dir directly for ~/.claude projects, append .claude otherwise.
-if [[ -n "${workspace_dir:-}" ]]; then
-  _token_dir="$workspace_dir/.claude"
-  [[ "$workspace_dir" == "$HOME/.claude" ]] && _token_dir="$workspace_dir"
-  printf '%d' "$total_tokens_int" > "${_token_dir}/.session-main-tokens" 2>/dev/null || true
+if [[ -n "${_sl_cache_dir:-}" ]]; then
+  printf '%d' "$total_tokens_int" > "${_sl_cache_dir}/.session-main-tokens" 2>/dev/null || true
 fi
 
-# Build token display: tks: Nk  or  tks: Nk(+Sk)
+# Build token display: NK tks  or  NK tks(+subs S tks)
+# Format: <N> tks(+subs<S> tks) — "tks" suffix on both main and subagent counts,
+# "subs" prefix on subagent to clarify source. Example: 145K tks(+subs 32K tks)
 if (( cache_subagent_tokens_int > 0 )); then
   subagent_str=$(format_tokens "$cache_subagent_tokens_int")
-  tokens_display=$(printf '\033[%smtks: %s\033[2m(+%s)\033[0m' "$tokens_color" "$tokens_str" "$subagent_str")
+  tokens_display=$(printf '\033[%sm%s tks\033[2m(+subs %s tks)\033[0m' "$tokens_color" "$tokens_str" "$subagent_str")
 else
-  tokens_display=$(printf '\033[%smtks: %s\033[0m' "$tokens_color" "$tokens_str")
+  tokens_display=$(printf '\033[%sm%s tks\033[0m' "$tokens_color" "$tokens_str")
 fi
 
 # Compute lifetime token grand total segment
+# Format: "Project Lifetime: ∑<N> tks" — prefix clarifies this is a project-wide sum.
+# ∑ is U+2211 (mathematical summation), distinct from Σ (U+03A3 Greek capital letter).
 _token_grand_total=$(( cache_lifetime_tokens_int + total_tokens_int + cache_subagent_tokens_int ))
 grand_total_display=""
 if (( _token_grand_total > total_tokens_int + cache_subagent_tokens_int && _token_grand_total > 0 )); then
   grand_total_str=$(format_tokens "$_token_grand_total")
-  grand_total_display=$(printf '\033[2mΣ%s\033[0m' "$grand_total_str")
+  grand_total_display=$(printf '\033[2mProject Lifetime: ∑%s tks\033[0m' "$grand_total_str")
 fi
 
 # Build cost display
@@ -702,122 +948,165 @@ fi
 # Duration display
 duration_display=$(printf '\033[2m%s\033[0m' "$(format_duration "$duration_ms")")
 
-# Build metrics line segments (priorities 1-8)
-# P2.0: context bar (priority 1)
-_m0=$(build_context_bar "$ctx_pct")
-ansi_visible_width "$_m0"; _mw0=$_AVW; _mp0=1
+# ---------------------------------------------------------------------------
+# Build LINE 2 segments: primary metrics (ctx bar + tokens + cost + lifetime)
+# ---------------------------------------------------------------------------
 
-# P2.1: model name (priority 5)
-_m1=$(printf '\033[2m%s\033[0m' "$model")
-ansi_visible_width "$_m1"; _mw1=$_AVW; _mp1=5
+# L2.0: context bar (priority 1 — always kept)
+_l2_0=$(build_context_bar "$ctx_pct" "$baseline_pct")
+ansi_visible_width "$_l2_0"; _l2w0=$_AVW
 
-# P2.2: tks: Nk(+Sk) (priority 2)
-_m2="$tokens_display"
-ansi_visible_width "$_m2"; _mw2=$_AVW; _mp2=2
+# L2.1: tks: Nk(+subs Sk) (priority 2)
+_l2_1="$tokens_display"
+ansi_visible_width "$_l2_1"; _l2w1=$_AVW
 
-# P2.3: ~$cost (Σ~$total) (priority 3)
-_m3="$cost_display"
-ansi_visible_width "$_m3"; _mw3=$_AVW; _mp3=3
+# L2.2: ~$cost (Σ~$total) (priority 3)
+_l2_2="$cost_display"
+ansi_visible_width "$_l2_2"; _l2w2=$_AVW
 
-# P2.4: ΣNk lifetime tokens (priority 4, conditional)
-_m4="$grand_total_display"
-ansi_visible_width "$_m4"; _mw4=$_AVW; _mp4=4
+# L2.3: Project Lifetime: ∑NK tks (priority 4, conditional — drops only at extreme width)
+_l2_3="$grand_total_display"
+ansi_visible_width "$_l2_3"; _l2w3=$_AVW
 
-# P2.5: cache N% (priority 6, conditional)
-_m5="$cache_display"
-ansi_visible_width "$_m5"; _mw5=$_AVW; _mp5=6
+# Responsive drop loop for Line 2: only lifetime (priority 4) can be dropped
+_l2d0=0; _l2d1=0; _l2d2=0; _l2d3=0
 
-# P2.6: duration (priority 7)
-_m6="$duration_display"
-ansi_visible_width "$_m6"; _mw6=$_AVW; _mp6=7
-
-# P2.7: +N/-N lines (priority 8, drops first, conditional)
-_m7="$lines_display"
-ansi_visible_width "$_m7"; _mw7=$_AVW; _mp7=8
-
-# Responsive drop loop for Line 1 (metrics)
-_md0=0; _md1=0; _md2=0; _md3=0; _md4=0; _md5=0; _md6=0; _md7=0
-
-_compute_m_width() {
+_compute_l2_width() {
   local total=0 seg_count=0
-  [[ $_md0 -eq 0 && -n "$_m0" ]] && total=$(( total + _mw0 )) && (( seg_count++ )) || true
-  [[ $_md1 -eq 0 && -n "$_m1" ]] && total=$(( total + _mw1 )) && (( seg_count++ )) || true
-  [[ $_md2 -eq 0 && -n "$_m2" ]] && total=$(( total + _mw2 )) && (( seg_count++ )) || true
-  [[ $_md3 -eq 0 && -n "$_m3" ]] && total=$(( total + _mw3 )) && (( seg_count++ )) || true
-  [[ $_md4 -eq 0 && -n "$_m4" ]] && total=$(( total + _mw4 )) && (( seg_count++ )) || true
-  [[ $_md5 -eq 0 && -n "$_m5" ]] && total=$(( total + _mw5 )) && (( seg_count++ )) || true
-  [[ $_md6 -eq 0 && -n "$_m6" ]] && total=$(( total + _mw6 )) && (( seg_count++ )) || true
-  [[ $_md7 -eq 0 && -n "$_m7" ]] && total=$(( total + _mw7 )) && (( seg_count++ )) || true
+  [[ $_l2d0 -eq 0 && -n "$_l2_0" ]] && total=$(( total + _l2w0 )) && (( seg_count++ )) || true
+  [[ $_l2d1 -eq 0 && -n "$_l2_1" ]] && total=$(( total + _l2w1 )) && (( seg_count++ )) || true
+  [[ $_l2d2 -eq 0 && -n "$_l2_2" ]] && total=$(( total + _l2w2 )) && (( seg_count++ )) || true
+  [[ $_l2d3 -eq 0 && -n "$_l2_3" ]] && total=$(( total + _l2w3 )) && (( seg_count++ )) || true
   (( seg_count > 1 )) && total=$(( total + (seg_count - 1) * 3 )) || true
-  _M_TOTAL=$total
+  _L2_TOTAL=$total
 }
 
-_M_TOTAL=0
-_compute_m_width
-# Drop from priority 8 down to 1 (context bar always stays)
-if (( _M_TOTAL > term_w && _mw7 > 0 )); then _md7=1; _compute_m_width; fi
-if (( _M_TOTAL > term_w && _mw6 > 0 )); then _md6=1; _compute_m_width; fi
-if (( _M_TOTAL > term_w && _mw5 > 0 )); then _md5=1; _compute_m_width; fi
-if (( _M_TOTAL > term_w && _mw4 > 0 )); then _md4=1; _compute_m_width; fi
-if (( _M_TOTAL > term_w && _mw1 > 0 )); then _md1=1; _compute_m_width; fi
-if (( _M_TOTAL > term_w && _mw3 > 0 )); then _md3=1; _compute_m_width; fi
-if (( _M_TOTAL > term_w && _mw2 > 0 )); then _md2=1; _compute_m_width; fi
+_L2_TOTAL=0
+_compute_l2_width
+# Drop lifetime first (priority 4), then cost (3), then tokens (2) — ctx bar (1) never drops
+if (( _L2_TOTAL > term_w && _l2w3 > 0 )); then _l2d3=1; _compute_l2_width; fi
+if (( _L2_TOTAL > term_w && _l2w2 > 0 )); then _l2d2=1; _compute_l2_width; fi
+if (( _L2_TOTAL > term_w && _l2w1 > 0 )); then _l2d1=1; _compute_l2_width; fi
 
-# Assemble Line 1 from remaining segments (display order: context bar, tks, cost, Σ, model, cache, duration, lines)
+# Assemble Line 2: [ctx bar] │ tokens │ cost │ lifetime
 line2=""
-_m_first=1
-_append_m_seg() {
+_l2_first=1
+_append_l2_seg() {
   local txt="$1"
   [[ -z "$txt" ]] && return
-  if (( _m_first )); then
+  if (( _l2_first )); then
     line2="$txt"
-    _m_first=0
+    _l2_first=0
   else
     line2=$(printf '%s %b %s' "$line2" "$sep" "$txt")
   fi
 }
-[[ $_md0 -eq 0 ]] && _append_m_seg "$_m0"
-[[ $_md2 -eq 0 ]] && _append_m_seg "$_m2"
-[[ $_md3 -eq 0 ]] && _append_m_seg "$_m3"
-[[ $_md4 -eq 0 ]] && _append_m_seg "$_m4"
-[[ $_md1 -eq 0 ]] && _append_m_seg "$_m1"
-[[ $_md5 -eq 0 ]] && _append_m_seg "$_m5"
-[[ $_md6 -eq 0 ]] && _append_m_seg "$_m6"
-[[ $_md7 -eq 0 ]] && _append_m_seg "$_m7"
+[[ $_l2d0 -eq 0 ]] && _append_l2_seg "$_l2_0"
+[[ $_l2d1 -eq 0 ]] && _append_l2_seg "$_l2_1"
+[[ $_l2d2 -eq 0 ]] && _append_l2_seg "$_l2_2"
+[[ $_l2d3 -eq 0 ]] && _append_l2_seg "$_l2_3"
 
 # ---------------------------------------------------------------------------
-# Output: 3-line layout — each line independently truncated to terminal width.
-#   Line 1 (top):    project   — workspace, git, agents, todos
-#   Line 2 (middle): metrics   — model, context bar, tokens, cost, duration, lines, cache %
-#   Line 3 (bottom): highlight — initiative banner (conditional, bold cyan)
-# @decision DEC-STATUSLINE-004 (output section — see truncate_ansi above for function annotation)
-# @title Three-line status bar with per-line ANSI-aware truncation
+# Build LINE 3 segments: secondary metrics (model + cache% + duration + lines)
+# Priority table (lower = higher priority):
+#   1 = model name                (always kept — last to drop)
+#   2 = cache N%                  (efficiency metric)
+#   3 = duration                  (session time)
+#   4 = +N/-N lines               (drops first)
+# ---------------------------------------------------------------------------
+
+# L3.0: model name (priority 1 — kept even at narrow widths)
+_l3_0=$(printf '\033[2m%s\033[0m' "$model")
+ansi_visible_width "$_l3_0"; _l3w0=$_AVW
+
+# L3.1: cache N% (priority 2, conditional)
+_l3_1="$cache_display"
+ansi_visible_width "$_l3_1"; _l3w1=$_AVW
+
+# L3.2: duration (priority 3)
+_l3_2="$duration_display"
+ansi_visible_width "$_l3_2"; _l3w2=$_AVW
+
+# L3.3: +N/-N lines (priority 4, drops first, conditional)
+_l3_3="$lines_display"
+ansi_visible_width "$_l3_3"; _l3w3=$_AVW
+
+# Responsive drop loop for Line 3
+_l3d0=0; _l3d1=0; _l3d2=0; _l3d3=0
+
+_compute_l3_width() {
+  local total=0 seg_count=0
+  [[ $_l3d0 -eq 0 && -n "$_l3_0" ]] && total=$(( total + _l3w0 )) && (( seg_count++ )) || true
+  [[ $_l3d1 -eq 0 && -n "$_l3_1" ]] && total=$(( total + _l3w1 )) && (( seg_count++ )) || true
+  [[ $_l3d2 -eq 0 && -n "$_l3_2" ]] && total=$(( total + _l3w2 )) && (( seg_count++ )) || true
+  [[ $_l3d3 -eq 0 && -n "$_l3_3" ]] && total=$(( total + _l3w3 )) && (( seg_count++ )) || true
+  (( seg_count > 1 )) && total=$(( total + (seg_count - 1) * 3 )) || true
+  _L3_TOTAL=$total
+}
+
+_L3_TOTAL=0
+_compute_l3_width
+# Drop from priority 4 down; model (priority 1) is last resort
+if (( _L3_TOTAL > term_w && _l3w3 > 0 )); then _l3d3=1; _compute_l3_width; fi
+if (( _L3_TOTAL > term_w && _l3w2 > 0 )); then _l3d2=1; _compute_l3_width; fi
+if (( _L3_TOTAL > term_w && _l3w1 > 0 )); then _l3d1=1; _compute_l3_width; fi
+
+# Assemble Line 3: model │ cache% │ duration │ +N/-N lines
+line3=""
+_l3_first=1
+_append_l3_seg() {
+  local txt="$1"
+  [[ -z "$txt" ]] && return
+  if (( _l3_first )); then
+    line3="$txt"
+    _l3_first=0
+  else
+    line3=$(printf '%s %b %s' "$line3" "$sep" "$txt")
+  fi
+}
+[[ $_l3d0 -eq 0 ]] && _append_l3_seg "$_l3_0"
+[[ $_l3d1 -eq 0 ]] && _append_l3_seg "$_l3_1"
+[[ $_l3d2 -eq 0 ]] && _append_l3_seg "$_l3_2"
+[[ $_l3d3 -eq 0 ]] && _append_l3_seg "$_l3_3"
+
+# ---------------------------------------------------------------------------
+# Output: 4-line layout — each line independently truncated to terminal width.
+#   Line 1 (top):     project   — workspace, git, agents, todos
+#   Line 2:           primary   — context bar, tokens, cost, lifetime
+#   Line 3:           secondary — model, cache%, duration, lines changed
+#   Line 4 (bottom):  highlight — initiative banner (conditional, bold cyan)
+#
+# @decision DEC-STATUSLINE-004
+# @title Four-line status bar with per-line ANSI-aware truncation
 # @status accepted
-# @rationale Each domain gets its own line and its own truncation boundary.
-# Line 1 (project) is shorter and fits easily at the top — workspace context is
-# the first thing the eye should land on. Line 2 (metrics) is longer and benefits
-# from being below the shorter project line. Line 3 (initiative highlight)
-# renders at the bottom as a visual anchor — bold cyan so it reads as a banner,
-# not inline noise. When no active initiative exists, only lines 1+2 are emitted.
+# @rationale The 3-line layout packed all metrics onto one line, causing aggressive
+# responsive dropping that hid "Project Lifetime" at any COLUMNS <= 125. The 4-line
+# layout gives primary metrics (ctx bar, tokens, cost, lifetime) their own line where
+# they virtually never get dropped, and moves secondary metrics (model, cache, duration,
+# lines) to a separate line with their own independent drop loop. The initiative banner
+# moves from Line 3 to Line 4. Always emit 4 newlines for stable height (same
+# DEC-STATUSLINE-005 reasoning: stable line count prevents terminal resize flicker).
+# See DEC-STATUSLINE-4LINE-001 for full design rationale.
 # ---------------------------------------------------------------------------
 
 # Line 1: project context (workspace + git + agents + todos)
 truncate_ansi "$line1" "$term_w"
 printf '\n'
 
-# Line 2: metrics (model + context bar + tokens + cost + duration + lines + cache)
+# Line 2: primary metrics (context bar + tokens + cost + lifetime)
 truncate_ansi "$line2" "$term_w"
+printf '\n'
 
-# Line 3: initiative highlight bar (always allocated to prevent resize flicker)
+# Line 3: secondary metrics (model + cache% + duration + lines changed)
+truncate_ansi "$line3" "$term_w"
+
+# Line 4: initiative highlight bar (always allocated to prevent resize flicker)
 # @decision DEC-STATUSLINE-005
-# @title Always emit Line 3 newline regardless of initiative presence
+# @title Always emit Line 4 newline regardless of initiative presence
 # @status accepted
-# @rationale Previously the status bar conditionally emitted 2 or 3 lines. During startup,
-# session-init.sh writes the cache after the first statusline render (which had no initiative).
-# When the cache then populated initiative data, the next render emitted an extra line,
-# causing the terminal to resize the status bar and shift all content above — producing
-# the visible "flicker" in the Claude Code startup banner. By always emitting the Line 3
-# newline, the status bar height is stable at 3 lines, regardless of cache state.
+# @rationale Extended from the original 3-line rationale (DEC-STATUSLINE-005): always
+# emitting the final newline keeps the status bar height stable at 4 lines regardless
+# of whether an initiative is active, preventing resize flicker when the cache populates.
 printf '\n'
 if [[ -n "$line0" ]]; then
   truncate_ansi "$line0" "$term_w"

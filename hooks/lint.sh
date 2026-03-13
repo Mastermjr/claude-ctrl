@@ -35,7 +35,7 @@ set -euo pipefail
 _HOOK_NAME="lint"
 source "$(dirname "$0")/source-lib.sh"
 
-HOOK_INPUT=$(read_input)
+init_hook
 FILE_PATH=$(get_field '.tool_input.file_path // empty')
 
 # Exit silently if no file path

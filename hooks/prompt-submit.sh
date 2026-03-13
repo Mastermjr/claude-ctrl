@@ -20,7 +20,7 @@ set -euo pipefail
 _HOOK_NAME="prompt-submit"
 source "$(dirname "$0")/source-lib.sh"
 
-HOOK_INPUT=$(read_input)
+init_hook
 PROMPT=$(get_field '.prompt')
 
 # --- Verification fast path ---
@@ -101,10 +101,16 @@ if [[ -n "$PROMPT" ]] && echo "$PROMPT" | grep -qiE '\bverified\b|\bapproved?\b|
                 log_info "cas_proof_status" "CAS failed under lock: expected=${expected} actual=${locked_current}" 2>/dev/null || true
                 exit 1
             fi
-            # Write directly — we hold the lock that write_proof_status would acquire
+            # --- W2-1: PRIMARY write to SQLite via proof_state_set (DEC-STATE-UNIFY-004) ---
+            # proof_state_set enforces the lattice atomically via BEGIN IMMEDIATE.
+            # Called before flat-file write so SQLite is authoritative.
+            # require_state is called at line 36 (fast-path setup); proof_state_set available.
+            type proof_state_set >/dev/null 2>&1 && proof_state_set "$new_val" "cas_proof_status" 2>/dev/null || true
+            # Write directly to flat file — we hold the lock that write_proof_status would acquire
+            # DUAL-WRITE: flat file (W5-2 remove when all readers migrated to proof_state_get)
             local timestamp; timestamp=$(date +%s)
             printf '%s\n' "${new_val}|${timestamp}" > "${proof_file}.tmp" && mv "${proof_file}.tmp" "$proof_file"
-            # Dual-write to other location (migration period)
+            # Dual-write to other flat-file location (W5-2 remove)
             local phash; phash=$(project_hash "$PROJECT_ROOT")
             local _state_proof="${CLAUDE_DIR}/state/${phash}/proof-status"
             local _old_proof="${CLAUDE_DIR}/.proof-status-${phash}"
@@ -123,8 +129,8 @@ if [[ -n "$PROMPT" ]] && echo "$PROMPT" | grep -qiE '\bverified\b|\bapproved?\b|
                 echo "pre-verified|${timestamp}" > "${trace_store}/.active-guardian-${session}-${phash}" 2>/dev/null || true
             fi
             log_info "cas_proof_status" "CAS succeeded: ${expected} → ${new_val}" 2>/dev/null || true
-            # Dual-write to state.json
-            type state_update &>/dev/null && state_update ".proof.status" "$new_val" "cas_proof_status" || true
+            # W5-1: direct state_update (type guard removed; require_state called at prompt-submit top)
+            state_update ".proof.status" "$new_val" "cas_proof_status" 2>/dev/null || true
             exit 0
         ) 9>"$lockfile"
         _result=$?
@@ -212,6 +218,59 @@ EOFVERIFY
         fi
     fi
     # No proof file or wrong status — fall through to normal flow
+fi
+
+# --- AUTOVERIFY relay detection: orchestrator relaying AUTOVERIFY: CLEAN ---
+# When post-task.sh's loud-failure path fires (DEC-AV-LOUD-FAIL-001), the
+# orchestrator relays the tester's AUTOVERIFY: CLEAN signal in its next prompt.
+# This block detects that relay and promotes proof-status to verified, triggering
+# the Guardian dispatch directive.
+#
+# This is BELOW the user-approval detection so explicit user approval always
+# takes priority over orchestrator relay.
+#
+# @decision DEC-AV-RELAY-001
+# @title Detect orchestrator-relayed AUTOVERIFY: CLEAN and promote proof-status
+# @status accepted
+# @rationale post-task.sh cannot read the tester's response text (API limitation).
+#   When all 4 summary.md detection tiers fail, it emits an advisory with recovery
+#   instructions. The recovery path: orchestrator sees AUTOVERIFY: CLEAN in the
+#   tester's response text, relays it in the next orchestrator prompt. This block
+#   detects that relay pattern and promotes proof-status to verified so Guardian
+#   can proceed. Without this, the deadlock persists even after the orchestrator
+#   explicitly relays evidence of a clean tester run. Positioned AFTER the user
+#   approval block so user approval (typed keywords) always takes priority.
+#   The relay pattern is specific: prompt contains "AUTOVERIFY: CLEAN" AND proof
+#   is needs-verification or pending (not already verified or missing).
+if [[ -n "$PROMPT" ]] && echo "$PROMPT" | grep -q 'AUTOVERIFY: CLEAN'; then
+    _RELAY_PROOF_FILE=$(resolve_proof_file 2>/dev/null || echo "")
+    if [[ -n "$_RELAY_PROOF_FILE" && -f "$_RELAY_PROOF_FILE" ]]; then
+        _RELAY_STATUS=$(cut -d'|' -f1 "$_RELAY_PROOF_FILE" 2>/dev/null || echo "")
+        if [[ "$_RELAY_STATUS" == "needs-verification" || "$_RELAY_STATUS" == "pending" ]]; then
+            _RELAY_PR=$(detect_project_root 2>/dev/null || echo "")
+            _RELAY_CD=$(get_claude_dir 2>/dev/null || echo "")
+            if [[ -n "$_RELAY_PR" && -n "$_RELAY_CD" ]]; then
+                # Use write_proof_status for dual-write (new + legacy paths)
+                write_proof_status "verified" "$_RELAY_PR" 2>/dev/null || true
+                # Pre-create guardian marker to close dispatch race
+                _RELAY_PHASH=$(project_hash "$_RELAY_PR" 2>/dev/null || echo "")
+                _RELAY_SESSION="${CLAUDE_SESSION_ID:-$$}"
+                _RELAY_TS=$(date +%s)
+                echo "pre-verified|${_RELAY_TS}" > "${TRACE_STORE:-$HOME/.claude/traces}/.active-guardian-${_RELAY_SESSION}-${_RELAY_PHASH}" 2>/dev/null || true
+                # Clean up .autoverify-failed signal (no longer needed — proof promoted)
+                rm -f "${_RELAY_CD}/.autoverify-failed" 2>/dev/null || true
+                cat <<EOFAV
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "AUTOVERIFY RELAY DETECTED: Orchestrator relayed AUTOVERIFY: CLEAN signal from tester. proof-status promoted to verified. DISPATCH GUARDIAN NOW with AUTO-VERIFY-APPROVED in the prompt — the tester has already reported a clean run. Guardian MUST skip its Interactive Approval Protocol and execute the merge cycle directly."
+  }
+}
+EOFAV
+                exit 0
+            fi
+        fi
+    fi
 fi
 
 # Handle empty prompt (Enter-only submit).

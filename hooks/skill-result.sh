@@ -36,7 +36,7 @@ source "$(dirname "$0")/source-lib.sh"
 
 require_session
 
-HOOK_INPUT=$(read_input)
+init_hook
 TOOL_NAME=$(get_field '.tool_name')
 [[ "$TOOL_NAME" != "Skill" ]] && exit 0
 

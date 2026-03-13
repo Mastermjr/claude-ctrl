@@ -56,11 +56,54 @@ fi
 # Cache stdin so multiple functions can read it
 HOOK_INPUT=""
 
+# @decision DEC-SESSION-ID-001
+# @title Extract session_id from Claude Code hook stdin JSON
+# @status accepted
+# @rationale Claude Code provides session_id in the stdin JSON to all hooks, but the
+#   hooks system was referencing CLAUDE_SESSION_ID as an env var that doesn't exist.
+#   Every fallback defaulted to $$ (PID, varies per hook) or "unknown". Extracting
+#   session_id in read_input() — the shared stdin capture function called by all hooks —
+#   ensures CLAUDE_SESSION_ID is available to every downstream function. Only sets it
+#   if not already set (preserves any future native env var support).
 read_input() {
     if [[ -z "$HOOK_INPUT" ]]; then
         HOOK_INPUT=$(cat)
+        # Extract session_id from Claude Code's hook input JSON
+        # Claude Code provides session_id in stdin to ALL hooks
+        if [[ -z "${CLAUDE_SESSION_ID:-}" ]]; then
+            CLAUDE_SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+            export CLAUDE_SESSION_ID
+        fi
     fi
     echo "$HOOK_INPUT"
+}
+
+# @decision DEC-INIT-HOOK-001
+# @title init_hook() — replace HOOK_INPUT=$(read_input) in all hooks
+# @status accepted
+# @rationale HOOK_INPUT=$(read_input) spawns a bash command-substitution subshell.
+#   The `export CLAUDE_SESSION_ID` inside read_input() runs in that subshell and
+#   NEVER propagates back to the parent shell. Every hook using
+#   ${CLAUDE_SESSION_ID:-$$} falls back to $$ (PID per process), creating a
+#   different cache file name per hook process.  This broke:
+#     - statusline cache lifetime_tokens (DEC-LIFETIME-PERSIST-001 reads wrong file)
+#     - auto-verify flow (post-task.sh session fallback requires CLAUDE_SESSION_ID)
+#     - subagent tracker scoping (.subagent-tracker-$$)
+#     - orchestrator SID detection
+#   init_hook() reads stdin directly into HOOK_INPUT as a global variable (no
+#   command substitution, no subshell) and then extracts CLAUDE_SESSION_ID in
+#   the same parent shell. All hooks call `init_hook` (bare, no assignment) at
+#   the top — HOOK_INPUT and CLAUDE_SESSION_ID are then available as globals.
+#   read_input() is kept for backwards compatibility with any direct callers
+#   (tests that exercise it directly).
+init_hook() {
+    if [[ -z "$HOOK_INPUT" ]]; then
+        HOOK_INPUT=$(cat)
+        if [[ -z "${CLAUDE_SESSION_ID:-}" && -n "$HOOK_INPUT" ]]; then
+            CLAUDE_SESSION_ID=$(printf '%s' "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+            export CLAUDE_SESSION_ID
+        fi
+    fi
 }
 
 get_field() {
@@ -78,6 +121,30 @@ log_info() {
     local stage="$1"
     local message="$2"
     echo "[$stage] $message" >&2
+}
+
+# @decision DEC-WORKTREE-RESOLVE-001
+# @title Resolve worktree git root to main repo root
+# @status accepted
+# @rationale When CWD is inside a git worktree, git rev-parse --show-toplevel
+#   returns the worktree path, not the main repo root. This causes project_hash()
+#   to compute a different hash, breaking lifetime token sums, cache file paths,
+#   and proof-status lookups. Fix: use git-common-dir (always points to main .git)
+#   to derive the main working tree root. If the common dir lives inside the
+#   resolved root (same repo), strip the /.git suffix to get the main root.
+#   Returns input unchanged when git fails or when input is already the main root.
+_resolve_to_main_worktree() {
+    local _root="${1:?}"
+    local _common_dir
+    _common_dir=$(git -C "$_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "")
+    if [[ -n "$_common_dir" ]]; then
+        local _main_root="${_common_dir%/.git}"
+        if [[ -d "$_main_root" && "$_main_root" != "$_root" ]]; then
+            echo "$_main_root"
+            return
+        fi
+    fi
+    echo "$_root"
 }
 
 detect_project_root() {
@@ -104,6 +171,7 @@ detect_project_root() {
             local _hook_root
             _hook_root=$(git -C "$_hook_cwd" rev-parse --show-toplevel 2>/dev/null || echo "")
             if [[ -n "$_hook_root" && -d "$_hook_root" ]]; then
+                _hook_root=$(_resolve_to_main_worktree "$_hook_root")
                 export CLAUDE_PROJECT_DIR="$_hook_root"
                 echo "$_hook_root"
                 return
@@ -119,6 +187,7 @@ detect_project_root() {
         local root
         root=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
         if [[ -n "$root" && -d "$root" ]]; then
+            root=$(_resolve_to_main_worktree "$root")
             echo "$root"
             return
         fi
@@ -278,12 +347,12 @@ resolve_proof_file_for_path() {
 #
 # Usage: write_proof_status <status> [project_root]
 #
-# Writes "status|timestamp" to:
-#   1. Canonical: CLAUDE_DIR/.proof-status-{phash}  (only path — project-isolated)
+# Since W2-1: PRIMARY write goes to SQLite proof_state table via proof_state_set().
+# DUAL-WRITE (W5-2 remove): also writes flat file for backward compatibility.
+# Flat-file writes are kept for hooks not yet migrated to proof_state_get().
 #
-# Enforces a monotonic status lattice: none → needs-verification → pending → verified → committed.
-# Rejects regressions (e.g., verified → pending) unless .proof-epoch exists and is newer
-# than the current .proof-status (epoch reset). Write is serialized under flock.
+# Enforces a monotonic status lattice via proof_state_set() (SQLite enforces lattice
+# with epoch reset support). The bash-side lattice check is kept as defense-in-depth.
 #
 # @decision DEC-LOG-002
 # @title write_proof_status: atomic single-path proof status writer
@@ -294,6 +363,7 @@ resolve_proof_file_for_path() {
 #   file prevents partial reads under concurrent hook execution.
 #   Previously wrote to 3 paths (scoped, legacy, worktree) — simplified by
 #   DEC-PROOF-SINGLE-001 and DEC-PROOF-BREADCRUMB-001.
+#   Since W2-1: proof_state_set() is the PRIMARY write path; flat files are dual-write.
 #
 # @decision DEC-PROOF-LOCK-001
 # @title Single flock around the canonical write in write_proof_status()
@@ -320,6 +390,20 @@ resolve_proof_file_for_path() {
 #   the current .proof-status, the lattice is bypassed and any status is accepted.
 #   This allows deliberate resets (e.g., starting a new verification cycle) while
 #   preventing accidental regressions from race conditions.
+#   Since W2-1: lattice is enforced in proof_state_set() (SQLite); bash-side kept
+#   as defense-in-depth for the flat-file dual-write path.
+#
+# @decision DEC-STATE-UNIFY-004
+# @title Dual-write: proof_state_set (SQLite PRIMARY) + flat file (W5-2 remove)
+# @status accepted
+# @rationale During the transition period (W2-1 through W5-1), both the SQLite
+#   proof_state table and the flat proof-status files are written on every status
+#   change. This ensures backward compatibility: hooks not yet migrated to
+#   proof_state_get() continue to read flat files without interruption. The flat-file
+#   write in write_proof_status() is marked "W5-2 remove" — it will be deleted when
+#   all readers have been migrated to proof_state_get(). The SQLite write is first
+#   (primary) because it enforces the lattice atomically with BEGIN IMMEDIATE.
+#   See MASTER_PLAN.md DEC-STATE-UNIFY-004.
 write_proof_status() {
     local proof_status="${1:?write_proof_status requires a status argument}"
     local project_root="${2:-${PROJECT_ROOT:-$(detect_project_root)}}"
@@ -333,6 +417,16 @@ write_proof_status() {
     local lockfile="${locks_dir}/proof.lock"
 
     mkdir -p "$claude_dir" 2>/dev/null || return 1
+
+    # --- PRIMARY: Write to SQLite via proof_state_set() ---
+    # proof_state_set() enforces the monotonic lattice atomically via BEGIN IMMEDIATE.
+    # Requires state-lib.sh to be loaded (via require_state in the calling hook).
+    # If proof_state_set is not available (state-lib not loaded), falls through to
+    # flat-file only (backward compatible). DEC-STATE-UNIFY-004.
+    if declare -f proof_state_set >/dev/null 2>&1; then
+        PROJECT_ROOT="$project_root" CLAUDE_DIR="$claude_dir" \
+            proof_state_set "$proof_status" "write_proof_status" 2>/dev/null || true
+    fi
 
     local _result=0
     (
@@ -409,11 +503,12 @@ write_proof_status() {
             log_info "write_proof_status" "epoch reset allowed: ${current} → ${proof_status}" 2>/dev/null || true
         fi
 
-        # --- Write to BOTH paths (dual-write migration) ---
+        # --- DUAL-WRITE: flat files (W5-2 remove when all readers use proof_state_get) ---
+        # These writes maintain backward compatibility during the W2→W5 migration window.
         # Primary: state/{phash}/proof-status
         mkdir -p "$state_dir_path"
         printf '%s\n' "$content" > "${new_proof}.tmp" && mv "${new_proof}.tmp" "$new_proof"
-        # Secondary: legacy .proof-status-{phash} (removed after migration completes)
+        # Secondary: legacy .proof-status-{phash} (W5-2 remove)
         printf '%s\n' "$content" > "${old_proof}.tmp" && mv "${old_proof}.tmp" "$old_proof"
 
         # Pre-create guardian marker to close proof-invalidation window.
@@ -430,12 +525,14 @@ write_proof_status() {
 
         log_info "write_proof_status" "Wrote '${proof_status}' to canonical proof-status for project $(basename "$project_root") [${phash}]"
 
-        # Dual-write to state.json (audit/coordination layer)
-        type state_update &>/dev/null && state_update ".proof.status" "$proof_status" "write_proof_status" || true
+        # W5-1: direct state_update (type guard removed; state-lib loaded by callers via require_state)
+        state_update ".proof.status" "$proof_status" "write_proof_status" >/dev/null 2>/dev/null || true
+        # W5-1: emit proof transition event to ledger (best-effort; stdout suppressed — state_emit outputs row ID)
+        state_emit "proof.transition" "{\"to\":\"${proof_status}\",\"project\":\"${phash}\"}" >/dev/null 2>/dev/null || true
     ) 9>"$lockfile"
     _result=$?
     return $_result
 }
 
 # Export for subshells
-export -f log_json log_info read_input get_field detect_project_root get_claude_dir project_hash resolve_proof_file resolve_proof_file_for_path write_proof_status
+export -f log_json log_info read_input get_field _resolve_to_main_worktree detect_project_root get_claude_dir project_hash resolve_proof_file resolve_proof_file_for_path write_proof_status

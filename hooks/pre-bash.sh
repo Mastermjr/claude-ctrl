@@ -90,6 +90,8 @@ if [[ "${HOOK_GATE_SCAN:-}" == "1" ]]; then
     declare_gate "proof-status-write" "Block agents writing verified to .proof-status" "deny"
     declare_gate "proof-status-delete" "Block deletion of .proof-status when active" "deny"
     declare_gate "worktree-rf-cwd" "rm -rf .worktrees/ CWD safety deny" "deny"
+    declare_gate "sqlite3-state-db" "Block direct sqlite3 access to state.db" "deny"
+    declare_gate "db-safety-check" "Database safety check (destructive command + environment tier)" "deny"
     declare_gate "git-early-exit" "Skip git-specific checks for non-git commands" "side-effect"
     declare_gate "main-sacred-commit" "No commits on main/master" "deny"
     declare_gate "force-push-safety" "Force push handling" "deny"
@@ -105,7 +107,7 @@ if [[ "${HOOK_GATE_SCAN:-}" == "1" ]]; then
     exit 0
 fi
 
-HOOK_INPUT=$(read_input)
+init_hook
 COMMAND=$(get_field '.tool_input.command')
 # CWD from the hook input JSON — used by CWD-safety checks
 CWD=$(get_field '.cwd')
@@ -210,14 +212,16 @@ if echo "$COMMAND" | grep -qiE '\b(DROP\s+(DATABASE|TABLE|SCHEMA)|TRUNCATE\s+TAB
 fi
 
 # --- Check 0.75: Prevent ALL cd/pushd into worktree directories ---
-# @decision DEC-GUARD-CWD-003 (carried forward from guard.sh)
-# @title Deny ALL cd/pushd into .worktrees/ — both bare and chained
+# @decision DEC-GUARD-CWD-004
+# @title Allow subshell-wrapped cd into .worktrees/ regardless of internal spacing
 # @status accepted
-# @rationale posix_spawn ENOENT if worktree is deleted while CWD is inside it.
-#   Prevention is the only reliable fix — updatedInput is not supported in PreToolUse.
+# @rationale The previous check required "( " (paren + space) but agents consistently
+#   write "(cd ..." without the space. Subshell wrapping ensures CWD reverts on exit,
+#   making the cd architecturally safe. Benchmark data shows 5-13 tool_errors per trial
+#   from this false denial, wasting 50-100K tokens per trial on retry loops.
 declare_gate "worktree-cd-guard" "Deny ALL cd/pushd into .worktrees/" "deny"
-if [[ "$COMMAND" == "( "* ]]; then
-    : # Already subshell-wrapped, pass through
+if [[ "$COMMAND" == "("* ]]; then
+    : # Already subshell-wrapped: CWD reverts when subshell exits, safe
 elif echo "$_stripped_cmd" | grep -qE '\b(cd|pushd)\b[^;&|]*\.worktrees/[^/[:space:];&|]+([[:space:]]|$|&&|;|\|\|)'; then
     log_info "GUARD-CWD" "Check 0.75: Denying ALL cd/pushd into .worktrees/"
     emit_deny "CWD protection: cd/pushd into .worktrees/ denied — persistent CWD in a deletable directory causes posix_spawn ENOENT if the worktree is later removed, bricking ALL hooks. Use per-command subshell: ( cd .worktrees/<name> && <cmd> ) or git -C .worktrees/<name> for git commands."
@@ -259,7 +263,40 @@ elif [[ -z "$_redir_target" ]] && echo "$_stripped_cmd" | grep -qE '(>|>>|tee)\s
     _c9_protected=true
 fi
 if [[ "$_c9_protected" == "true" ]] && echo "$COMMAND" | grep -qiE 'verified|approved?|lgtm|looks.good|ship.it'; then
-    emit_deny "Cannot write approval status to .proof-status directly. Only the user can verify proof-of-work (via prompt-submit.sh). Present the verification report and let the user respond naturally."
+    # --- Emergency override: allow when post-task.sh autoverify chain failed ---
+    # When all 4 summary.md detection tiers fail in post-task.sh (DEC-AV-LOUD-FAIL-001),
+    # the orchestrator needs a way to manually write proof-status=verified without being
+    # blocked here. The .autoverify-failed signal file (written by post-task.sh) enables
+    # a time-limited, session-scoped override of Check 9.
+    #
+    # @decision DEC-AV-OVERRIDE-001
+    # @title Emergency override for proof-status write when autoverify chain failed
+    # @status accepted
+    # @rationale post-task.sh's Component 1 (DEC-AV-LOUD-FAIL-001) writes .autoverify-failed
+    #   when all 4 summary.md tiers fail. Without this override, the deadlock is complete:
+    #   proof stays needs-verification, Guardian is blocked at Gate A, and Check 9 here
+    #   blocks any direct write. The override is strictly time-limited (300s) and session-
+    #   scoped (CLAUDE_SESSION_ID must match) to prevent stale signals from enabling bypass
+    #   in future unrelated sessions. After granting the override, the signal file is
+    #   cleaned up so it cannot be reused. This is a last-resort escape hatch — the primary
+    #   recovery paths are Components 2-4 (breadcrumbs) and Component 3 (relay detection).
+    _AF_FILE="$(get_claude_dir)/.autoverify-failed"
+    _C9_OVERRIDE=false
+    if [[ -f "$_AF_FILE" ]]; then
+        _af_ts=$(cut -d'|' -f2 "$_AF_FILE" 2>/dev/null || echo 0)
+        _af_session=$(cut -d'|' -f3 "$_AF_FILE" 2>/dev/null || echo "")
+        _af_age=$(( $(date +%s) - ${_af_ts:-0} ))
+        if [[ "$_af_age" -lt 300 && "$_af_session" == "${CLAUDE_SESSION_ID:-$$}" ]]; then
+            log_info "PRE-BASH" "emergency override: autoverify-failed signal active (age=${_af_age}s) — allowing proof-status write"
+            rm -f "$_AF_FILE" 2>/dev/null || true
+            _C9_OVERRIDE=true
+        else
+            log_info "PRE-BASH" "autoverify-failed signal invalid: age=${_af_age}s session=${_af_session} (expected ${CLAUDE_SESSION_ID:-$$}) — not granting override"
+        fi
+    fi
+    if [[ "$_C9_OVERRIDE" != "true" ]]; then
+        emit_deny "Cannot write approval status to .proof-status directly. Only the user can verify proof-of-work (via prompt-submit.sh). Present the verification report and let the user respond naturally."
+    fi
 fi
 
 # --- Check 10: Block deletion of .proof-status when verification active ---
@@ -272,11 +309,23 @@ elif [[ -z "$_rm_target" ]] && echo "$_stripped_cmd" | grep -qE 'rm\s+(-[a-zA-Z]
     _c10_matches=true
 fi
 if [[ "$_c10_matches" == "true" ]]; then
+    # --- W2-1: Read proof status via proof_state_get() (DEC-STATE-UNIFY-004) ---
+    # _ps_phash is always computed for use in the active-agent marker check below.
     _ps_phash=$(project_hash "$(detect_project_root)")
-    _ps_dir=$(get_claude_dir)
-    _ps_file="${_ps_dir}/.proof-status-${_ps_phash}"
-    if [[ -f "$_ps_file" ]]; then
-        _ps_val=$(cut -d'|' -f1 "$_ps_file")
+    _ps_val=""
+    if declare -f proof_state_get >/dev/null 2>&1; then
+        _c10_pg=$(proof_state_get 2>/dev/null || echo "")
+        [[ -n "$_c10_pg" ]] && _ps_val=$(echo "$_c10_pg" | cut -d'|' -f1)
+    fi
+    # Flat-file fallback when proof_state_get not available or returned empty
+    if [[ -z "$_ps_val" ]]; then
+        _ps_dir=$(get_claude_dir)
+        _ps_file="${_ps_dir}/.proof-status-${_ps_phash}"
+        if [[ -f "$_ps_file" ]]; then
+            _ps_val=$(cut -d'|' -f1 "$_ps_file")
+        fi
+    fi
+    if [[ -n "$_ps_val" ]]; then
         if [[ "$_ps_val" == "pending" || "$_ps_val" == "needs-verification" ]]; then
             # @decision DEC-PROOF-DELETE-SOFTEN-001
             # @title Allow .proof-status deletion when no current-session agents active
@@ -297,8 +346,8 @@ if [[ "$_c10_matches" == "true" ]]; then
                 emit_deny "Cannot delete .proof-status while verification is active (status: $_ps_val). Complete the verification flow first."
             fi
         fi
-    fi
-fi
+    fi  # end: if -n _ps_val
+fi  # end: if _c10_matches
 
 # --- Check 5b: rm -rf .worktrees/ CWD safety deny ---
 # @decision DEC-GUARD-002 (carried forward from guard.sh)
@@ -316,12 +365,282 @@ if echo "$_stripped_cmd" | grep -qE 'rm\s+(-[a-zA-Z]*[rf][a-zA-Z]*\s+){1,2}.*\.w
     fi
 fi
 
+# --- Check DB-SAFE-A1: Block direct sqlite3 access to state.db ---
+# @decision DEC-DBSAFE-003
+# @title Block sqlite3 direct access to state.db via pre-bash.sh
+# @status accepted
+# @rationale Direct sqlite3 access to state.db bypasses all state management
+#   invariants (WAL checkpointing, schema migration guards, concurrent access
+#   safety, workflow isolation). The state_read()/state_update() API in
+#   state-lib.sh provides safe access. state-diag.sh provides sanctioned
+#   read-only diagnostic access. This gate fires before the git-early-exit so
+#   it catches sqlite3 commands that do not touch git at all.
+#   Pattern matches both "sqlite3 state/state.db" and "sqlite3 state.db"
+#   (bare filename) while leaving other database files unblocked.
+declare_gate "sqlite3-state-db" "Block direct sqlite3 access to state.db" "deny"
+if echo "$_stripped_cmd" | grep -qE '\bsqlite3\b'; then
+    # Extract the database path argument (first non-option arg after sqlite3)
+    _sqlite3_target=$(echo "$_stripped_cmd" | \
+        grep -oE '\bsqlite3\b[[:space:]]+(-[^[:space:]]+[[:space:]]+)*[[:space:]]*[^[:space:]-][^[:space:]]*' | \
+        grep -oE '[^[:space:]]+$' || true)
+    if echo "$_sqlite3_target" | grep -qE '(state/state\.db|state\.db)$'; then
+        emit_deny "Direct sqlite3 access to state.db is blocked. Use state_read()/state_update() API in hooks, or state-diag.sh for diagnostics."
+    fi
+fi
+
+# --- Multi-Vector Database Safety Checks (B5/B6/B7/B8) ---
+# @modality database
+#
+# @decision DEC-DBSAFE-W2B-006
+# @title Multi-vector checks fire BEFORE the DB CLI section, catching non-CLI infrastructure threats
+# @status accepted
+# @rationale Migration frameworks, IaC tools, container orchestration, and ORM patterns
+#   can destroy database infrastructure without invoking a database CLI (psql, mysql, etc.).
+#   These checks must fire BEFORE the existing DB CLI section (DEC-DBSAFE-001) so that
+#   commands like "terraform destroy" or "docker-compose down -v" are caught even when
+#   no DB CLI binary appears in the command string. The quick pattern-match gate uses
+#   grep -qiE with a union pattern — if no multi-vector keyword is present, the entire
+#   section exits with zero overhead (same pattern as the DB CLI section below).
+#   Each detector (B5-B8) returns "allow", "deny:<reason>", or "advisory:<reason>".
+#   Migration commands (B5) are always allowed; the advisory function is called separately
+#   to emit production/special-case warnings without blocking.
+#
+# Checks:
+#   B5: _db_detect_migration — migration framework allowlist (12 frameworks)
+#   B6: _db_detect_iac       — IaC destructive command interception
+#   B7: _db_detect_container — container/volume destruction interception
+#   B8: _db_detect_orm       — ORM destructive pattern detection
+
+# Quick pattern match — skip entire section for commands with no multi-vector keywords
+if echo "$_stripped_cmd" | grep -qiE '(terraform|pulumi|cloudformation|docker-compose|docker[[:space:]]+compose|docker[[:space:]]+volume|kubectl[[:space:]]+delete[[:space:]]+(pvc|pv)|rails[[:space:]]+db:|rake[[:space:]]+db:|manage\.py[[:space:]]+(migrate|makemigrations)|alembic[[:space:]]+(upgrade|downgrade|revision)|prisma[[:space:]]+(migrate|db)|flyway[[:space:]]+(migrate|repair|clean)|liquibase[[:space:]]+(update|rollback)|sequelize-cli|npx[[:space:]]+knex[[:space:]]+migrate|typeorm[[:space:]]+migration|goose[[:space:]]+(up|down)|migrate[[:space:]]+-path|drizzle-kit[[:space:]]+(push|generate|migrate)|drop_all[[:space:]]*\(|force[[:space:]]*:[[:space:]]*true)'; then
+    require_db_safety
+
+    # B5: Migration framework detection
+    _MV_FRAMEWORK=$(_db_detect_migration "$COMMAND")
+    if [[ "$_MV_FRAMEWORK" != "none" ]]; then
+        # Migration frameworks are always allowed. Emit advisories for dangerous variants.
+        _MV_ADVISORY=$(_db_detect_migration_advisory "$COMMAND")
+        if [[ -n "$_MV_ADVISORY" ]]; then
+            emit_advisory "DB-SAFETY MIGRATION ADVISORY (${_MV_FRAMEWORK}): ${_MV_ADVISORY}"
+        fi
+        # Migration detected and handled — skip IaC/container/ORM checks for this command
+    else
+        # B6: IaC destructive command detection
+        _MV_IAC=$(_db_detect_iac "$COMMAND")
+        _MV_IAC_LEVEL="${_MV_IAC%%:*}"
+        _MV_IAC_REASON="${_MV_IAC#*:}"
+        if [[ "$_MV_IAC_LEVEL" == "deny" ]]; then
+            emit_deny "$(_db_format_deny "$_MV_IAC_REASON" "Run terraform plan / pulumi preview first to review changes, then execute interactively with confirmation prompts.")"
+        fi
+
+        # B7: Container/volume destruction detection
+        _MV_CONTAINER=$(_db_detect_container "$COMMAND")
+        _MV_CONTAINER_LEVEL="${_MV_CONTAINER%%:*}"
+        _MV_CONTAINER_REASON="${_MV_CONTAINER#*:}"
+        if [[ "$_MV_CONTAINER_LEVEL" == "deny" ]]; then
+            emit_deny "$(_db_format_deny "$_MV_CONTAINER_REASON" "Back up volume data before deletion. Use 'docker volume inspect' to identify which databases are stored in the volume.")"
+        fi
+
+        # B8: ORM destructive pattern detection
+        _MV_ORM=$(_db_detect_orm "$COMMAND")
+        _MV_ORM_LEVEL="${_MV_ORM%%:*}"
+        _MV_ORM_REASON="${_MV_ORM#*:}"
+        if [[ "$_MV_ORM_LEVEL" == "advisory" ]]; then
+            emit_advisory "DB-SAFETY ORM ADVISORY: ${_MV_ORM_REASON}"
+        fi
+    fi
+fi
+
+# --- Database Safety Checks ---
+# @modality database
+# @decision DEC-DBSAFE-001
+# @title Modular database check architecture with zero-overhead early exit
+# @status accepted
+# @rationale See hooks/db-safety-lib.sh for full rationale. This dispatch point
+#   provides the entry gate: _db_detect_cli() returns "none" for non-DB commands,
+#   and the entire section is skipped with a single string comparison. When a DB
+#   CLI is detected, require_db_safety() loads the library once (idempotent), then
+#   the environment and risk are classified. The response is tiered by environment
+#   severity (DEC-DBSAFE-002): production=deny all high-risk, staging=deny destructive,
+#   dev/local=advisory only. This section is placed before the git-early-exit gate
+#   so that database commands are checked even when they contain no git invocation.
+#
+# Wave 2a additions (DEC-DBSAFE-004 through DEC-DBSAFE-007):
+#   - Per-CLI dispatch: psql→_db_check_psql, mysql→_db_check_mysql, etc.
+#     (each adds CLI-specific RCE/code-execution patterns on top of common patterns)
+#   - B3 TTY fail-safe: non-interactive + deny → hard deny regardless of env tier
+#     (agents pipe commands; _db_check_tty() catches agent-driven destructive ops)
+#   - B4 Safety flags: psql requires ON_ERROR_STOP=1, mysql requires --safe-updates
+#     (deny-with-correction pattern; applied after environment tiering for passthrough commands)
+#
+# @decision DEC-DBSAFE-002
+# @title Environment-tiered response: production=deny all, staging=deny destructive,
+#        dev/local=advisory only
+# @status accepted
+# @rationale See hooks/db-safety-lib.sh for full rationale.
+declare_gate "db-safety-check" "Database safety check (destructive command + environment tier)" "deny"
+
+# Quick exit if no database CLI detected (zero overhead for non-DB commands).
+# Uses an inline pattern match here — the full _db_detect_cli() is only loaded
+# after this gate confirms a database CLI is present. This avoids sourcing
+# db-safety-lib.sh for the common case (non-database commands).
+# Pattern matches: psql, mysql, sqlite3, mongosh, redis-cli, cockroach
+if echo "$_stripped_cmd" | grep -qE '(^|[[:space:]]|&&|\|\|?|;|\()(psql|mysql|sqlite3|mongosh|redis-cli|cockroach)([[:space:]]|$|;|&&|\|)'; then
+    require_db_safety
+
+    _DB_CLI=$(_db_detect_cli "$COMMAND")
+    if [[ "$_DB_CLI" != "none" ]]; then
+        _DB_ENV=$(_db_detect_environment)
+
+        # Wave 5 B11: count every DB CLI detection
+        _db_increment_stat "checked"
+
+        # Wave 2a: dispatch to per-CLI handler instead of generic _db_classify_risk.
+        # Each handler calls _db_classify_risk first (common patterns), then adds
+        # CLI-specific RCE/code-execution checks (DEC-DBSAFE-004).
+        case "$_DB_CLI" in
+            psql)      _DB_RISK_RESULT=$(_db_check_psql "$COMMAND" "$_DB_ENV") ;;
+            mysql)     _DB_RISK_RESULT=$(_db_check_mysql "$COMMAND" "$_DB_ENV") ;;
+            sqlite3)   _DB_RISK_RESULT=$(_db_check_sqlite3 "$COMMAND" "$_DB_ENV") ;;
+            redis-cli) _DB_RISK_RESULT=$(_db_check_redis "$COMMAND" "$_DB_ENV") ;;
+            mongosh)   _DB_RISK_RESULT=$(_db_check_mongo "$COMMAND" "$_DB_ENV") ;;
+            *)         _DB_RISK_RESULT=$(_db_classify_risk "$COMMAND" "$_DB_CLI") ;;
+        esac
+        _DB_RISK_LEVEL="${_DB_RISK_RESULT%%:*}"
+        _DB_RISK_REASON="${_DB_RISK_RESULT#*:}"
+
+        # Wave 5 B12: MySQL DDL autocommit advisory — emitted alongside normal classification.
+        # MySQL silently commits DDL (ALTER/DROP/CREATE TABLE) even inside explicit transactions.
+        # This advisory fires when any MySQL DDL is detected, regardless of risk level.
+        if [[ "$_DB_CLI" == "mysql" ]]; then
+            _DB_MYSQL_DDL_ADV=$(_db_mysql_ddl_advisory "$COMMAND")
+            if [[ -n "$_DB_MYSQL_DDL_ADV" ]]; then
+                emit_advisory "DB-SAFETY MYSQL DDL — ${_DB_MYSQL_DDL_ADV}"
+                _db_increment_stat "warned"
+            fi
+        fi
+
+        # Wave 2a B3: TTY fail-safe — non-interactive + deny → hard deny regardless of env tier.
+        # AI agents pipe commands non-interactively, bypassing human confirmation prompts.
+        # This catch fires BEFORE environment tiering (DEC-DBSAFE-006).
+        #
+        # @decision DEC-DBGUARD-004
+        # @title DB-GUARDIAN-REQUIRED signal appended to all DB safety denies
+        # @status accepted
+        # @rationale Wave 3a introduces the Database Guardian agent as the privileged path
+        #   for executing blocked database operations. When pre-bash.sh denies a command,
+        #   the orchestrator needs a machine-readable trigger to know it should dispatch the
+        #   Guardian rather than just showing a plain error. The signal is appended to the
+        #   human-readable deny message as a structured JSON block. This is backward-compatible
+        #   (existing code ignores the appended text; only the orchestrator's signal parser
+        #   acts on it). require_db_guardian() is called lazily here — only when an actual
+        #   deny is about to fire, so non-destructive DB commands pay zero cost.
+        _DB_TTY_DENY=$(_db_check_tty "$_DB_RISK_LEVEL" "$_DB_RISK_RESULT")
+        if [[ -n "$_DB_TTY_DENY" ]]; then
+            require_db_guardian
+            _DBG_SIGNAL=$(_dbg_emit_guardian_required \
+                "$(_db_op_type_from_cli "$_DB_CLI" "$COMMAND")" \
+                "$COMMAND" \
+                "${_DB_TTY_DENY#deny:}" \
+                "$_DB_ENV")
+            _db_increment_stat "blocked"
+            emit_deny "$(_db_format_deny "${_DB_TTY_DENY#deny:}" "Route through Database Guardian for human approval, or run interactively at a terminal.")${_DBG_SIGNAL}"
+        fi
+
+        # Environment-tiered response matrix (DEC-DBSAFE-002):
+        #   production/unknown + deny     → hard deny
+        #   production/unknown + advisory → hard deny (explain risk)
+        #   staging + deny                → hard deny
+        #   staging + advisory            → log warning, allow
+        #   development/local + deny      → log warning, allow (advisory mode)
+        #   development/local + advisory  → allow silently
+        case "$_DB_ENV" in
+            production|unknown)
+                if [[ "$_DB_RISK_LEVEL" == "deny" ]]; then
+                    require_db_guardian
+                    _DBG_SIGNAL=$(_dbg_emit_guardian_required \
+                        "$(_db_op_type_from_cli "$_DB_CLI" "$COMMAND")" \
+                        "$COMMAND" \
+                        "$_DB_RISK_REASON" \
+                        "$_DB_ENV")
+                    _db_increment_stat "blocked"
+                    emit_deny "$(_db_format_deny "$_DB_RISK_REASON" "Connect to a development database to run destructive operations. If this is intentional, route through Database Guardian for human approval.")${_DBG_SIGNAL}"
+                elif [[ "$_DB_RISK_LEVEL" == "advisory" ]]; then
+                    require_db_guardian
+                    _DBG_SIGNAL=$(_dbg_emit_guardian_required \
+                        "$(_db_op_type_from_cli "$_DB_CLI" "$COMMAND")" \
+                        "$COMMAND" \
+                        "$_DB_RISK_REASON (environment: $_DB_ENV — treating as production)" \
+                        "$_DB_ENV")
+                    _db_increment_stat "blocked"
+                    emit_deny "$(_db_format_deny "$_DB_RISK_REASON (environment: $_DB_ENV — treating as production)" "Verify the target environment. Run with an explicit WHERE clause or on a development database.")${_DBG_SIGNAL}"
+                fi
+                ;;
+            staging)
+                if [[ "$_DB_RISK_LEVEL" == "deny" ]]; then
+                    require_db_guardian
+                    _DBG_SIGNAL=$(_dbg_emit_guardian_required \
+                        "$(_db_op_type_from_cli "$_DB_CLI" "$COMMAND")" \
+                        "$COMMAND" \
+                        "$_DB_RISK_REASON" \
+                        "$_DB_ENV")
+                    _db_increment_stat "blocked"
+                    emit_deny "$(_db_format_deny "$_DB_RISK_REASON" "Connect to a development database to run destructive operations.")${_DBG_SIGNAL}"
+                elif [[ "$_DB_RISK_LEVEL" == "advisory" ]]; then
+                    log_warn "DB-SAFETY" "$(_db_format_advisory "$_DB_RISK_REASON (environment: staging)")"
+                    _db_increment_stat "warned"
+                    # Allow — staging advisory is a warning only
+                fi
+                ;;
+            development|local)
+                if [[ "$_DB_RISK_LEVEL" == "deny" ]]; then
+                    log_warn "DB-SAFETY" "$(_db_format_advisory "$_DB_RISK_REASON (environment: $_DB_ENV — allowing with warning)")"
+                    _db_increment_stat "warned"
+                    # Allow — destructive ops on dev/local are the developer's prerogative
+                fi
+                # advisory + dev/local = allow silently
+                ;;
+        esac
+
+        # Wave 2a B4: forced safety flags — applied for commands that passed environment tiering.
+        # Only fires for dev/local environments (production/staging are already denied above for
+        # risky commands; safe commands pass through and should still get flags enforced).
+        # For production/unknown commands that are safe-classified, also enforce flags.
+        # The deny-with-correction pattern routes the agent to add the required flags (DEC-DBSAFE-007).
+        if [[ "$_DB_RISK_LEVEL" == "safe" ]]; then
+            _DB_FLAG_DENY=$(_db_inject_safety_flags "$COMMAND")
+            if [[ -n "$_DB_FLAG_DENY" ]]; then
+                _db_increment_stat "blocked"
+                emit_deny "${_DB_FLAG_DENY#deny:}"
+            fi
+        fi
+
+        # Wave 5 B9: Schema change advisory for non-local environments.
+        # Schema changes (ALTER TABLE, CREATE/DROP INDEX, CREATE TABLE, RENAME TABLE)
+        # are not destructive enough to deny, but in production/staging they warrant
+        # visibility. Applied AFTER environment tiering so only non-denied commands reach here.
+        # (Denied commands already exited via emit_deny above.)
+        _DB_SCHEMA_RESULT=$(_db_detect_schema_change "$COMMAND")
+        if [[ "$_DB_SCHEMA_RESULT" != "none" ]]; then
+            _DB_SCHEMA_TYPE="${_DB_SCHEMA_RESULT#schema:}"
+            case "$_DB_ENV" in
+                production|unknown|staging)
+                    emit_advisory "DB-SAFETY SCHEMA ADVISORY — Schema change detected: ${_DB_SCHEMA_TYPE}. Verify this is intentional."
+                    _db_increment_stat "warned"
+                    ;;
+                # development|local: silent allow
+            esac
+        fi
+    fi
+fi
+
 # --- Early-exit gate: skip git-specific checks for non-git commands ---
 declare_gate "git-early-exit" "Skip git-specific checks for non-git commands" "side-effect"
 if ! echo "$_stripped_cmd" | grep -qE '(^|&&|\|\|?|;)\s*git\s'; then
     # Run doc-freshness for non-git commands? No — doc-freshness only fires on commit/merge.
     # Since this is not a git command, skip doc-freshness too.
-    _HOOK_COMPLETED=true
+    # emit_flush delivers any buffered advisories (e.g., B9 schema change, B12 MySQL DDL).
+    emit_flush
     exit 0
 fi
 
@@ -361,16 +680,35 @@ if echo "$_stripped_cmd" | grep -qE 'git\s+[^|;&]*\bcommit([^a-zA-Z0-9-]|$)'; th
         STAGED_FILES=$(git -C "$TARGET_DIR" diff --cached --name-only 2>/dev/null || echo "")
         if [[ "$STAGED_FILES" == "MASTER_PLAN.md" ]]; then
             # Allow ONLY for bootstrap — MASTER_PLAN.md not yet committed.
-            # Use ls-tree HEAD (not ls-files) because git add has already staged the file
-            # at this point, making ls-files report it as "tracked" even on first commit.
-            if git -C "$TARGET_DIR" ls-tree HEAD -- MASTER_PLAN.md &>/dev/null; then
+            # Use ls-tree HEAD output content (not exit code) because git ls-tree
+            # returns exit 0 even for absent paths — only the output differs.
+            if [[ -n "$(git -C "$TARGET_DIR" ls-tree HEAD -- MASTER_PLAN.md 2>/dev/null)" ]]; then
                 emit_deny "MASTER_PLAN.md is already tracked. Amend it in a worktree, not on main. Create a worktree: git worktree add .worktrees/feature-name -b feature/name"
             fi
             # else: not tracked yet = bootstrap, allow through
         elif GIT_DIR=$(git -C "$TARGET_DIR" rev-parse --absolute-git-dir 2>/dev/null) && [[ -f "$GIT_DIR/MERGE_HEAD" ]]; then
             : # Allow — completing a merge
         else
-            emit_deny "Cannot commit directly to $CURRENT_BRANCH. Sacred Practice #2: Main is sacred. Create a worktree: git worktree add .worktrees/feature-name $CURRENT_BRANCH"
+            # Part of DEC-RECK-011: detect governance file commits on main for specific error message
+            # before the generic "main is sacred" deny. This provides actionable context when
+            # agents attempt to commit agents/*.md, docs/*.md, CLAUDE.md, or ARCHITECTURE.md.
+            _C2_STAGED_FILES=$(git -C "$TARGET_DIR" diff --cached --name-only 2>/dev/null || echo "")
+            _C2_GOV_FILES=""
+            if [[ -n "$_C2_STAGED_FILES" ]]; then
+                while IFS= read -r _c2_f; do
+                    [[ -z "$_c2_f" ]] && continue
+                    _c2_base=$(basename "$_c2_f")
+                    if [[ "$_c2_f" =~ agents/[^/]+\.md$ || "$_c2_f" =~ docs/[^/]+\.md$ || \
+                          "$_c2_base" == "CLAUDE.md" || "$_c2_base" == "ARCHITECTURE.md" ]]; then
+                        _C2_GOV_FILES="${_C2_GOV_FILES:+$_C2_GOV_FILES, }$_c2_f"
+                    fi
+                done <<< "$_C2_STAGED_FILES"
+            fi
+            if [[ -n "$_C2_GOV_FILES" ]]; then
+                emit_deny "Cannot commit governance files ($_C2_GOV_FILES) on $CURRENT_BRANCH. Sacred Practice #2: governance-critical markdown (agents/, docs/, CLAUDE.md, ARCHITECTURE.md) requires worktree isolation — changes propagate to all future agent dispatches (DEC-RECK-011). Suggested: git worktree add .worktrees/<name> -b <branch>"
+            else
+                emit_deny "Cannot commit directly to $CURRENT_BRANCH. Sacred Practice #2: Main is sacred. Create a worktree: git worktree add .worktrees/feature-name $CURRENT_BRANCH"
+            fi
         fi
     fi
 fi
@@ -539,18 +877,33 @@ if echo "$_stripped_cmd" | grep -qE 'git\s+[^|;&]*\b(commit|merge)([^a-zA-Z0-9-]
         PROOF_DIR=$(detect_project_root)
     fi
     if git -C "$PROOF_DIR" rev-parse --git-dir > /dev/null 2>&1; then
-        PROOF_FILE=$(PROJECT_ROOT="$PROOF_DIR" resolve_proof_file)
-        [[ ! -f "$PROOF_FILE" ]] && PROOF_FILE=""
-        if [[ -f "$PROOF_FILE" ]]; then
-            if validate_state_file "$PROOF_FILE" 1; then
-                PROOF_STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
-            else
-                PROOF_STATUS="corrupt"
+        # --- W2-1: Read proof status via proof_state_get() (with flat-file fallback) ---
+        # proof_state_get() returns "status|epoch|updated_at|updated_by" or empty.
+        # The flat-file fallback in proof_state_get() ensures backward compatibility.
+        # Gate logic (deny/allow) is unchanged — only the read path has changed.
+        # DEC-STATE-UNIFY-004
+        PROOF_STATUS=""
+        if declare -f proof_state_get >/dev/null 2>&1; then
+            _pg_result=$(PROJECT_ROOT="$PROOF_DIR" proof_state_get 2>/dev/null || echo "")
+            if [[ -n "$_pg_result" ]]; then
+                PROOF_STATUS=$(echo "$_pg_result" | cut -d'|' -f1)
             fi
-            if [[ "$PROOF_STATUS" != "verified" ]]; then
-                append_session_event "gate_eval" "{\"hook\":\"guard\",\"check\":\"proof_gate\",\"result\":\"block\",\"reason\":\"not verified\"}" "$PROOF_DIR"
-                emit_deny "Cannot proceed: proof-of-work verification is '$PROOF_STATUS'. The user must see the feature work before committing. Run the verification checkpoint (Phase 4.5) and get user confirmation."
+        fi
+        # Flat-file fallback when proof_state_get not available or returned empty
+        if [[ -z "$PROOF_STATUS" ]]; then
+            PROOF_FILE=$(PROJECT_ROOT="$PROOF_DIR" resolve_proof_file)
+            [[ ! -f "$PROOF_FILE" ]] && PROOF_FILE=""
+            if [[ -f "$PROOF_FILE" ]]; then
+                if validate_state_file "$PROOF_FILE" 1; then
+                    PROOF_STATUS=$(cut -d'|' -f1 "$PROOF_FILE")
+                else
+                    PROOF_STATUS="corrupt"
+                fi
             fi
+        fi
+        if [[ -n "$PROOF_STATUS" && "$PROOF_STATUS" != "verified" ]]; then
+            append_session_event "gate_eval" "{\"hook\":\"guard\",\"check\":\"proof_gate\",\"result\":\"block\",\"reason\":\"not verified\"}" "$PROOF_DIR"
+            emit_deny "Cannot proceed: proof-of-work verification is '$PROOF_STATUS'. The user must see the feature work before committing. Run the verification checkpoint (Phase 4.5) and get user confirmation."
         fi
     fi
 fi

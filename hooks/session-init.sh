@@ -40,6 +40,12 @@ done
 
 source "$(dirname "$0")/source-lib.sh"
 
+# init_hook reads stdin into HOOK_INPUT global and extracts CLAUDE_SESSION_ID
+# in the parent shell — avoiding the command-substitution subshell that prevented
+# CLAUDE_SESSION_ID from propagating (DEC-INIT-HOOK-001 in log.sh).
+# Must be called before detect_project_root() so .cwd is available for root resolution.
+init_hook
+
 # Load all domain libraries — session-init.sh uses every domain:
 #   require_git:     get_git_state (line 84), get_session_changes
 #   require_plan:    get_plan_status (line 216), get_research_status (line 402)
@@ -47,17 +53,33 @@ source "$(dirname "$0")/source-lib.sh"
 #   require_session: write_statusline_cache (line 217), append_session_event (line 831)
 #   require_doc:     get_doc_freshness (line 394), DOC_STALE_COUNT, DOC_FRESHNESS_SUMMARY
 #   require_ci:      read_ci_status (line 758), format_ci_summary, has_github_actions
+#   require_state:   state_integrity_check (A4: DB integrity check after session backup)
 require_git
 require_plan
 require_trace
 require_session
 require_doc
 require_ci
+require_state
 
 PROJECT_ROOT=$(detect_project_root)
 CLAUDE_DIR=$(get_claude_dir)
 _PHASH=$(project_hash "$PROJECT_ROOT")
 CONTEXT_PARTS=()
+
+# W5-1: emit session.start lifecycle event (best-effort — must never break the hook)
+_SINIT_BRANCH=$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+_SINIT_PROJECT=$(basename "$PROJECT_ROOT")
+_SINIT_SID="${CLAUDE_SESSION_ID:-$$}"
+state_emit "session.start" "{\"branch\":\"${_SINIT_BRANCH}\",\"project\":\"${_SINIT_PROJECT}\",\"session\":\"${_SINIT_SID}\"}" >/dev/null 2>/dev/null || true
+
+# W5-1: check pending governor assessments in event ledger
+# If 3+ governor.assessment events are pending (not yet consumed), surface an advisory.
+_PENDING_GOVERNOR=$(state_events_count "governor" "governor.assessment" 2>/dev/null || echo "0")
+[[ "$_PENDING_GOVERNOR" =~ ^[0-9]+$ ]] || _PENDING_GOVERNOR=0
+if (( _PENDING_GOVERNOR >= 3 )); then
+    CONTEXT_PARTS+=("GOVERNOR ADVISORY: ${_PENDING_GOVERNOR} pending assessment events in ledger. Consider dispatching governor to review project trajectory.")
+fi
 
 # --- Record orchestrator session ID for dispatch enforcement ---
 # @decision DEC-DISPATCH-002
@@ -72,6 +94,30 @@ CONTEXT_PARTS=()
 if [[ -n "${CLAUDE_SESSION_ID:-}" ]]; then
     _ORCH_SID_FILE="${CLAUDE_DIR}/.orchestrator-sid"
     printf '%s\n' "$CLAUDE_SESSION_ID" > "${_ORCH_SID_FILE}.tmp" && mv "${_ORCH_SID_FILE}.tmp" "$_ORCH_SID_FILE"
+fi
+
+# --- A3: state.db backup at session start ---
+# @decision DEC-DBSAFE-006
+# @title Create state.db backup at every session start before any hook reads state
+# @status accepted
+# @rationale The session-start backup provides a recovery window for corruption
+#   detected by state_integrity_check() (A4). By checkpointing WAL before copy,
+#   we ensure the backup is a consistent, fully-flushed snapshot. Overwriting the
+#   previous backup is intentional: only the most recent session's DB state is
+#   needed for recovery, and keeping multiple generations would grow storage
+#   unboundedly. The backup runs BEFORE any state reads so that integrity_check()
+#   can use a known-good baseline. Only runs if state.db exists and is non-empty.
+_STATE_DB_PATH="${CLAUDE_DIR}/state/state.db"
+_STATE_BAK_PATH="${_STATE_DB_PATH}.bak"
+if [[ -f "$_STATE_DB_PATH" && -s "$_STATE_DB_PATH" ]]; then
+    # Flush WAL to main DB file before copy to ensure consistent snapshot
+    sqlite3 "$_STATE_DB_PATH" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>/dev/null || true
+    cp "$_STATE_DB_PATH" "$_STATE_BAK_PATH" 2>/dev/null || true
+    # Run integrity check after backup; surface warnings if corrupted
+    _INTEGRITY_MSG=$(state_integrity_check 2>/dev/null || true)
+    if [[ -n "$_INTEGRITY_MSG" ]]; then
+        CONTEXT_PARTS+=("WARNING: state.db integrity issue: $_INTEGRITY_MSG")
+    fi
 fi
 
 # --- Fix 1: Read update status from previous session's check (one-shot display) ---
@@ -166,7 +212,7 @@ if [[ ${#_PREFLIGHT_FAILS[@]} -gt 0 ]]; then
     CONTEXT_PARTS+=("CRITICAL: Syntax errors in hook files: ${_PREFLIGHT_FAILS[*]}. Hooks may fail silently. Check for interrupted git pulls or merge conflicts.")
 fi
 
-# --- Git state ---
+# --- Git state (cached: populates shared cache for subsequent hooks in this cycle) ---
 get_git_state "$PROJECT_ROOT"
 
 if [[ -n "$GIT_BRANCH" ]]; then
@@ -391,21 +437,57 @@ fi
 
 # --- Sum lifetime tokens from .session-token-history ---
 # @decision DEC-LIFETIME-TOKENS-003
-# @title Sum lifetime tokens from .session-token-history at session start
+# @title Sum per-project lifetime tokens from .session-token-history at session start
 # @status accepted
 # @rationale Mirrors DEC-LIFETIME-COST-001 for tokens. .session-token-history is
-# written by session-end.sh (timestamp|total_tokens|main|subagent|session_id).
-# Summing the total_tokens column with awk at session start is inexpensive
-# (O(N) over ~100 lines) and gives the user a running lifetime token count
-# visible in the statusline as "(Σ1.2M)" next to the current session tokens.
+# written by session-end.sh with format: timestamp|total_tokens|main|subagent|session_id|project_hash|project_name
+# Per-project sum: filter by column 6 (project_hash = _PHASH from line 59). Old-format
+# entries (fewer than 6 columns) lack a project hash and are included in all project sums
+# for backward compatibility. Global sum (all entries, all projects) is also computed
+# and injected into the session context so the user sees cross-project usage. Both sums
+# use awk (O(N) over ~100 lines) — inexpensive at session startup.
 LIFETIME_TOKENS=0
+GLOBAL_LIFETIME_TOKENS=0
 _TOKEN_HISTORY="${CLAUDE_DIR}/.session-token-history"
 if [[ -f "$_TOKEN_HISTORY" ]]; then
-    _LIFETIME_TOK=$(awk -F'|' '{sum += $2} END {print sum+0}' "$_TOKEN_HISTORY" 2>/dev/null || echo "0")
+    # Per-project sum: entries with matching project_hash (col 6) + old-format entries (NF < 6)
+    _LIFETIME_TOK=$(awk -F'|' -v ph="$_PHASH" '(NF < 6) || ($6 == ph) {sum += $2} END {print sum+0}' "$_TOKEN_HISTORY" 2>/dev/null || echo "0")
     LIFETIME_TOKENS="${_LIFETIME_TOK:-0}"
+    # Global sum: all entries regardless of project (for cross-project context)
+    _GLOBAL_LIFETIME_TOK=$(awk -F'|' '{sum += $2} END {print sum+0}' "$_TOKEN_HISTORY" 2>/dev/null || echo "0")
+    GLOBAL_LIFETIME_TOKENS="${_GLOBAL_LIFETIME_TOK:-0}"
 fi
 
 write_statusline_cache "$PROJECT_ROOT"
+
+# --- Inject token lifetime into session context ---
+# @decision DEC-LIFETIME-TOKENS-004
+# @title Inject token lifetime summary into session-init CONTEXT_PARTS
+# @status accepted
+# @rationale The statusline shows per-project token lifetime in the bottom bar,
+# but the session context (system-reminder) has no token lifetime info. Injecting
+# a "Token lifetime: ∑<project> this project | ∑<global> all projects" line gives
+# the agent awareness of cumulative token spend across sessions. Only shown when
+# the project sum > 0 to avoid noise on fresh projects. Uses K/M notation (same
+# as statusline.sh format_tokens) via inline awk for portability — no external
+# script dependency at session startup.
+if (( LIFETIME_TOKENS > 0 || GLOBAL_LIFETIME_TOKENS > 0 )); then
+    _fmt_tok() {
+        local n="$1"
+        if   (( n >= 1000000 )); then awk "BEGIN {printf \"%.1fM\", $n/1000000}"
+        elif (( n >= 1000    )); then printf '%dk' "$(( n / 1000 ))"
+        else                         printf '%d' "$n"
+        fi
+    }
+    _TOK_CTX_LINE="Token lifetime:"
+    if (( LIFETIME_TOKENS > 0 )); then
+        _TOK_CTX_LINE="${_TOK_CTX_LINE} ∑$(_fmt_tok "$LIFETIME_TOKENS") this project"
+    fi
+    if (( GLOBAL_LIFETIME_TOKENS > LIFETIME_TOKENS )); then
+        _TOK_CTX_LINE="${_TOK_CTX_LINE} | ∑$(_fmt_tok "$GLOBAL_LIFETIME_TOKENS") all projects"
+    fi
+    CONTEXT_PARTS+=("$_TOK_CTX_LINE")
+fi
 
 if [[ "$PLAN_EXISTS" == "true" ]]; then
     _PLAN_FILE="$PROJECT_ROOT/MASTER_PLAN.md"
@@ -576,6 +658,24 @@ if [[ "$PLAN_EXISTS" == "true" ]]; then
     fi
 else
     CONTEXT_PARTS+=("Plan: not found (required before implementation)")
+fi
+
+# --- Dispatch summary injection (maintained in docs/DISPATCH.md) ---
+# @decision DEC-DISPATCH-INJECT-001
+# @title Inject dispatch summary from docs/DISPATCH.md into session context
+# @status accepted
+# @rationale The orchestrator needs dispatch rules every session but the full
+#   docs/DISPATCH.md is ~300 lines. The DISPATCH-INJECT-START/END markers in
+#   docs/DISPATCH.md delimit a compact summary (~20 lines) with the key routing
+#   rules. Injecting it here ensures every session has orchestrator dispatch
+#   rules without loading the full protocol doc. Placed after MASTER_PLAN.md
+#   injection so plan context comes first (higher priority).
+DISPATCH_FILE="$CLAUDE_DIR/docs/DISPATCH.md"
+if [[ -f "$DISPATCH_FILE" ]]; then
+  DISPATCH_SUMMARY=$(awk '/<!-- DISPATCH-INJECT-START -->/{found=1; next} /<!-- DISPATCH-INJECT-END -->/{found=0} found' "$DISPATCH_FILE")
+  if [[ -n "$DISPATCH_SUMMARY" ]]; then
+    CONTEXT_PARTS+=("$DISPATCH_SUMMARY")
+  fi
 fi
 
 # --- Doc freshness status ---
