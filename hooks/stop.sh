@@ -728,18 +728,33 @@ if $_RUN_SUMMARY; then
         fi
     fi
 
-    # Pending todos — read cached .todo-count (written by session-init.sh's todo.sh hud).
+    # Pending todos — read cached todo_count (written by session-init.sh's todo.sh hud).
     # Background refresh if TTL expired — never blocks the Stop hook.
     # @decision DEC-PERF-003 (see core-lib.sh)
+    # @decision DEC-STATE-KV-006: SQLite KV primary; flat-file fallback for backward compat
     TODO_CACHE="${CLAUDE_DIR}/.todo-count"
-    if [[ -f "$TODO_CACHE" ]]; then
+    TODO_PROJECT=0
+    TODO_GLOBAL=0
+    TODO_CONFIG=0
+    _TODO_KV_RAW=$(state_read "todo_count" 2>/dev/null || echo "")
+    if [[ -n "$_TODO_KV_RAW" ]]; then
+        TODO_PROJECT=$(printf '%s' "$_TODO_KV_RAW" | cut -d'|' -f1 2>/dev/null) || TODO_PROJECT=0
+        TODO_GLOBAL=$(printf '%s' "$_TODO_KV_RAW" | cut -d'|' -f2 2>/dev/null) || TODO_GLOBAL=0
+        TODO_CONFIG=$(printf '%s' "$_TODO_KV_RAW" | cut -d'|' -f3 2>/dev/null) || TODO_CONFIG=0
+        [[ "$TODO_PROJECT" =~ ^[0-9]+$ ]] || TODO_PROJECT=0
+        [[ "$TODO_GLOBAL" =~ ^[0-9]+$ ]] || TODO_GLOBAL=0
+        [[ "$TODO_CONFIG" =~ ^[0-9]+$ ]] || TODO_CONFIG=0
+    elif [[ -f "$TODO_CACHE" ]]; then
         TODO_PROJECT=$(cut -d'|' -f1 "$TODO_CACHE" 2>/dev/null) || TODO_PROJECT=0
         TODO_GLOBAL=$(cut -d'|' -f2 "$TODO_CACHE" 2>/dev/null) || TODO_GLOBAL=0
         TODO_CONFIG=$(cut -d'|' -f3 "$TODO_CACHE" 2>/dev/null) || TODO_CONFIG=0
-        TODO_TOTAL=$((TODO_PROJECT + TODO_GLOBAL + TODO_CONFIG))
-        if [[ "$TODO_TOTAL" -gt 0 ]]; then
-            SESS_SUMMARY+="\nTodos: ${TODO_PROJECT} project + ${TODO_GLOBAL} global + ${TODO_CONFIG} config pending."
-        fi
+        [[ "$TODO_PROJECT" =~ ^[0-9]+$ ]] || TODO_PROJECT=0
+        [[ "$TODO_GLOBAL" =~ ^[0-9]+$ ]] || TODO_GLOBAL=0
+        [[ "$TODO_CONFIG" =~ ^[0-9]+$ ]] || TODO_CONFIG=0
+    fi
+    TODO_TOTAL=$((TODO_PROJECT + TODO_GLOBAL + TODO_CONFIG))
+    if [[ "$TODO_TOTAL" -gt 0 ]]; then
+        SESS_SUMMARY+="\nTodos: ${TODO_PROJECT} project + ${TODO_GLOBAL} global + ${TODO_CONFIG} config pending."
     fi
     # Async refresh if stale
     _TODO_SENTINEL="${CLAUDE_DIR}/.stop-todo-ttl"

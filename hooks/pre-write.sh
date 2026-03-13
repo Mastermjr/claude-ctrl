@@ -263,7 +263,21 @@ if [[ "$_IN_WORKTREE" == "true" ]] && is_source_file "$FILE_PATH" && ! is_skippa
             [[ -f "$_ORCH_SID_FILE" ]] && _ORCH_SID=$(cat "$_ORCH_SID_FILE" 2>/dev/null || echo "")
         fi
         if [[ -n "$_ORCH_SID" && "$CLAUDE_SESSION_ID" == "$_ORCH_SID" ]]; then
-            emit_deny "BLOCKED: Source writes from orchestrator context. The orchestrator must dispatch an implementer subagent for all source code work (Sacred Practice #2 + Dispatch Rules). Use: Agent tool with subagent_type=implementer, prompt describing the task, working in this worktree."
+            # Exempt: active implementer marker proves this IS a dispatched subagent.
+            # When subagent-start.sh fires for an implementer, it writes:
+            #   ${TRACE_STORE}/.active-implementer-${SESSION_ID}-${PHASH}
+            # Since orchestrator and implementer share the same session_id in Claude Code,
+            # SID comparison alone cannot distinguish them. The marker is the reliable
+            # signal: it exists only during an active implementer dispatch.
+            # @decision DEC-DISPATCH-003 (amendment: add implementer-marker exemption)
+            _IMPL_TRACE_STORE="${TRACE_STORE:-$HOME/.claude/traces}"
+            _IMPL_MARKER_FOUND=false
+            for _impl_m in "${_IMPL_TRACE_STORE}/.active-implementer-${CLAUDE_SESSION_ID}-"*; do
+                [[ -f "$_impl_m" ]] && _IMPL_MARKER_FOUND=true && break
+            done
+            if [[ "$_IMPL_MARKER_FOUND" == "false" ]]; then
+                emit_deny "BLOCKED: Source writes from orchestrator context. The orchestrator must dispatch an implementer subagent for all source code work (Sacred Practice #2 + Dispatch Rules). Use: Agent tool with subagent_type=implementer, prompt describing the task, working in this worktree."
+            fi
         fi
     fi
 fi

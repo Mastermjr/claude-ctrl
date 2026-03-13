@@ -444,7 +444,14 @@ _GH_TMPDIR=$(mktemp -d)
 trap 'rm -rf "$_GH_TMPDIR"' EXIT
 
 # Read cached counts immediately (zero network calls on startup path)
-if [[ -f "$_TODO_COUNT_FILE" ]]; then
+# @decision DEC-STATE-KV-006: SQLite KV primary; flat-file fallback for backward compat
+_CACHED_RAW=$(state_read "todo_count" 2>/dev/null || echo "")
+if [[ -n "$_CACHED_RAW" ]]; then
+    _CACHED_PROJ=$(printf '%s' "$_CACHED_RAW" | cut -d'|' -f1 2>/dev/null || echo "0")
+    _CACHED_GLOB=$(printf '%s' "$_CACHED_RAW" | cut -d'|' -f2 2>/dev/null || echo "0")
+    [[ "$_CACHED_PROJ" =~ ^[0-9]+$ ]] && TODO_PROJECT_COUNT="$_CACHED_PROJ" || TODO_PROJECT_COUNT=0
+    [[ "$_CACHED_GLOB" =~ ^[0-9]+$ ]] && TODO_GLOBAL_COUNT="$_CACHED_GLOB" || TODO_GLOBAL_COUNT=0
+elif [[ -f "$_TODO_COUNT_FILE" ]]; then
     _CACHED_PROJ=$(cut -d'|' -f1 "$_TODO_COUNT_FILE" 2>/dev/null || echo "0")
     _CACHED_GLOB=$(cut -d'|' -f2 "$_TODO_COUNT_FILE" 2>/dev/null || echo "0")
     [[ "$_CACHED_PROJ" =~ ^[0-9]+$ ]] && TODO_PROJECT_COUNT="$_CACHED_PROJ" || TODO_PROJECT_COUNT=0
@@ -474,6 +481,8 @@ if command -v gh >/dev/null 2>&1; then
             [[ "$_bg_glob" =~ ^[0-9]+$ ]] || _bg_glob=0
         fi
         # Write pipe-delimited proj|glob for next session (stop.sh reads f1/f2, statusline reads f1)
+        # @decision DEC-STATE-KV-006 (dual-write: KV primary + flat-file for statusline.sh fallback)
+        state_update "todo_count" "${_bg_proj}|${_bg_glob}" "session-init" 2>/dev/null || true
         echo "${_bg_proj}|${_bg_glob}" > "$HOME/.claude/.todo-count" 2>/dev/null || true
     ) &
     disown $! 2>/dev/null || true

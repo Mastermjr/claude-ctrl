@@ -108,7 +108,7 @@ _print_scope_usage() {
     echo "  gaps        — gaps-report.sh accountability report unit tests"
     echo "  concurrency — Concurrency and state management tests (Phase 1 locking, CAS, lattice, registry)"
     echo "  sqlite      — SQLite state operations (schema, CRUD, CAS, lattice, concurrency, injection)"
-    echo "  session-kv  — Session KV migrations: test_status SQLite KV store (DEC-STATE-KV-005)"
+    echo "  session-kv  — Session KV migrations: epoch, prompt_count, test_status, todo_count KV roundtrip (DEC-STATE-KV-002/005/006)"
     echo "  dbsafe-w1a  — DB safety Wave 1a: sqlite3 block, state-diag.sh, backup, integrity check"
     echo "  bash32      — Bash 3.2 compatibility (no declare -A in hooks)"
     echo "  dbsafe-w1b  — Database safety library unit tests (Wave 1b: modular architecture)"
@@ -2939,7 +2939,7 @@ fi
 echo ""
 fi # end: sqlite
 
-# --- Session KV migrations (DEC-STATE-KV-002, DEC-STATE-KV-005) ---
+# --- Session KV migrations (DEC-STATE-KV-002, DEC-STATE-KV-005, DEC-STATE-KV-006) ---
 if should_run_section "Session KV migrations"; then
 echo ""
 echo "--- Session KV migrations (test-session-kv.sh) ---"
@@ -2969,7 +2969,6 @@ fi
 
 echo ""
 fi # end: session-kv
-
 
 # --- Database safety library unit tests (Wave 1b) ---
 if should_run_section "db-safety-lib.sh unit tests"; then

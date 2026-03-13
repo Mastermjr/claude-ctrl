@@ -41,6 +41,34 @@ GLOBAL_REPO="${CLAUDE_TODO_GLOBAL_REPO:-juanandresgs/cc-todos}"
 TODO_LABEL="claude-todo"
 TODO_COUNT_FILE="$HOME/.claude/.todo-count"
 
+# --- Optional SQLite KV integration ---
+# @decision DEC-STATE-KV-006
+# @title todo.sh optional state_update for todo_count KV migration
+# @status accepted
+# @rationale todo.sh is a standalone script (no source-lib.sh dependency by design).
+#   Adding an optional source of state-lib.sh enables dual-write to SQLite KV alongside
+#   the legacy flat-file (.todo-count). If state-lib.sh is unavailable (fresh install,
+#   non-hook context, or sourcing error), the script degrades gracefully — flat-file
+#   write still occurs. _TODO_STATE_AVAILABLE gates all KV calls.
+_TODO_STATE_AVAILABLE=false
+if [[ -f "$HOME/.claude/hooks/source-lib.sh" && -f "$HOME/.claude/hooks/state-lib.sh" ]]; then
+    _HOOK_NAME="todo"
+    # shellcheck source=/dev/null
+    if source "$HOME/.claude/hooks/source-lib.sh" 2>/dev/null; then
+        if source "$HOME/.claude/hooks/state-lib.sh" 2>/dev/null; then
+            _TODO_STATE_AVAILABLE=true
+        fi
+    fi
+fi
+
+_todo_state_update() {
+    # Wrapper: calls state_update if available, silently skips otherwise.
+    local key="$1" value="$2"
+    if [[ "$_TODO_STATE_AVAILABLE" == "true" ]]; then
+        state_update "$key" "$value" "todo" 2>/dev/null || true
+    fi
+}
+
 # --- Graceful gh check ---
 # If gh is not installed or not authenticated, exit 0 with no output.
 # Checks both presence (command -v) and auth (gh auth token). The auth check
@@ -85,7 +113,8 @@ _get_target_repo() {
 # Print compact summary lines for injection into session-init CONTEXT_PARTS.
 #
 # Queries both project repo (if available) and global repo, then formats a
-# compact summary. Also writes global count to .todo-count for statusline.
+# compact summary. Also writes proj|glob counts to .todo-count for statusline
+# and to the SQLite KV store (DEC-STATE-KV-006).
 #
 # Output format (one or more lines):
 #   Backlog: 3 project + 7 global todos pending
@@ -120,8 +149,12 @@ _cmd_hud() {
         --jq length 2>/dev/null || echo "0")
     global_count="${global_count:-0}"
 
-    # Write global count for statusline cache
-    echo "$global_count" > "$TODO_COUNT_FILE" 2>/dev/null || true
+    # @decision DEC-STATE-KV-006: dual-write — KV primary + flat-file for statusline.sh.
+    # statusline.sh is standalone (cannot source state-lib.sh), so flat-file persists.
+    # Write proj|glob format for both stores (replaces legacy global-only integer).
+    local _todo_kv_val="${project_count}|${global_count}"
+    _todo_state_update "todo_count" "$_todo_kv_val"
+    echo "$_todo_kv_val" > "$TODO_COUNT_FILE" 2>/dev/null || true
 
     # Format output
     local total=$(( project_count + global_count ))
