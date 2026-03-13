@@ -875,18 +875,17 @@ cache_lifetime_tokens_int="${cache_lifetime_tokens%.*}"
 cache_lifetime_tokens_int=$(( ${cache_lifetime_tokens_int:-0} ))
 
 # Persist main session token count for session-end.sh to read as fallback.
-# Uses workspace_dir with double-nesting guard (same logic as get_claude_dir):
-# ~/.claude projects already ARE the .claude dir, so don't append .claude again.
-# @decision DEC-STATUSLINE-TOKEN-PATH-001
-# @title Token persistence path aligned with get_claude_dir()
+# @decision DEC-STATE-KV-003
+# @title Remove .session-main-tokens write from statusline.sh
 # @status accepted
-# @rationale CACHE_FILE%/* resolves to $workspace_dir/.claude for normal projects but
-# to ~/.claude/.claude for the ~/.claude project itself (double-nesting). session-end.sh
-# reads from get_claude_dir() which correctly strips the second .claude. Fix: mirror
-# that logic here — use workspace_dir directly for ~/.claude projects, append .claude otherwise.
-if [[ -n "${_sl_cache_dir:-}" ]]; then
-  printf '%d' "$total_tokens_int" > "${_sl_cache_dir}/.session-main-tokens" 2>/dev/null || true
-fi
+# @rationale session-end.sh now reads main tokens directly from the session-end
+# JSON (context_window.total_input_tokens + total_output_tokens) as the primary
+# source, with .session-main-tokens as a fallback. The flat file was always a proxy
+# for the JSON value anyway. Removing the write here eliminates a file-per-render
+# write (statusline.sh renders every few seconds) and removes a subtle path where
+# the last written value could differ from session-end JSON for the final session.
+# The session-end JSON is the authoritative source; the flat file is now removed.
+# REMOVED: printf '%d' "$total_tokens_int" > "${_sl_cache_dir}/.session-main-tokens"
 
 # Build token display: NK tks  or  NK tks(+subs S tks)
 # Format: <N> tks(+subs<S> tks) — "tks" suffix on both main and subagent counts,

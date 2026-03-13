@@ -266,6 +266,21 @@ CREATE TABLE IF NOT EXISTS event_checkpoints (
     last_seq    INTEGER NOT NULL DEFAULT 0,
     updated_at  INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS session_tokens (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id       TEXT    NOT NULL,
+    project_hash     TEXT    NOT NULL,
+    project_name     TEXT,
+    timestamp        TEXT    NOT NULL,
+    total_tokens     INTEGER NOT NULL DEFAULT 0,
+    main_tokens      INTEGER NOT NULL DEFAULT 0,
+    subagent_tokens  INTEGER NOT NULL DEFAULT 0,
+    source           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_tokens_project
+    ON session_tokens(project_hash);
 " | sqlite3 "$db" 2>/dev/null || true
 
     _STATE_SCHEMA_INITIALIZED=1
@@ -287,6 +302,7 @@ CREATE TABLE IF NOT EXISTS event_checkpoints (
 #      would recurse into schema init before migrations are complete)
 _MIGRATIONS=(
     "1:initial_schema:_migration_001_initial_schema"
+    "2:session_tokens:_migration_002_session_tokens"
 )
 
 # _migration_001_initial_schema DB
@@ -297,6 +313,32 @@ _MIGRATIONS=(
 _migration_001_initial_schema() {
     # No-op: existing schema created by _state_ensure_schema().
     # This migration just records that the baseline schema exists.
+    return 0
+}
+
+# _migration_002_session_tokens DB
+#   Records the addition of the session_tokens table and its index.
+#   The table/index DDL is in _state_ensure_schema() (IF NOT EXISTS — safe to
+#   run on existing DBs). This migration entry exists so the version is recorded
+#   in _migrations, enabling future migrations to depend on version 2.
+#
+# @decision DEC-STATE-KV-003
+# @title session_tokens table for atomic, per-project lifetime token tracking
+# @status accepted
+# @rationale The previous .session-token-history flat file had two problems:
+#   (1) bare >> append races when multiple sessions end concurrently — partial
+#       lines corrupt the awk sum; (2) the orphaned global .statusline-cache
+#       drops lifetime_tokens because it reads from the flat file at a point when
+#       no rows have been written for the new session. SQLite INSERT is atomic
+#       (WAL mode, BEGIN IMMEDIATE), so concurrent session-end hooks cannot corrupt
+#       each other. SELECT SUM(total_tokens) WHERE project_hash = ? replaces the
+#       O(N) awk scan and benefits from idx_session_tokens_project. The flat file
+#       is preserved as a dual-write during the migration window so existing
+#       session-init.sh awk logic continues working for older DBs.
+#   See MASTER_PLAN.md for full decision context.
+_migration_002_session_tokens() {
+    # No-op: table created by _state_ensure_schema() with IF NOT EXISTS.
+    # Migration version 2 records this schema addition in _migrations.
     return 0
 }
 

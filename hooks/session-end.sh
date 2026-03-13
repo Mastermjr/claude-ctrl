@@ -264,6 +264,20 @@ if [[ "$_SESSION_TOKENS" -gt 0 ]]; then
     #   might want to analyze. If size management is ever needed, annual rotation is
     #   more appropriate than aggressive trimming.
     echo "${_TOKEN_TS}|${_SESSION_TOKENS}|${_MAIN_TOKENS}|${_SUBAGENT_TOTAL}|${CLAUDE_SESSION_ID:-unknown}|${_TOKEN_PHASH}|${_TOKEN_PNAME}" >> "$_TOKEN_HISTORY"
+
+    # --- SQLite dual-write (DEC-STATE-KV-003) ---
+    # Atomic INSERT into session_tokens alongside the flat-file append.
+    # SQLite WAL+BEGIN IMMEDIATE makes this race-free when multiple sessions
+    # end concurrently. session-init.sh will prefer the SQLite path once
+    # data is available; the flat file remains as a backward-compat fallback.
+    # _sql_escape: replace ' with '' (SQLite convention, not backslash).
+    _tk_sid_e=$(printf '%s' "${CLAUDE_SESSION_ID:-unknown}" | sed "s/'/''/g")
+    _tk_phash_e=$(printf '%s' "${_TOKEN_PHASH}" | sed "s/'/''/g")
+    _tk_pname_e=$(printf '%s' "${_TOKEN_PNAME}" | sed "s/'/''/g")
+    _state_sql "INSERT INTO session_tokens
+        (session_id, project_hash, project_name, timestamp, total_tokens, main_tokens, subagent_tokens, source)
+        VALUES ('${_tk_sid_e}', '${_tk_phash_e}', '${_tk_pname_e}', '${_TOKEN_TS}', ${_SESSION_TOKENS}, ${_MAIN_TOKENS}, ${_SUBAGENT_TOTAL}, 'session-end');" \
+        >/dev/null 2>/dev/null || true
 fi
 log_info "SESSION-END" "Persisted session tokens: main=${_MAIN_TOKENS} subagent=${_SUBAGENT_TOTAL} total=${_SESSION_TOKENS}"
 
@@ -475,6 +489,8 @@ rm -f "${CLAUDE_DIR}/.skill-result"*
 rm -f "${CLAUDE_DIR}/.subagent-tracker-${CLAUDE_SESSION_ID:-$$}"
 rm -f "${CLAUDE_DIR}/.subagent-tokens-${CLAUDE_SESSION_ID:-$$}"
 rm -f "${CLAUDE_DIR}/.agent-progress"
+# .session-main-tokens removal: DEC-STATE-KV-003 — statusline.sh no longer writes this file.
+# Remove any lingering file from pre-migration sessions (safe to no-op if absent).
 rm -f "${CLAUDE_DIR}/.session-main-tokens"
 rm -f "${CLAUDE_DIR}/.cwd-recovery-needed"
 # .proof-epoch flat file removed (DEC-STATE-DOTFILE-001) — epoch state in SQLite only

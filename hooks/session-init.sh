@@ -67,6 +67,19 @@ CLAUDE_DIR=$(get_claude_dir)
 _PHASH=$(project_hash "$PROJECT_ROOT")
 CONTEXT_PARTS=()
 
+# --- Clean up orphaned global .statusline-cache (DEC-STATE-KV-003) ---
+# The bare .statusline-cache file (no session ID suffix) is written by old statusline.sh
+# invocations that fell back to the global path. It lacks lifetime_tokens / lifetime_cost
+# fields and causes display inconsistency when statusline.sh falls back to it.
+# Active cache files always carry a session-ID suffix (.statusline-cache-<SESSION_ID>).
+# Removing the bare file is safe: statusline.sh discovers active caches via glob
+# .statusline-cache-* and never relies on the bare name.
+_orphan_cache="${CLAUDE_DIR}/.statusline-cache"
+if [[ -f "$_orphan_cache" && ! -L "$_orphan_cache" ]]; then
+    rm -f "$_orphan_cache" 2>/dev/null || true
+fi
+unset _orphan_cache
+
 # W5-1: emit session.start lifecycle event (best-effort — must never break the hook)
 _SINIT_BRANCH=$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 _SINIT_PROJECT=$(basename "$PROJECT_ROOT")
@@ -500,11 +513,75 @@ fi
 # use awk (O(N) over ~100 lines) — inexpensive at session startup.
 LIFETIME_TOKENS=0
 GLOBAL_LIFETIME_TOKENS=0
+
+# --- One-time backfill: import .session-token-history into SQLite (DEC-STATE-KV-003) ---
+# Runs automatically the first time a session starts after the migration. If the
+# session_tokens table is empty and the flat file has entries, parse the flat file
+# and INSERT each row into SQLite. This is a one-time O(N) operation; subsequent
+# sessions skip it because the table is non-empty. Best-effort: failures are silently
+# ignored so the fallback awk path continues to work.
+_bf_db="$(state_dir)/state.db"
+if [[ -f "$_bf_db" ]]; then
+    _bf_count=$(sqlite3 "$_bf_db" "SELECT COUNT(*) FROM session_tokens;" 2>/dev/null || echo "1")
+    _bf_history="${CLAUDE_DIR}/.session-token-history"
+    if [[ "${_bf_count:-1}" -eq 0 && -f "$_bf_history" ]]; then
+        # Parse pipe-delimited flat file: timestamp|total|main|subagent|session_id|project_hash|project_name
+        while IFS='|' read -r _bf_ts _bf_total _bf_main _bf_sub _bf_sid _bf_phash _bf_pname; do
+            # Skip blank lines and header-like entries
+            [[ -z "$_bf_ts" || -z "$_bf_total" ]] && continue
+            # Sanitize integers (strip non-digits)
+            _bf_total="${_bf_total//[^0-9]/}"
+            _bf_main="${_bf_main//[^0-9]/}"
+            _bf_sub="${_bf_sub//[^0-9]/}"
+            [[ -z "$_bf_total" ]] && continue
+            # SQL-escape string fields
+            _bf_sid_e=$(printf '%s' "${_bf_sid:-unknown}" | sed "s/'/''/g")
+            _bf_phash_e=$(printf '%s' "${_bf_phash:-}" | sed "s/'/''/g")
+            _bf_pname_e=$(printf '%s' "${_bf_pname:-unknown}" | sed "s/'/''/g")
+            _bf_ts_e=$(printf '%s' "${_bf_ts:-}" | sed "s/'/''/g")
+            sqlite3 "$_bf_db" \
+                "INSERT OR IGNORE INTO session_tokens (session_id, project_hash, project_name, timestamp, total_tokens, main_tokens, subagent_tokens, source)
+                 VALUES ('${_bf_sid_e}', '${_bf_phash_e}', '${_bf_pname_e}', '${_bf_ts_e}', ${_bf_total:-0}, ${_bf_main:-0}, ${_bf_sub:-0}, 'backfill');" \
+                2>/dev/null || true
+        done < "$_bf_history"
+    fi
+    unset _bf_db _bf_count _bf_history _bf_ts _bf_total _bf_main _bf_sub _bf_sid _bf_phash _bf_pname
+    unset _bf_sid_e _bf_phash_e _bf_pname_e _bf_ts_e
+fi
+
+# --- SQLite primary: sum session_tokens for this project (DEC-STATE-KV-003) ---
+# Prefer SQLite over the flat file: concurrent sessions cannot corrupt an INSERT,
+# and WHERE project_hash benefits from idx_session_tokens_project.
+# Falls back to awk on the flat file when the SQLite DB is absent or empty
+# (e.g., brand-new installs, sessions before the migration ran).
+_lt_db="$(state_dir)/state.db"
+if [[ -f "$_lt_db" ]]; then
+    _lt_phash_e=$(printf '%s' "$_PHASH" | sed "s/'/''/g")
+    _LT_DB_TOK=$(sqlite3 "$_lt_db" \
+        "SELECT COALESCE(SUM(total_tokens), 0) FROM session_tokens WHERE project_hash = '${_lt_phash_e}';" \
+        2>/dev/null || echo "0")
+    _LT_DB_TOK="${_LT_DB_TOK:-0}"
+    _GLT_DB_TOK=$(sqlite3 "$_lt_db" \
+        "SELECT COALESCE(SUM(total_tokens), 0) FROM session_tokens;" \
+        2>/dev/null || echo "0")
+    _GLT_DB_TOK="${_GLT_DB_TOK:-0}"
+    if [[ "$_LT_DB_TOK" =~ ^[0-9]+$ ]] && [[ "$_LT_DB_TOK" -gt 0 ]]; then
+        LIFETIME_TOKENS="$_LT_DB_TOK"
+    fi
+    if [[ "$_GLT_DB_TOK" =~ ^[0-9]+$ ]] && [[ "$_GLT_DB_TOK" -gt 0 ]]; then
+        GLOBAL_LIFETIME_TOKENS="$_GLT_DB_TOK"
+    fi
+fi
+
+# --- Flat-file fallback (backward compat for pre-migration sessions) ---
+# Also used when SQLite has no rows yet (first session after install).
 _TOKEN_HISTORY="${CLAUDE_DIR}/.session-token-history"
-if [[ -f "$_TOKEN_HISTORY" ]]; then
+if [[ "${LIFETIME_TOKENS:-0}" -eq 0 && -f "$_TOKEN_HISTORY" ]]; then
     # Per-project sum: entries with matching project_hash (col 6) + old-format entries (NF < 6)
     _LIFETIME_TOK=$(awk -F'|' -v ph="$_PHASH" '(NF < 6) || ($6 == ph) {sum += $2} END {print sum+0}' "$_TOKEN_HISTORY" 2>/dev/null || echo "0")
     LIFETIME_TOKENS="${_LIFETIME_TOK:-0}"
+fi
+if [[ "${GLOBAL_LIFETIME_TOKENS:-0}" -eq 0 && -f "$_TOKEN_HISTORY" ]]; then
     # Global sum: all entries regardless of project (for cross-project context)
     _GLOBAL_LIFETIME_TOK=$(awk -F'|' '{sum += $2} END {print sum+0}' "$_TOKEN_HISTORY" 2>/dev/null || echo "0")
     GLOBAL_LIFETIME_TOKENS="${_GLOBAL_LIFETIME_TOK:-0}"
