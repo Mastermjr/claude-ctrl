@@ -1247,9 +1247,9 @@ test_lifetime_tokens_dim_rendering() {
     line2_raw=$(extract_line "$output" 2)
     rm -rf "$tmpdir"
 
-    # Dim annotation pattern: ESC[2mProject Lifetime: ∑Nktks
-    if printf '%s' "$line2_raw" | grep -q $'\033\[2mProject Lifetime:'; then
-        pass_test "Lifetime tokens: ∑ (Project Lifetime:) segment rendered dim (ESC[2m)"
+    # Dim annotation pattern: ESC[2m∑Nktks
+    if printf '%s' "$line2_raw" | grep -q $'\033\[2m∑'; then
+        pass_test "Lifetime tokens: ∑ segment rendered dim (ESC[2m)"
     else
         fail_test "Lifetime tokens: ∑ segment not dim-rendered" "raw: $(printf '%s' "$line2_raw" | cat -v)"
     fi
@@ -1507,10 +1507,10 @@ test_new_lifetime_format_with_prefix() {
     line2=$(extract_line "$output" 2 | strip_ansi)
     rm -rf "$tmpdir"
 
-    if [[ "$line2" == *"Project Lifetime:"* ]]; then
-        pass_test "New format: lifetime segment contains 'Project Lifetime:' prefix"
+    if [[ "$line2" == *"∑"* ]]; then
+        pass_test "New format: lifetime segment contains '∑' prefix"
     else
-        fail_test "New format: 'Project Lifetime:' prefix not found" "line2=$line2"
+        fail_test "New format: '∑' prefix not found" "line2=$line2"
     fi
 }
 
