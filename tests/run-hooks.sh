@@ -108,6 +108,7 @@ _print_scope_usage() {
     echo "  gaps        — gaps-report.sh accountability report unit tests"
     echo "  concurrency — Concurrency and state management tests (Phase 1 locking, CAS, lattice, registry)"
     echo "  sqlite      — SQLite state operations (schema, CRUD, CAS, lattice, concurrency, injection)"
+    echo "  session-kv  — Session KV migrations: test_status SQLite KV store (DEC-STATE-KV-005)"
     echo "  dbsafe-w1a  — DB safety Wave 1a: sqlite3 block, state-diag.sh, backup, integrity check"
     echo "  bash32      — Bash 3.2 compatibility (no declare -A in hooks)"
     echo "  dbsafe-w1b  — Database safety library unit tests (Wave 1b: modular architecture)"
@@ -168,6 +169,7 @@ _scope_pattern() {
         gaps)        echo "gaps-report\.sh" ;;
         concurrency) echo "Concurrency and state management" ;;
         sqlite)      echo "SQLite state operations" ;;
+        session-kv)  echo "Session KV migrations" ;;
         dbsafe-w1a)  echo "DB safety Wave 1a" ;;
         bash32)      echo "Bash 3\.2 compatibility" ;;
         dbsafe-w1b)  echo "db-safety-lib\.sh unit tests" ;;
@@ -2936,6 +2938,38 @@ fi
 
 echo ""
 fi # end: sqlite
+
+# --- Session KV migrations (DEC-STATE-KV-002, DEC-STATE-KV-005) ---
+if should_run_section "Session KV migrations"; then
+echo ""
+echo "--- Session KV migrations (test-session-kv.sh) ---"
+
+_SKV_TEST="$SCRIPT_DIR/test-session-kv.sh"
+if [[ ! -f "$_SKV_TEST" ]]; then
+    skip "Session KV migration tests" "test-session-kv.sh not found at $_SKV_TEST"
+elif ! command -v sqlite3 >/dev/null 2>&1; then
+    skip "Session KV migration tests" "sqlite3 not installed"
+else
+    _SKV_OUTPUT=$(bash "$_SKV_TEST" 2>&1) || true
+    _SKV_EXIT=$?
+    _SKV_PASSED=$(echo "$_SKV_OUTPUT" | grep -c "^  PASS$" 2>/dev/null || true)
+    _SKV_FAILED=$(echo "$_SKV_OUTPUT" | grep -c "^  FAIL:" 2>/dev/null || true)
+    _SKV_PASSED="${_SKV_PASSED//[[:space:]]/}"
+    _SKV_FAILED="${_SKV_FAILED//[[:space:]]/}"
+    _SKV_PASSED="${_SKV_PASSED:-0}"
+    _SKV_FAILED="${_SKV_FAILED:-0}"
+    if [[ "$_SKV_FAILED" -eq 0 && "$_SKV_EXIT" -eq 0 ]]; then
+        pass "Session KV migrations — ${_SKV_PASSED} assertions passed"
+    else
+        _SKV_FAIL_DETAILS=$(echo "$_SKV_OUTPUT" | grep "^  FAIL:" | head -5 | tr '\n' '; ')
+        fail "Session KV migrations" "${_SKV_FAILED} failed (${_SKV_PASSED} passed): ${_SKV_FAIL_DETAILS}"
+        echo "$_SKV_OUTPUT"
+    fi
+fi
+
+echo ""
+fi # end: session-kv
+
 
 # --- Database safety library unit tests (Wave 1b) ---
 if should_run_section "db-safety-lib.sh unit tests"; then

@@ -131,17 +131,27 @@ if [[ -n "$_CP_PROOF_VAL" && "$_CP_PROOF_VAL" != "none" ]]; then
 fi
 
 # --- Test status ---
-# Check new path (state/{phash}/test-status) first, fall back to legacy .test-status
+# KV primary (DEC-STATE-KV-005): state_read "test_status", flat-file fallback
 # W5-2: _PHASH_CP was previously computed in the flat-file fallback block (now removed).
 _PHASH_CP="${_PHASH_CP:-$(project_hash "$PROJECT_ROOT")}"
-TEST_STATUS="${CLAUDE_DIR}/state/${_PHASH_CP}/test-status" 
-if [[ ! -f "$TEST_STATUS" ]]; then
-    TEST_STATUS="${CLAUDE_DIR}/.test-status"
+_CP_KV_TS=""
+if type state_read &>/dev/null; then
+    _CP_KV_TS=$(state_read "test_status" 2>/dev/null || echo "")
 fi
-if [[ -f "$TEST_STATUS" ]]; then
-    TS_RESULT=$(cut -d'|' -f1 "$TEST_STATUS")
-    TS_FAILS=$(cut -d'|' -f2 "$TEST_STATUS")
+if [[ -n "$_CP_KV_TS" ]]; then
+    TS_RESULT=$(printf '%s' "$_CP_KV_TS" | cut -d'|' -f1)
+    TS_FAILS=$(printf '%s' "$_CP_KV_TS" | cut -d'|' -f2)
     CONTEXT_PARTS+=("Test status: ${TS_RESULT} (${TS_FAILS} failures)")
+else
+    TEST_STATUS="${CLAUDE_DIR}/state/${_PHASH_CP}/test-status"
+    if [[ ! -f "$TEST_STATUS" ]]; then
+        TEST_STATUS="${CLAUDE_DIR}/.test-status"
+    fi
+    if [[ -f "$TEST_STATUS" ]]; then
+        TS_RESULT=$(cut -d'|' -f1 "$TEST_STATUS")
+        TS_FAILS=$(cut -d'|' -f2 "$TEST_STATUS")
+        CONTEXT_PARTS+=("Test status: ${TS_RESULT} (${TS_FAILS} failures)")
+    fi
 fi
 
 # --- Agent findings (unresolved issues from subagents) ---

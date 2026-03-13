@@ -250,27 +250,47 @@ is_claude_meta_repo() {
 }
 
 # Read test-status and populate TEST_RESULT, TEST_FAILS, TEST_TIME, TEST_AGE globals.
-# Checks state/{phash}/test-status first (new path), falls back to .test-status (legacy).
-# Returns 0 on success, 1 if status file doesn't exist.
+# Priority: SQLite KV (test_status key, DEC-STATE-KV-005) > state/{phash}/test-status > .test-status
+# Returns 0 on success, 1 if no test status found anywhere.
 # Usage: read_test_status "$PROJECT_ROOT"
+#
+# @decision DEC-STATE-KV-005
+# @title read_test_status prefers SQLite KV over flat-file paths
+# @status accepted
+# @rationale test-runner.sh now writes test_status to SQLite via state_update().
+#   Readers prefer the KV store for atomic, session-isolated reads. Flat-file paths
+#   (state/{phash}/test-status and .test-status) remain as fallbacks during the
+#   migration window so hooks that haven't yet been migrated continue to work.
 read_test_status() {
     local root="${1:-.}"
     local claude_dir
     claude_dir=$(PROJECT_ROOT="$root" get_claude_dir 2>/dev/null || echo "$root/.claude")
     local phash
     phash=$(project_hash "$root")
-    # New path: state/{phash}/test-status
+    TEST_RESULT="" TEST_FAILS="" TEST_TIME="" TEST_AGE=""
+    local now; now=$(date +%s)
+    # KV primary read (DEC-STATE-KV-005): state_read is available when state-lib.sh is loaded
+    if type state_read &>/dev/null; then
+        local _kv_ts_val
+        _kv_ts_val=$(state_read "test_status" 2>/dev/null || echo "")
+        if [[ -n "$_kv_ts_val" ]]; then
+            TEST_RESULT=$(printf '%s' "$_kv_ts_val" | cut -d'|' -f1)
+            TEST_FAILS=$(printf '%s' "$_kv_ts_val" | cut -d'|' -f2)
+            TEST_TIME=$(printf '%s' "$_kv_ts_val" | cut -d'|' -f3)
+            [[ "$TEST_TIME" =~ ^[0-9]+$ ]] || TEST_TIME=0
+            TEST_AGE=$(( now - TEST_TIME ))
+            return 0
+        fi
+    fi
+    # Flat-file fallback: state/{phash}/test-status (new path), then .test-status (legacy)
     local status_file="${claude_dir}/state/${phash}/test-status"
-    # Migration fallback: legacy .test-status
     if [[ ! -f "$status_file" ]]; then
         status_file="${claude_dir}/.test-status"
     fi
-    TEST_RESULT="" TEST_FAILS="" TEST_TIME="" TEST_AGE=""
     [[ -f "$status_file" ]] || return 1
     TEST_RESULT=$(cut -d'|' -f1 < "$status_file")
     TEST_FAILS=$(cut -d'|' -f2 < "$status_file")
     TEST_TIME=$(cut -d'|' -f3 < "$status_file")
-    local now; now=$(date +%s)
     # Guard: non-numeric TEST_TIME causes set -u crash in arithmetic context
     [[ "$TEST_TIME" =~ ^[0-9]+$ ]] || TEST_TIME=0
     TEST_AGE=$(( now - TEST_TIME ))

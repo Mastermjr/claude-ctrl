@@ -641,26 +641,39 @@ if $_RUN_SUMMARY; then
     fi
 
     # Test status (staleness-guarded)
-    # Check new path (state/{phash}/test-status) first, fall back to legacy .test-status
+    # KV primary (DEC-STATE-KV-005): state_read "test_status", flat-file fallback
     TEST_RESULT="unknown"
     TEST_FAILS=0
     _PHASH_TS=$(project_hash "$PROJECT_ROOT")
-    TEST_STATUS_FILE="${CLAUDE_DIR}/state/${_PHASH_TS}/test-status"
-    if [[ ! -f "$TEST_STATUS_FILE" ]]; then
-        TEST_STATUS_FILE="${CLAUDE_DIR}/.test-status"
+    _STOP_KV_TS=""
+    if type state_read &>/dev/null; then
+        _STOP_KV_TS=$(state_read "test_status" 2>/dev/null || echo "")
     fi
-
-    # Sleep loop removed (DEC-PERF-003): waiting 0-3.5s per turn for test-runner.sh
-    # is unacceptable overhead. If .test-status doesn't exist yet, TEST_RESULT stays
-    # "unknown" — the next stop.sh call catches it. Max latency: 1 turn.
-
-    if [[ -f "$TEST_STATUS_FILE" ]]; then
-        FILE_MOD=$(stat -c '%Y' "$TEST_STATUS_FILE" 2>/dev/null || stat -f '%m' "$TEST_STATUS_FILE" 2>/dev/null || echo "0")
-        NOW=$(date +%s)
-        FILE_AGE=$(( NOW - FILE_MOD ))
-        if [[ "$FILE_AGE" -le "$SESSION_STALENESS_THRESHOLD" ]]; then
-            TEST_RESULT=$(cut -d'|' -f1 "$TEST_STATUS_FILE")
-            TEST_FAILS=$(cut -d'|' -f2 "$TEST_STATUS_FILE")
+    if [[ -n "$_STOP_KV_TS" ]]; then
+        _STOP_TS_TIME=$(printf '%s' "$_STOP_KV_TS" | cut -d'|' -f3)
+        [[ "$_STOP_TS_TIME" =~ ^[0-9]+$ ]] || _STOP_TS_TIME=0
+        _STOP_NOW=$(date +%s)
+        _STOP_FILE_AGE=$(( _STOP_NOW - _STOP_TS_TIME ))
+        if [[ "$_STOP_FILE_AGE" -le "$SESSION_STALENESS_THRESHOLD" ]]; then
+            TEST_RESULT=$(printf '%s' "$_STOP_KV_TS" | cut -d'|' -f1)
+            TEST_FAILS=$(printf '%s' "$_STOP_KV_TS" | cut -d'|' -f2)
+        fi
+    else
+        TEST_STATUS_FILE="${CLAUDE_DIR}/state/${_PHASH_TS}/test-status"
+        if [[ ! -f "$TEST_STATUS_FILE" ]]; then
+            TEST_STATUS_FILE="${CLAUDE_DIR}/.test-status"
+        fi
+        # Sleep loop removed (DEC-PERF-003): waiting 0-3.5s per turn for test-runner.sh
+        # is unacceptable overhead. If .test-status doesn't exist yet, TEST_RESULT stays
+        # "unknown" -- the next stop.sh call catches it. Max latency: 1 turn.
+        if [[ -f "$TEST_STATUS_FILE" ]]; then
+            FILE_MOD=$(stat -c '%Y' "$TEST_STATUS_FILE" 2>/dev/null || stat -f '%m' "$TEST_STATUS_FILE" 2>/dev/null || echo "0")
+            NOW=$(date +%s)
+            FILE_AGE=$(( NOW - FILE_MOD ))
+            if [[ "$FILE_AGE" -le "$SESSION_STALENESS_THRESHOLD" ]]; then
+                TEST_RESULT=$(cut -d'|' -f1 "$TEST_STATUS_FILE")
+                TEST_FAILS=$(cut -d'|' -f2 "$TEST_STATUS_FILE")
+            fi
         fi
     fi
 

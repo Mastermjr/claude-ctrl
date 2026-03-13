@@ -1218,22 +1218,43 @@ done
 # test-status is now a hard gate for commits (guard.sh Checks 6/7).
 # Stale passing results from a previous session must not satisfy the gate.
 # test-runner.sh will regenerate it after the first Write/Edit in this session.
-# Check new path (state/{phash}/test-status) first, fall back to legacy .test-status.
+# Read: KV primary (DEC-STATE-KV-005), state/{phash}/test-status fallback, .test-status legacy.
+# Delete: KV + both flat-file paths.
 _NEW_TEST="${CLAUDE_DIR}/state/${_PHASH}/test-status"
 _OLD_TEST="${CLAUDE_DIR}/.test-status"
 TEST_STATUS=""
-if [[ -f "$_NEW_TEST" ]]; then
-    TEST_STATUS="$_NEW_TEST"
-elif [[ -f "$_OLD_TEST" ]]; then
-    TEST_STATUS="$_OLD_TEST"
+TS_RESULT=""
+TS_FAILS=0
+# KV primary read (DEC-STATE-KV-005)
+if type state_read &>/dev/null; then
+    _kv_ts=$(state_read "test_status" 2>/dev/null || echo "")
+    if [[ -n "$_kv_ts" ]]; then
+        TS_RESULT=$(printf '%s' "$_kv_ts" | cut -d'|' -f1)
+        TS_FAILS=$(printf '%s' "$_kv_ts" | cut -d'|' -f2)
+        TEST_STATUS="kv"
+    fi
 fi
-if [[ -n "$TEST_STATUS" && -f "$TEST_STATUS" ]]; then
-    TS_RESULT=$(cut -d'|' -f1 "$TEST_STATUS")
-    TS_FAILS=$(cut -d'|' -f2 "$TEST_STATUS")
+# Flat-file fallback (legacy paths)
+if [[ -z "$TEST_STATUS" ]]; then
+    if [[ -f "$_NEW_TEST" ]]; then
+        TEST_STATUS="$_NEW_TEST"
+    elif [[ -f "$_OLD_TEST" ]]; then
+        TEST_STATUS="$_OLD_TEST"
+    fi
+    if [[ -n "$TEST_STATUS" && -f "$TEST_STATUS" ]]; then
+        TS_RESULT=$(cut -d'|' -f1 "$TEST_STATUS")
+        TS_FAILS=$(cut -d'|' -f2 "$TEST_STATUS")
+    fi
+fi
+if [[ -n "$TEST_STATUS" ]]; then
     if [[ "$TS_RESULT" == "fail" ]]; then
         CONTEXT_PARTS+=("WARNING: Last test run FAILED ($TS_FAILS failures). test-gate.sh will block source writes until tests pass.")
     fi
-    rm -f "$_NEW_TEST" "$_OLD_TEST"  # Clean both locations
+    # Delete KV + flat-file entries
+    if type state_delete &>/dev/null; then
+        state_delete "test_status" 2>/dev/null || true
+    fi
+    rm -f "$_NEW_TEST" "$_OLD_TEST"  # Clean both flat-file locations
 fi
 
 # --- Smoke test: validate library sourcing ---

@@ -231,14 +231,25 @@ case "$AGENT_TYPE" in
             CONTEXT_PARTS+=("CRITICAL FIRST ACTION: No worktree detected. You MUST create a git worktree BEFORE writing any code. Run: git worktree add ../\<feature-name\> -b \<feature-name\> main — then cd into the worktree and work there. Do NOT write source code on main.")
         fi
         CONTEXT_PARTS+=("Role: Implementer — test-first development in isolated worktrees. Add @decision annotations to ${DECISION_LINE_THRESHOLD}+ line files. NEVER work on main. The branch-guard hook will DENY any source file writes on main.")
-        # Inject test status
-        TEST_STATUS_FILE="${CLAUDE_DIR}/.test-status"
-        if [[ -f "$TEST_STATUS_FILE" ]]; then
-            TS_RESULT=$(cut -d'|' -f1 "$TEST_STATUS_FILE")
-            TS_FAILS=$(cut -d'|' -f2 "$TEST_STATUS_FILE")
-            if [[ "$TS_RESULT" == "fail" ]]; then
-                CONTEXT_PARTS+=("WARNING: Tests currently FAILING ($TS_FAILS failures). Fix before proceeding.")
+        # Inject test status — KV primary (DEC-STATE-KV-005), flat-file fallback
+        TS_RESULT=""
+        TS_FAILS=0
+        if type state_read &>/dev/null; then
+            _impl_kv_ts=$(state_read "test_status" 2>/dev/null || echo "")
+            if [[ -n "$_impl_kv_ts" ]]; then
+                TS_RESULT=$(printf '%s' "$_impl_kv_ts" | cut -d'|' -f1)
+                TS_FAILS=$(printf '%s' "$_impl_kv_ts" | cut -d'|' -f2)
             fi
+        fi
+        if [[ -z "$TS_RESULT" ]]; then
+            TEST_STATUS_FILE="${CLAUDE_DIR}/.test-status"
+            if [[ -f "$TEST_STATUS_FILE" ]]; then
+                TS_RESULT=$(cut -d'|' -f1 "$TEST_STATUS_FILE")
+                TS_FAILS=$(cut -d'|' -f2 "$TEST_STATUS_FILE")
+            fi
+        fi
+        if [[ "$TS_RESULT" == "fail" ]]; then
+            CONTEXT_PARTS+=("WARNING: Tests currently FAILING ($TS_FAILS failures). Fix before proceeding.")
         fi
         get_research_status "$PROJECT_ROOT"
         if [[ "$RESEARCH_EXISTS" == "true" ]]; then
@@ -370,14 +381,25 @@ case "$AGENT_TYPE" in
         _PHASH_GSS=$(project_hash "$PROJECT_ROOT")
         mkdir -p "${CLAUDE_DIR}/state/${_PHASH_GSS}" 2>/dev/null || true
         git -C "$PROJECT_ROOT" rev-parse HEAD > "${CLAUDE_DIR}/state/${_PHASH_GSS}/guardian-start-sha" 2>/dev/null || true
-        # Inject test status
-        TEST_STATUS_FILE="${CLAUDE_DIR}/.test-status"
-        if [[ -f "$TEST_STATUS_FILE" ]]; then
-            TS_RESULT=$(cut -d'|' -f1 "$TEST_STATUS_FILE")
-            TS_FAILS=$(cut -d'|' -f2 "$TEST_STATUS_FILE")
-            if [[ "$TS_RESULT" == "fail" ]]; then
-                CONTEXT_PARTS+=("CRITICAL: Tests FAILING ($TS_FAILS failures). Do NOT commit/merge until tests pass.")
+        # Inject test status — KV primary (DEC-STATE-KV-005), flat-file fallback
+        TS_RESULT=""
+        TS_FAILS=0
+        if type state_read &>/dev/null; then
+            _guard_kv_ts=$(state_read "test_status" 2>/dev/null || echo "")
+            if [[ -n "$_guard_kv_ts" ]]; then
+                TS_RESULT=$(printf '%s' "$_guard_kv_ts" | cut -d'|' -f1)
+                TS_FAILS=$(printf '%s' "$_guard_kv_ts" | cut -d'|' -f2)
             fi
+        fi
+        if [[ -z "$TS_RESULT" ]]; then
+            TEST_STATUS_FILE="${CLAUDE_DIR}/.test-status"
+            if [[ -f "$TEST_STATUS_FILE" ]]; then
+                TS_RESULT=$(cut -d'|' -f1 "$TEST_STATUS_FILE")
+                TS_FAILS=$(cut -d'|' -f2 "$TEST_STATUS_FILE")
+            fi
+        fi
+        if [[ "$TS_RESULT" == "fail" ]]; then
+            CONTEXT_PARTS+=("CRITICAL: Tests FAILING ($TS_FAILS failures). Do NOT commit/merge until tests pass.")
         fi
         # Inject session summary for richer commit messages
         SESSION_SUMMARY=$(get_session_summary_context "$PROJECT_ROOT" 2>/dev/null || echo "")
