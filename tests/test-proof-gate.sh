@@ -478,6 +478,135 @@ fi
 cd "$PROJECT_ROOT"
 rm -rf "$TEMP_REPO"
 
+# --- Tests 21-24: Check 8 + Check 10 read from SQLite (require_state fix, issue #237) ---
+#
+# These tests verify that pre-bash.sh Check 8 and Check 10 call require_state()
+# before proof_state_get(), so they read proof state from SQLite — not just the
+# flat-file fallback. Tests seed SQLite only (no flat file) to prove SQLite is
+# the actual read path after the fix.
+#
+# Before the fix: proof_state_get() is never available (require_state not called),
+# so the gate silently falls back to the flat file and misses fresh SQLite state.
+# After the fix: require_state is called → proof_state_get() reads SQLite correctly.
+
+# Helper: seed SQLite proof state and run Check 8 (commit gate)
+run_guard_proof_sqlite() {
+    local command="$1"
+    local sqlite_status="$2"  # Status to seed into SQLite, or "missing" for no entry
+
+    local TEMP_REPO
+    TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-pg-sqlite-XXXXXX")
+    _CLEANUP_DIRS+=("$TEMP_REPO")
+    git -C "$TEMP_REPO" init > /dev/null 2>&1
+    mkdir -p "$TEMP_REPO/.claude"
+
+    # Seed SQLite via proof_state_set — no flat file written
+    if [[ "$sqlite_status" != "missing" ]]; then
+        PROJECT_ROOT="$TEMP_REPO" CLAUDE_DIR="$TEMP_REPO/.claude" \
+            bash -c "source '${HOOKS_DIR}/source-lib.sh'; require_state; proof_state_set '${sqlite_status}' 'test-setup'" 2>/dev/null || true
+    fi
+
+    local INPUT_JSON
+    INPUT_JSON=$(cat <<EOF
+{
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cd $TEMP_REPO && $command"
+  }
+}
+EOF
+)
+
+    local OUTPUT
+    OUTPUT=$(cd "$TEMP_REPO" && \
+             echo "$INPUT_JSON" | CLAUDE_DIR="$TEMP_REPO/.claude" bash "$HOOKS_DIR/pre-bash.sh" 2>&1)
+    local EXIT_CODE=$?
+
+    cd "$PROJECT_ROOT"
+
+    echo "$OUTPUT"
+    return $EXIT_CODE
+}
+
+run_test "Check 8 (SQLite): needs-verification in SQLite blocks commit (require_state fix)"
+OUTPUT=$(run_guard_proof_sqlite "git commit -m test" "needs-verification" 2>&1) || true
+if echo "$OUTPUT" | grep -q "deny" && echo "$OUTPUT" | grep -q "needs-verification"; then
+    pass_test
+else
+    fail_test "Commit allowed with needs-verification in SQLite — require_state may not be called"
+fi
+
+run_test "Check 8 (SQLite): verified in SQLite allows commit"
+OUTPUT=$(run_guard_proof_sqlite "git commit -m test" "verified" 2>&1) || true
+if echo "$OUTPUT" | grep -q "deny"; then
+    fail_test "Commit blocked with verified status in SQLite"
+else
+    pass_test
+fi
+
+# Helper: seed SQLite proof state and run Check 10 (delete gate)
+run_guard_delete_sqlite() {
+    local sqlite_status="$1"
+    local with_agent_marker="$2"  # "true" to create an active agent marker
+
+    local TEMP_REPO
+    TEMP_REPO=$(mktemp -d "$PROJECT_ROOT/tmp/test-pg-del-sql-XXXXXX")
+    _CLEANUP_DIRS+=("$TEMP_REPO")
+    git -C "$TEMP_REPO" init > /dev/null 2>&1
+    mkdir -p "$TEMP_REPO/.claude"
+
+    local PHASH
+    PHASH=$(echo "$TEMP_REPO" | $_SHA256_CMD | cut -c1-8)
+
+    # Seed SQLite via proof_state_set — no flat file written
+    PROJECT_ROOT="$TEMP_REPO" CLAUDE_DIR="$TEMP_REPO/.claude" \
+        bash -c "source '${HOOKS_DIR}/source-lib.sh'; require_state; proof_state_set '${sqlite_status}' 'test-setup'" 2>/dev/null || true
+
+    local SID="test-c10-sql-$$"
+    local TRACE_D
+    TRACE_D=$(mktemp -d "$PROJECT_ROOT/tmp/test-traces-sql-XXXXXX")
+    _CLEANUP_DIRS+=("$TRACE_D")
+
+    if [[ "$with_agent_marker" == "true" ]]; then
+        echo "implementer-fake" > "$TRACE_D/.active-implementer-${SID}-${PHASH}"
+    fi
+
+    local INPUT_JSON
+    INPUT_JSON=$(cat <<EOF
+{
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rm $TEMP_REPO/.claude/.proof-status"
+  }
+}
+EOF
+)
+
+    local OUTPUT
+    OUTPUT=$(cd "$TEMP_REPO" && \
+             echo "$INPUT_JSON" | CLAUDE_SESSION_ID="$SID" TRACE_STORE="$TRACE_D" CLAUDE_DIR="$TEMP_REPO/.claude" bash "$HOOKS_DIR/pre-bash.sh" 2>&1) || true
+
+    cd "$PROJECT_ROOT"
+
+    echo "$OUTPUT"
+}
+
+run_test "Check 10 (SQLite): needs-verification in SQLite blocks deletion (require_state fix)"
+OUTPUT=$(run_guard_delete_sqlite "needs-verification" "true" 2>&1) || true
+if echo "$OUTPUT" | grep -q "deny" && echo "$OUTPUT" | grep -q "verification is active"; then
+    pass_test
+else
+    fail_test "Deletion allowed with needs-verification in SQLite — require_state may not be called in Check 10"
+fi
+
+run_test "Check 10 (SQLite): verified in SQLite allows deletion"
+OUTPUT=$(run_guard_delete_sqlite "verified" "false" 2>&1) || true
+if echo "$OUTPUT" | grep -q "deny"; then
+    fail_test "Deletion blocked with verified status in SQLite"
+else
+    pass_test
+fi
+
 # --- Summary ---
 echo ""
 echo "=========================================="

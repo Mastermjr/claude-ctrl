@@ -313,6 +313,9 @@ if [[ "$_c10_matches" == "true" ]]; then
     # _ps_phash is always computed for use in the active-agent marker check below.
     _ps_phash=$(project_hash "$(detect_project_root)")
     _ps_val=""
+    # Load state-lib so proof_state_get() is available for SQLite read.
+    # Same pattern as task-track.sh Gate A (DEC-STATE-DOTFILE-003, issue #237).
+    require_state 2>/dev/null || true
     if declare -f proof_state_get >/dev/null 2>&1; then
         _c10_pg=$(proof_state_get 2>/dev/null || echo "")
         [[ -n "$_c10_pg" ]] && _ps_val=$(echo "$_c10_pg" | cut -d'|' -f1)
@@ -879,9 +882,14 @@ if echo "$_stripped_cmd" | grep -qE 'git\s+[^|;&]*\b(commit|merge)([^a-zA-Z0-9-]
     if git -C "$PROOF_DIR" rev-parse --git-dir > /dev/null 2>&1; then
         # --- W2-1: Read proof status via proof_state_get() (with flat-file fallback) ---
         # proof_state_get() returns "status|epoch|updated_at|updated_by" or empty.
-        # The flat-file fallback in proof_state_get() ensures backward compatibility.
         # Gate logic (deny/allow) is unchanged — only the read path has changed.
         # DEC-STATE-UNIFY-004
+        #
+        # Load state-lib so proof_state_get() is available for SQLite read.
+        # Without require_state, proof_state_get() is never defined and the gate
+        # silently skips SQLite, falling through to the stale flat-file path.
+        # Same class of bug as task-track.sh Gate A fix (DEC-STATE-DOTFILE-003, #237).
+        require_state 2>/dev/null || true
         PROOF_STATUS=""
         if declare -f proof_state_get >/dev/null 2>&1; then
             _pg_result=$(PROJECT_ROOT="$PROOF_DIR" proof_state_get 2>/dev/null || echo "")
