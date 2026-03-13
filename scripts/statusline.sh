@@ -898,13 +898,13 @@ else
 fi
 
 # Compute lifetime token grand total segment
-# Format: "Project Lifetime: ∑<N> tks" — prefix clarifies this is a project-wide sum.
+# Format: "∑<N> tks" — compact lifetime sum; ∑ prefix indicates cumulative project total.
 # ∑ is U+2211 (mathematical summation), distinct from Σ (U+03A3 Greek capital letter).
 _token_grand_total=$(( cache_lifetime_tokens_int + total_tokens_int + cache_subagent_tokens_int ))
 grand_total_display=""
 if (( _token_grand_total > total_tokens_int + cache_subagent_tokens_int && _token_grand_total > 0 )); then
   grand_total_str=$(format_tokens "$_token_grand_total")
-  grand_total_display=$(printf '\033[2mProject Lifetime: ∑%s tks\033[0m' "$grand_total_str")
+  grand_total_display=$(printf '\033[2m∑%s tks\033[0m' "$grand_total_str")
 fi
 
 # Build cost display
