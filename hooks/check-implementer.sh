@@ -119,14 +119,22 @@ if [[ -n "$TRACE_ID" ]]; then
     if [[ -d "$TRACE_DIR/artifacts" ]]; then
         _impl_sm_present=false
         [[ -f "$TRACE_DIR/summary.md" ]] && _impl_sm_present=true
-        # Detect test_result early from .test-status (will be overwritten after auto-capture)
+        # Detect test_result early — KV primary (DEC-STATE-KV-005), flat-file fallback
         _impl_ts_early="not-provided"
-        for _impl_ts_f in "${CLAUDE_DIR}/.test-status" "$PROJECT_ROOT/.test-status" "$PROJECT_ROOT/.claude/.test-status"; do
-            if [[ -f "$_impl_ts_f" ]]; then
-                _impl_ts_early=$(cut -d'|' -f1 "$_impl_ts_f" 2>/dev/null | tr -d '[:space:]' || echo "not-provided")
-                break
+        if type state_read &>/dev/null; then
+            _impl_kv_early=$(state_read "test_status" 2>/dev/null || echo "")
+            if [[ -n "$_impl_kv_early" ]]; then
+                _impl_ts_early=$(printf '%s' "$_impl_kv_early" | cut -d'|' -f1 | tr -d '[:space:]')
             fi
-        done
+        fi
+        if [[ "$_impl_ts_early" == "not-provided" ]]; then
+            for _impl_ts_f in "${CLAUDE_DIR}/.test-status" "$PROJECT_ROOT/.test-status" "$PROJECT_ROOT/.claude/.test-status"; do
+                if [[ -f "$_impl_ts_f" ]]; then
+                    _impl_ts_early=$(cut -d'|' -f1 "$_impl_ts_f" 2>/dev/null | tr -d '[:space:]' || echo "not-provided")
+                    break
+                fi
+            done
+        fi
         cat > "$TRACE_DIR/compliance.json" << COMPLIANCE_IMPL_INIT_EOF
 {
   "agent_type": "implementer",
@@ -190,20 +198,33 @@ COMPLIANCE_IMPL_INIT_EOF
         sort -u "$TRACE_DIR/artifacts/files-changed.txt" -o "$TRACE_DIR/artifacts/files-changed.txt" 2>/dev/null || true
     fi
 
-    # Auto-capture test-output.txt from .test-status if agent didn't write it (best-effort).
-    # .test-status format is "result|fail_count|timestamp". The capture adds a
-    # human-readable prefix so report.sh can display it as evidence text.
+    # Auto-capture test-output.txt from test_status if agent didn't write it (best-effort).
+    # Format is "result|fail_count|timestamp". The capture adds a human-readable prefix
+    # so report.sh can display it as evidence text.
+    # KV primary (DEC-STATE-KV-005), flat-file fallback.
     if [[ -d "$TRACE_DIR/artifacts" && ! -f "$TRACE_DIR/artifacts/test-output.txt" ]]; then
         TS_FILE=""
-        [[ -f "${CLAUDE_DIR}/.test-status" ]] && TS_FILE="${CLAUDE_DIR}/.test-status"
-        [[ -z "$TS_FILE" && -f "$PROJECT_ROOT/.test-status" ]] && TS_FILE="$PROJECT_ROOT/.test-status"
-        [[ -z "$TS_FILE" && -f "$PROJECT_ROOT/.claude/.test-status" ]] && TS_FILE="$PROJECT_ROOT/.claude/.test-status"
-        if [[ -n "$TS_FILE" ]]; then
-            echo "# Auto-captured from .test-status at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TRACE_DIR/artifacts/test-output.txt"
-            cat "$TS_FILE" >> "$TRACE_DIR/artifacts/test-output.txt" 2>/dev/null || true
-            TS_RESULT=$(cut -d'|' -f1 "$TS_FILE" 2>/dev/null || echo "unknown")
+        _AC_TS_VAL=""
+        if type state_read &>/dev/null; then
+            _AC_TS_VAL=$(state_read "test_status" 2>/dev/null || echo "")
+        fi
+        if [[ -n "$_AC_TS_VAL" ]]; then
+            echo "# Auto-captured from test_status KV at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TRACE_DIR/artifacts/test-output.txt"
+            echo "$_AC_TS_VAL" >> "$TRACE_DIR/artifacts/test-output.txt"
+            TS_RESULT=$(printf '%s' "$_AC_TS_VAL" | cut -d'|' -f1 || echo "unknown")
             [[ "$TS_RESULT" == "pass" ]] && echo "Tests passed" >> "$TRACE_DIR/artifacts/test-output.txt"
             [[ "$TS_RESULT" == "fail" ]] && echo "Tests failed" >> "$TRACE_DIR/artifacts/test-output.txt"
+        else
+            [[ -f "${CLAUDE_DIR}/.test-status" ]] && TS_FILE="${CLAUDE_DIR}/.test-status"
+            [[ -z "$TS_FILE" && -f "$PROJECT_ROOT/.test-status" ]] && TS_FILE="$PROJECT_ROOT/.test-status"
+            [[ -z "$TS_FILE" && -f "$PROJECT_ROOT/.claude/.test-status" ]] && TS_FILE="$PROJECT_ROOT/.claude/.test-status"
+            if [[ -n "$TS_FILE" ]]; then
+                echo "# Auto-captured from .test-status at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TRACE_DIR/artifacts/test-output.txt"
+                cat "$TS_FILE" >> "$TRACE_DIR/artifacts/test-output.txt" 2>/dev/null || true
+                TS_RESULT=$(cut -d'|' -f1 "$TS_FILE" 2>/dev/null || echo "unknown")
+                [[ "$TS_RESULT" == "pass" ]] && echo "Tests passed" >> "$TRACE_DIR/artifacts/test-output.txt"
+                [[ "$TS_RESULT" == "fail" ]] && echo "Tests failed" >> "$TRACE_DIR/artifacts/test-output.txt"
+            fi
         fi
     fi
 
@@ -229,16 +250,25 @@ COMPLIANCE_IMPL_INIT_EOF
         $_sm_present && _sm_source='"agent"'  # summary.md is always agent-written (fallback writes it as agent response)
         $_dp_present && _dp_source='"agent"'  # diff.patch is always agent-written if present
 
-        # Determine test_result from .test-status
+        # Determine test_result — KV primary (DEC-STATE-KV-005), flat-file fallback
         _ts_result="not-provided"
         _ts_source="null"
         _TS_FILE=""
-        [[ -f "${CLAUDE_DIR}/.test-status" ]] && _TS_FILE="${CLAUDE_DIR}/.test-status"
-        [[ -z "$_TS_FILE" && -f "$PROJECT_ROOT/.test-status" ]] && _TS_FILE="$PROJECT_ROOT/.test-status"
-        [[ -z "$_TS_FILE" && -f "$PROJECT_ROOT/.claude/.test-status" ]] && _TS_FILE="$PROJECT_ROOT/.claude/.test-status"
-        if [[ -n "$_TS_FILE" ]]; then
-            _ts_result=$(cut -d'|' -f1 "$_TS_FILE" 2>/dev/null | tr -d '[:space:]' || echo "not-provided")
-            _ts_source='".test-status"'
+        if type state_read &>/dev/null; then
+            _comp_kv_ts=$(state_read "test_status" 2>/dev/null || echo "")
+            if [[ -n "$_comp_kv_ts" ]]; then
+                _ts_result=$(printf '%s' "$_comp_kv_ts" | cut -d'|' -f1 | tr -d '[:space:]')
+                _ts_source='"test_status_kv"'
+            fi
+        fi
+        if [[ "$_ts_result" == "not-provided" ]]; then
+            [[ -f "${CLAUDE_DIR}/.test-status" ]] && _TS_FILE="${CLAUDE_DIR}/.test-status"
+            [[ -z "$_TS_FILE" && -f "$PROJECT_ROOT/.test-status" ]] && _TS_FILE="$PROJECT_ROOT/.test-status"
+            [[ -z "$_TS_FILE" && -f "$PROJECT_ROOT/.claude/.test-status" ]] && _TS_FILE="$PROJECT_ROOT/.claude/.test-status"
+            if [[ -n "$_TS_FILE" ]]; then
+                _ts_result=$(cut -d'|' -f1 "$_TS_FILE" 2>/dev/null | tr -d '[:space:]' || echo "not-provided")
+                _ts_source='".test-status"'
+            fi
         fi
 
         cat > "$TRACE_DIR/compliance.json" << COMPLIANCE_EOF

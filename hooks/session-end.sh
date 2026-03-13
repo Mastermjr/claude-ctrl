@@ -128,11 +128,15 @@ if [[ -f "$SESSION_EVENT_FILE" && -s "$SESSION_EVENT_FILE" ]]; then
     OUTCOME="unknown"
     PROOF_FILE=$(resolve_proof_file)
     [[ ! -f "$PROOF_FILE" ]] && PROOF_FILE=""
-    # Check new path (state/{phash}/test-status) first, fall back to legacy
+    # Read test-status — KV primary (DEC-STATE-KV-005), flat-file fallback
     _PHASH_SE=$(project_hash "$PROJECT_ROOT")
     TEST_STATUS_FILE="${CLAUDE_DIR}/state/${_PHASH_SE}/test-status"
     if [[ ! -f "$TEST_STATUS_FILE" ]]; then
         TEST_STATUS_FILE="${CLAUDE_DIR}/.test-status"
+    fi
+    _SE_TS_VAL=""
+    if type state_read &>/dev/null; then
+        _SE_TS_VAL=$(state_read "test_status" 2>/dev/null || echo "")
     fi
     if [[ -n "$PROOF_FILE" && -f "$PROOF_FILE" ]]; then
         if validate_state_file "$PROOF_FILE" 2; then
@@ -144,8 +148,15 @@ if [[ -f "$SESSION_EVENT_FILE" && -s "$SESSION_EVENT_FILE" ]]; then
         # Clean proof-status after reading — prevents stale files surviving normal session-end (Bug D)
         [[ -n "$PROOF_FILE" && -f "$PROOF_FILE" ]] && rm -f "$PROOF_FILE"
     fi
-    if [[ "$OUTCOME" == "unknown" && -f "$TEST_STATUS_FILE" ]]; then
-        TS_VAL=$(cut -d'|' -f1 "$TEST_STATUS_FILE" 2>/dev/null || echo "")
+    if [[ "$OUTCOME" == "unknown" ]]; then
+        # Prefer KV value; fall back to flat-file
+        if [[ -n "$_SE_TS_VAL" ]]; then
+            TS_VAL=$(printf '%s' "$_SE_TS_VAL" | cut -d'|' -f1)
+        elif [[ -f "$TEST_STATUS_FILE" ]]; then
+            TS_VAL=$(cut -d'|' -f1 "$TEST_STATUS_FILE" 2>/dev/null || echo "")
+        else
+            TS_VAL=""
+        fi
         if [[ "$TS_VAL" == "pass" ]]; then
             OUTCOME="tests-passing"
         elif [[ "$TS_VAL" == "fail" ]]; then

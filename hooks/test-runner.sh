@@ -200,7 +200,15 @@ rm -f "${LOCK_DIR}/.test-runner.out"
 date +%s > "$LAST_RUN_FILE"
 
 # --- Write test status for test-gate.sh and guard.sh ---
-# Dual-write: state/{phash}/test-status (new) + .test-status (legacy migration)
+# Triple-write: SQLite KV (primary) + state/{phash}/test-status (legacy new) + .test-status (legacy old)
+#
+# @decision DEC-STATE-KV-005
+# @title Migrate test_status to SQLite KV store
+# @status accepted
+# @rationale state_update provides atomic writes and eliminates the multi-path flat-file
+#   lookup required by all readers. Dual flat-file writes are retained during the migration
+#   window so readers that haven't migrated yet continue to work. Once all readers prefer
+#   the KV store this block can drop the two printf lines.
 _PHASH_TR=$(project_hash "$PROJECT_ROOT")
 _STATE_TEST="${CLAUDE_DIR}/state/${_PHASH_TR}/test-status"
 _OLD_TEST="${CLAUDE_DIR}/.test-status"
@@ -209,6 +217,8 @@ if [[ "$TEST_EXIT" -ne 0 ]]; then
     FAIL_COUNT=$(echo "$TEST_OUTPUT" | grep -cE '(FAIL|FAILED|ERROR|fail)' || echo "1")
     [[ "$FAIL_COUNT" -eq 0 ]] && FAIL_COUNT=1
     _test_content="fail|${FAIL_COUNT}|$(date +%s)"
+    require_state 2>/dev/null || true
+    state_update "test_status" "$_test_content" "test-runner" 2>/dev/null || true
     printf '%s\n' "$_test_content" > "$_STATE_TEST"
     printf '%s\n' "$_test_content" > "$_OLD_TEST"
     # Extract top failing assertion for trajectory tracking
@@ -221,6 +231,8 @@ if [[ "$TEST_EXIT" -ne 0 ]]; then
       "$PROJECT_ROOT"
 else
     _test_content="pass|0|$(date +%s)"
+    require_state 2>/dev/null || true
+    state_update "test_status" "$_test_content" "test-runner" 2>/dev/null || true
     printf '%s\n' "$_test_content" > "$_STATE_TEST"
     printf '%s\n' "$_test_content" > "$_OLD_TEST"
     append_session_event "test_run" \
