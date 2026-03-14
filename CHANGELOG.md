@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `feature/fix-doc-counts`: Strip rotting line/file counts from ARCHITECTURE.md and HOOKS.md, add 7 missing files to directory map, fix stale consolidation references in CONTRIBUTING.md
 - `feature/fix-backfill-phash`: Fix backfill-token-history.sh hashing project NAME instead of project ROOT PATH, which orphaned 5.6M tokens from per-project lifetime counts (DEC-BACKFILL-PHASH-002)
 
 ## [4.0.0] - 2026-03-14
