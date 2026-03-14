@@ -31,33 +31,11 @@ I've never been much of a gambler myself.
 
 ---
 
-<h2 align="center">Metanoia v4.0</h2>
+<h2 align="center">Homonia v4.0</h2>
 
-<p align="center"><em>metanoia (n.) — a fundamental change in thinking; a transformative shift in approach</em></p>
+<p align="center"><em>homonia (n.) — harmony of minds; concord</em></p>
 
 <p align="center"><strong>SQLite unified state · Database Safety Framework · 485 tests</strong></p>
-
----
-
-### Performance (v2.1 → v3.0)
-
-**BLUF: v3.0 delivers 75% more successes at the same cost per success.** The governance overhead pays for itself.
-
-Measured across 18 trials (3 tasks × 3 trials × 2 configs) using the [Claude Code Performance Harness](https://github.com/juanandresgs/cc-perf-harness).
-
-v3.0 succeeds nearly twice as often across easy, medium, and hard tasks (78% vs 44%). When it fails, it wastes 62% fewer tokens (29% waste ratio vs 76%). It cracked the hard refactoring task that v2.1 couldn't solve at all (33% vs 0%).
-
-The multi-agent pipeline uses ~55% more turns per success (31 vs 20). Governance has a cost. But cost-per-success is identical (+1.3%) because three-quarters of v2.1's token budget went to trials that produced nothing.
-
-| Metric | v2.1 | v3.0 | Delta |
-|--------|------|------|-------|
-| Success Rate | 44% (4/9) | 78% (7/9) | **+77%** |
-| Token Waste Ratio | 76% | 29% | **-62%** |
-| CPSO (tokens/success) | 1,190,572 | 1,206,306 | +1.3% (same cost, 75% more successes) |
-| PAR-10 | 11,246,198 | 5,141,470 | **-54%** |
-| Turns/success | 20.0 | 31.0 | +55% (governance cost) |
-
-<sub>**CPSO** (Cost Per Successful Outcome) = total tokens ÷ successes — includes the cost of failures. **PAR-10** from SAT solver competitions — failed trials count 10× max, punishing unreliable configs. **Token Waste Ratio** = failed tokens ÷ total tokens.</sub>
 
 ---
 
@@ -109,11 +87,11 @@ Every arrow is a hook. Every feedback loop is mechanical. The model doesn't choo
 
 ### v4 Feature Highlights
 
-**Database Safety Framework** — defense-in-depth interception for database CLI commands (psql, mysql, sqlite3, mongosh, redis-cli), IaC operations (terraform destroy), container volume removal, and MCP JSON-RPC calls. Environment tiering: dev=permissive, staging=approval, prod=read-only.
+**SQLite Unified State** — all state lives in `state/state.db` (WAL mode): proof state, test status, session tokens, agent markers, and KV data. The State Unification initiative replaced 16 scattered dotfiles with a single SQLite backend, eliminating race conditions and giving concurrent agents clean transactional semantics. WAL mode means readers never block writers — parallel worktrees share state without contention.
 
-**AUTOVERIFY** — the tester's auto-verify signal (`AUTOVERIFY: CLEAN`) is operational in `post-task.sh`. When check-tester.sh detects high confidence with full coverage, it writes proof state = verified automatically without requiring manual user approval. If the signal is absent but tester evidence is clean, Guardian inference-based fallback (`INFER-VERIFY`) activates as a secondary path per DEC-AV-GUARDIAN-001. The phase 1 gate (`CLAUDE_ENABLE_SUBAGENT_AUTOVERIFY`) is currently disabled.
+**Database Safety Framework** — defense-in-depth interception for database CLI commands (psql, mysql, sqlite3, mongosh, redis-cli), IaC operations, container volume removal, and MCP JSON-RPC calls. Environment tiering: dev=permissive, staging=approval, prod=read-only.
 
-**SQLite Unified State** — all probe state, test status, session tokens, agent markers, and KV data live in `state/state.db` (WAL mode). The 16-migration State Unification initiative replaced all scattered dotfiles with a single SQLite backend. Legacy flat-file reads were removed; SQLite is now the sole canonical authority.
+**AUTOVERIFY** — when the tester agent produces high-confidence verification with full coverage, the system writes proof state automatically without requiring manual approval. Clean end-to-end verifications flow straight to the Guardian for commit and merge.
 
 ---
 
