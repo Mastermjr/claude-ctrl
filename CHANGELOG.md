@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- `feature/perf-rm-compact-heuristic`: Remove compaction heuristic from prompt-submit.sh — fixed thresholds (35/60 prompts, 45/90 minutes) designed for 200K context fired at ~17% usage with 1M context; 42-line block removed, replaced with DEC-PERF-007 annotation; 10 new tests verify removal (DEC-PERF-007)
 - `feature/perf-park-governor`: Park governor agent — remove from dispatch infrastructure to save ~4,200 tokens/session from Agent tool schema; governor.md, check-governor.sh, test-governor-wiring.sh deleted; settings.json/DISPATCH.md/ARCHITECTURE.md/README.md cleaned; SQLite governor.assessment events retained for future restoration (DEC-PERF-006, #253)
 
 ## [4.0.0] - 2026-03-14

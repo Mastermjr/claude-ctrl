@@ -572,49 +572,13 @@ _PC_CURRENT=$(state_read "prompt_count" 2>/dev/null || echo "")
 _PC_NEXT=$((_PC_CURRENT + 1))
 state_update "prompt_count" "$_PC_NEXT" "prompt-submit" 2>/dev/null || true
 
-# --- Compaction heuristic ---
-# @decision DEC-COMPACT-001
-# @title Smart compaction suggestions based on prompts and session duration
+# @decision DEC-PERF-007
+# @title Compaction heuristic removed — 1M context window makes fixed thresholds obsolete
 # @status accepted
-# @rationale Proactively suggest /compact at predictable checkpoints (35, 60 prompts
-# or 45, 90 minutes) to prevent context overflow. Primary trigger is prompt count
-# (more reliable). Secondary is session duration (catches long sessions with fewer
-# prompts). Narrow time windows prevent spam across multiple prompts.
-# DEC-PERF-003: flat-file fallbacks for prompt_count and session_start_epoch removed;
-# SQLite is sole authority as of 2026-03-14.
-_PC_KV_FOR_COMPACT=$(state_read "prompt_count" 2>/dev/null || echo "")
-if [[ -n "$_PC_KV_FOR_COMPACT" ]]; then
-    PROMPT_NUM="$_PC_KV_FOR_COMPACT"
-    [[ "$PROMPT_NUM" =~ ^[0-9]+$ ]] || PROMPT_NUM=0
-
-    SUGGEST_COMPACT=false
-    COMPACT_REASON=""
-
-    # Primary: prompt count thresholds
-    if [[ "$PROMPT_NUM" -eq 35 || "$PROMPT_NUM" -eq 60 ]]; then
-        SUGGEST_COMPACT=true
-        COMPACT_REASON="$PROMPT_NUM prompts in this session"
-    fi
-
-    # Secondary: session duration — SQLite sole authority (DEC-PERF-003)
-    START_EPOCH=""
-    if [[ "$SUGGEST_COMPACT" == "false" ]]; then
-        START_EPOCH=$(state_read "session_start_epoch" 2>/dev/null || echo "")
-        if [[ -n "$START_EPOCH" && "$START_EPOCH" != "0" ]]; then
-            NOW_EPOCH=$(date +%s)
-            ELAPSED_MIN=$(( (NOW_EPOCH - START_EPOCH) / 60 ))
-            if [[ "$ELAPSED_MIN" -ge 45 && "$ELAPSED_MIN" -le 47 ]] || \
-               [[ "$ELAPSED_MIN" -ge 90 && "$ELAPSED_MIN" -le 92 ]]; then
-                SUGGEST_COMPACT=true
-                COMPACT_REASON="${ELAPSED_MIN} minutes into session"
-            fi
-        fi
-    fi
-
-    if [[ "$SUGGEST_COMPACT" == "true" ]]; then
-        CONTEXT_PARTS+=("Context management: ${COMPACT_REASON}. Consider running /compact to preserve context and free up the context window.")
-    fi
-fi
+# @rationale Fixed thresholds (35/60 prompts, 45/90 minutes) were designed for 200K context.
+# With a 1M context window they fire at ~17% usage — far too early. Claude Code handles
+# auto-compaction natively; injecting a manual suggestion adds cache_read overhead without
+# benefit. Heuristic removed 2026-03-14. See commit for DEC-PERF-007 rationale.
 
 # --- Output ---
 if [[ ${#CONTEXT_PARTS[@]} -gt 0 ]]; then
