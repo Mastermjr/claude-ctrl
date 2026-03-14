@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `feature/fix-hash-length`: Standardize project hash to 8 chars via `project_hash()` — session-lib.sh and session-end.sh used 12-char inline `cut -c1-12` while all other sites used 8-char, causing session data written with 12-char hashes to be invisible to 8-char reads; now `project_hash()` is the universal single source of truth (DEC-HASH-CONSOLIDATE-001)
 - `feature/fix-backfill-phash`: Fix backfill-token-history.sh hashing project NAME instead of project ROOT PATH, which orphaned 5.6M tokens from per-project lifetime counts (DEC-BACKFILL-PHASH-002)
 
 ## [4.0.0] - 2026-03-14
