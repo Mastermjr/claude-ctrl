@@ -232,15 +232,23 @@ assert_contains "B11.T07: summary contains checked count" "2 commands checked" "
 assert_contains "B11.T08: summary contains blocked count" "1 blocked" "$_SUMMARY"
 assert_contains "B11.T09: summary contains warnings count" "2 warnings" "$_SUMMARY"
 
-# Empty stats via _db_read_session_stats when file missing
+# Empty stats via _db_read_session_stats when BOTH flat-file AND KV are absent.
+# Since DEC-V4-KV-001 (W2-1), _db_read_session_stats prefers KV over flat-file.
+# Deleting just the flat-file is not enough — KV still holds the values from
+# previous increments. Delete both to test the zero-default behavior.
 rm -f "${_TMP_STATS_DIR}/.db-safety-stats"
+if type state_delete &>/dev/null 2>&1; then
+    state_delete "db_safety_checked" 2>/dev/null || true
+    state_delete "db_safety_blocked" 2>/dev/null || true
+    state_delete "db_safety_warned"  2>/dev/null || true
+fi
 _STATS=$(_db_read_session_stats)
 _CHECKED=$(echo "$_STATS" | grep "^checked=" | cut -d= -f2)
 _BLOCKED=$(echo "$_STATS" | grep "^blocked=" | cut -d= -f2)
 _WARNED=$(echo "$_STATS" | grep "^warned=" | cut -d= -f2)
-assert_eq "B11.T10: missing file → checked=0" "0" "$_CHECKED"
-assert_eq "B11.T11: missing file → blocked=0" "0" "$_BLOCKED"
-assert_eq "B11.T12: missing file → warned=0" "0" "$_WARNED"
+assert_eq "B11.T10: missing file+KV → checked=0" "0" "$_CHECKED"
+assert_eq "B11.T11: missing file+KV → blocked=0" "0" "$_BLOCKED"
+assert_eq "B11.T12: missing file+KV → warned=0" "0" "$_WARNED"
 
 # Restore CLAUDE_DIR and clean up temp dir
 export CLAUDE_DIR="$_ORIG_CLAUDE_DIR"

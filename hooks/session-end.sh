@@ -489,6 +489,18 @@ rm -f "${CLAUDE_DIR}/.session-decisions"*
 # DEC-STATE-KV-002: delete prompt_count and session_start_epoch from SQLite KV (primary)
 state_delete "prompt_count" 2>/dev/null || true
 state_delete "session_start_epoch" 2>/dev/null || true
+# DEC-V4-KV-001: delete db-safety stats KV keys (session-scoped counters)
+state_delete "db_safety_checked" 2>/dev/null || true
+state_delete "db_safety_blocked" 2>/dev/null || true
+state_delete "db_safety_warned"  2>/dev/null || true
+# DEC-V4-KV-001: delete MCP rate-state and credential advisory KV keys (session-scoped)
+state_delete "mcp_rate_count"          2>/dev/null || true
+state_delete "mcp_rate_start"          2>/dev/null || true
+state_delete "mcp_credential_advisory" 2>/dev/null || true
+# Flat-file fallback cleanup during migration window (DEC-V4-KV-001)
+rm -f "${CLAUDE_DIR}/.db-safety-stats"
+rm -f "${CLAUDE_DIR}/.mcp-rate-state"
+rm -f "${CLAUDE_DIR}/.mcp-credential-advisory-emitted"
 # Flat-file fallback cleanup during migration window
 rm -f "${CLAUDE_DIR}/.prompt-count-"*
 rm -f "${CLAUDE_DIR}/.lint-cache"

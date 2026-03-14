@@ -44,6 +44,15 @@
 _DB_SAFETY_LIB_LOADED=1
 _DB_SAFETY_LIB_VERSION=3
 
+# Load state-lib for KV dual-write (DEC-V4-KV-001).
+# require_state is a no-op if state-lib is already loaded (idempotent guard).
+# Called here at load time so all functions below can use state_read/state_update.
+# Wrapped in a subshell-safe guard: if require_state is not yet in scope (i.e., this
+# lib is sourced before source-lib.sh in tests), we skip silently — flat-file path works.
+if type require_state &>/dev/null 2>&1; then
+    require_state
+fi
+
 # ---------------------------------------------------------------------------
 # _db_detect_cli COMMAND
 #
@@ -1368,25 +1377,54 @@ _db_format_advisory() {
 # ---------------------------------------------------------------------------
 # _db_increment_stat CATEGORY
 #
-# Increments a named counter in the db-safety stats file.
-# Creates the file if it does not exist.
+# Increments a named counter in the db-safety stats.
+# Dual-write: SQLite KV (primary, DEC-V4-KV-001) + flat-file fallback.
 #
 # Categories: checked | blocked | warned
 #   checked — every DB CLI or MCP DB tool detection
 #   blocked — every deny emission
 #   warned  — every advisory emission
 #
-# File format: KEY=VALUE (one per line, grep-friendly)
-# File location: ${CLAUDE_DIR:-$HOME/.claude}/.db-safety-stats
+# KV keys: db_safety_checked, db_safety_blocked, db_safety_warned
+# Flat-file: ${CLAUDE_DIR:-$HOME/.claude}/.db-safety-stats (KEY=VALUE, one per line)
 #
-# Uses atomic temp+mv pattern to avoid partial writes during concurrent hook
-# invocations (multiple tabs, parallel tool calls).
+# Read path (KV primary → flat-file fallback):
+#   1. Try state_read "db_safety_<category>"
+#   2. If empty, read from flat-file
+# Write path (dual-write):
+#   1. state_update "db_safety_<category>" with incremented value
+#   2. Atomic temp+mv write to flat-file (preserves all three counters)
+#
+# @decision DEC-V4-KV-001
+# @title Dual-write db-safety stats to SQLite KV + flat-file
+# @status accepted
+# @rationale Flat-file .db-safety-stats requires read-modify-write with temp+mv for
+#   atomicity — each increment reads all 3 counters, increments one, and rewrites all.
+#   SQLite KV state_update is atomic per-key (BEGIN IMMEDIATE) — no read-modify-write
+#   needed for individual key increments. KV is now the primary read source;
+#   flat-file is kept as fallback during migration window and for tools that read it
+#   directly (stop.sh, observatory). Session-end.sh deletes KV keys (session-scoped).
 # ---------------------------------------------------------------------------
 _db_increment_stat() {
     local category="${1:-checked}"
     local stats_file="${CLAUDE_DIR:-$HOME/.claude}/.db-safety-stats"
 
-    # Read current values (default to 0)
+    # Map category to KV key name
+    local kv_key
+    case "$category" in
+        checked) kv_key="db_safety_checked" ;;
+        blocked) kv_key="db_safety_blocked" ;;
+        warned)  kv_key="db_safety_warned"  ;;
+        *)       kv_key="db_safety_checked" ;;
+    esac
+
+    # --- KV primary path: read current value from SQLite ---
+    local kv_val=""
+    if type state_read &>/dev/null 2>&1; then
+        kv_val=$(state_read "$kv_key" 2>/dev/null || echo "")
+    fi
+
+    # --- Flat-file read for fallback and for maintaining sibling counters ---
     local checked=0 blocked=0 warned=0
     if [[ -f "$stats_file" ]]; then
         local _v
@@ -1398,6 +1436,15 @@ _db_increment_stat() {
         [[ "$_v" =~ ^[0-9]+$ ]] && warned="$_v"
     fi
 
+    # Use KV value if present (more reliable — survives concurrent writes better)
+    if [[ "$kv_val" =~ ^[0-9]+$ ]]; then
+        case "$category" in
+            checked) checked="$kv_val" ;;
+            blocked) blocked="$kv_val" ;;
+            warned)  warned="$kv_val"  ;;
+        esac
+    fi
+
     # Increment the requested counter
     case "$category" in
         checked) checked=$(( checked + 1 )) ;;
@@ -1405,7 +1452,16 @@ _db_increment_stat() {
         warned)  warned=$(( warned + 1 )) ;;
     esac
 
-    # Atomic write via temp file + mv (POSIX rename is atomic on same filesystem)
+    # --- KV write (primary, DEC-V4-KV-001) ---
+    if type state_update &>/dev/null 2>&1; then
+        case "$category" in
+            checked) state_update "db_safety_checked" "$checked" "db-safety" 2>/dev/null || true ;;
+            blocked) state_update "db_safety_blocked" "$blocked" "db-safety" 2>/dev/null || true ;;
+            warned)  state_update "db_safety_warned"  "$warned"  "db-safety" 2>/dev/null || true ;;
+        esac
+    fi
+
+    # --- Flat-file write (fallback, atomic temp+mv) ---
     local tmp_file="${stats_file}.tmp.$$"
     {
         printf 'checked=%d\n' "$checked"
@@ -1419,11 +1475,11 @@ _db_increment_stat() {
 # ---------------------------------------------------------------------------
 # _db_session_summary
 #
-# Reads the db-safety stats file and returns a human-readable summary string.
-# Used by stop.sh (via _db_read_session_stats) to surface daily stats to user.
+# Returns a human-readable summary of db-safety stats for the current session.
+# Read path: SQLite KV primary (DEC-V4-KV-001) → flat-file fallback.
 #
 # Returns: "Database safety: N commands checked, N blocked, N warnings"
-# Returns empty string if stats file does not exist or has no data.
+# Returns empty string if no database operations occurred this session.
 #
 # Integration point for stop.sh:
 #   Add to stop.sh's summary block:
@@ -1437,7 +1493,22 @@ _db_session_summary() {
     local stats_file="${CLAUDE_DIR:-$HOME/.claude}/.db-safety-stats"
 
     local checked=0 blocked=0 warned=0
-    if [[ -f "$stats_file" ]]; then
+
+    # --- KV primary read (DEC-V4-KV-001) ---
+    local _kv_checked="" _kv_blocked="" _kv_warned=""
+    if type state_read &>/dev/null 2>&1; then
+        _kv_checked=$(state_read "db_safety_checked" 2>/dev/null || echo "")
+        _kv_blocked=$(state_read "db_safety_blocked" 2>/dev/null || echo "")
+        _kv_warned=$(state_read "db_safety_warned"   2>/dev/null || echo "")
+    fi
+
+    if [[ "$_kv_checked" =~ ^[0-9]+$ || "$_kv_blocked" =~ ^[0-9]+$ || "$_kv_warned" =~ ^[0-9]+$ ]]; then
+        # KV has data — use it as primary
+        [[ "$_kv_checked" =~ ^[0-9]+$ ]] && checked="$_kv_checked"
+        [[ "$_kv_blocked" =~ ^[0-9]+$ ]] && blocked="$_kv_blocked"
+        [[ "$_kv_warned"  =~ ^[0-9]+$ ]] && warned="$_kv_warned"
+    elif [[ -f "$stats_file" ]]; then
+        # --- Flat-file fallback ---
         local _v
         _v=$(grep "^checked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
         [[ "$_v" =~ ^[0-9]+$ ]] && checked="$_v"
@@ -1462,6 +1533,7 @@ _db_session_summary() {
 # _db_read_session_stats
 #
 # Returns the raw key=value stats for programmatic consumption.
+# Read path: SQLite KV primary (DEC-V4-KV-001) → flat-file fallback.
 # Callers can source the output or use grep to extract individual values.
 #
 # Integration point for stop.sh:
@@ -1471,20 +1543,31 @@ _db_session_summary() {
 _db_read_session_stats() {
     local stats_file="${CLAUDE_DIR:-$HOME/.claude}/.db-safety-stats"
 
-    if [[ ! -f "$stats_file" ]]; then
-        printf 'checked=0\nblocked=0\nwarned=0\n'
-        return 0
+    local checked=0 blocked=0 warned=0
+
+    # --- KV primary read (DEC-V4-KV-001) ---
+    local _kv_checked="" _kv_blocked="" _kv_warned=""
+    if type state_read &>/dev/null 2>&1; then
+        _kv_checked=$(state_read "db_safety_checked" 2>/dev/null || echo "")
+        _kv_blocked=$(state_read "db_safety_blocked" 2>/dev/null || echo "")
+        _kv_warned=$(state_read "db_safety_warned"   2>/dev/null || echo "")
     fi
 
-    # Return the file contents, defaulting missing keys to 0
-    local checked=0 blocked=0 warned=0
-    local _v
-    _v=$(grep "^checked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
-    [[ "$_v" =~ ^[0-9]+$ ]] && checked="$_v"
-    _v=$(grep "^blocked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
-    [[ "$_v" =~ ^[0-9]+$ ]] && blocked="$_v"
-    _v=$(grep "^warned=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
-    [[ "$_v" =~ ^[0-9]+$ ]] && warned="$_v"
+    if [[ "$_kv_checked" =~ ^[0-9]+$ || "$_kv_blocked" =~ ^[0-9]+$ || "$_kv_warned" =~ ^[0-9]+$ ]]; then
+        # KV has data — use as primary
+        [[ "$_kv_checked" =~ ^[0-9]+$ ]] && checked="$_kv_checked"
+        [[ "$_kv_blocked" =~ ^[0-9]+$ ]] && blocked="$_kv_blocked"
+        [[ "$_kv_warned"  =~ ^[0-9]+$ ]] && warned="$_kv_warned"
+    elif [[ -f "$stats_file" ]]; then
+        # --- Flat-file fallback ---
+        local _v
+        _v=$(grep "^checked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        [[ "$_v" =~ ^[0-9]+$ ]] && checked="$_v"
+        _v=$(grep "^blocked=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        [[ "$_v" =~ ^[0-9]+$ ]] && blocked="$_v"
+        _v=$(grep "^warned=" "$stats_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)
+        [[ "$_v" =~ ^[0-9]+$ ]] && warned="$_v"
+    fi
 
     printf 'checked=%d\nblocked=%d\nwarned=%d\n' "$checked" "$blocked" "$warned"
     return 0

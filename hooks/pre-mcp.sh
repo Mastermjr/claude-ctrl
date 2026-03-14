@@ -142,13 +142,24 @@ SQL=$(_mcp_extract_sql "$TOOL_INPUT_JSON")
 # suggesting the server may have unrestricted write access. A sentinel file
 # prevents repeat emissions so the advisory appears exactly once.
 declare_gate "mcp-credential-advisory" "Credential partitioning advisory (once per session)" "advisory"
+# @decision DEC-V4-KV-001
+# @title Migrate .mcp-credential-advisory-emitted sentinel to SQLite KV
+# @status accepted
+# @rationale Sentinel file persists past session-end with no cleanup.
+#   KV key mcp_credential_advisory="1" is session-scoped (deleted by session-end.sh).
+#   Dual-write: KV primary (state_update) + flat-file (touch) for fallback.
+#   Read: KV check first, then flat-file check. Either non-empty = already emitted.
+require_state
 _MCP_CRED_SENTINEL="${CLAUDE_DIR:-$HOME/.claude}/.mcp-credential-advisory-emitted"
-if [[ ! -f "$_MCP_CRED_SENTINEL" ]]; then
+_MCP_CRED_KV=$(state_read "mcp_credential_advisory" 2>/dev/null || echo "")
+if [[ -z "$_MCP_CRED_KV" && ! -f "$_MCP_CRED_SENTINEL" ]]; then
     # Extract server name from mcp__SERVER_NAME__tool_name format
     _MCP_SERVER_PART="${TOOL_NAME#mcp__}"
     _MCP_SERVER_NAME="${_MCP_SERVER_PART%%__*}"
     # Only emit if server name does NOT already have a read-only suffix
     if ! printf '%s' "$_MCP_SERVER_NAME" | grep -qiE '(_read|_readonly)$'; then
+        # Dual-write: KV primary + flat-file fallback
+        state_update "mcp_credential_advisory" "1" "pre-mcp" 2>/dev/null || true
         touch "$_MCP_CRED_SENTINEL" 2>/dev/null || true
         emit_advisory "MCP credential advisory: Consider configuring separate read-only and read-write MCP servers for credential isolation (e.g., postgres_read and postgres_write). Server: ${_MCP_SERVER_NAME}"
         _db_increment_stat "warned"
@@ -202,10 +213,24 @@ if [[ -n "$SQL" ]]; then
 fi
 
 declare_gate "mcp-rate-limit" "Rate limiting advisory (non-blocking)" "advisory"
+# @decision DEC-V4-KV-001
+# @title Migrate .mcp-rate-state to SQLite KV (mcp_rate_count, mcp_rate_start)
+# @status accepted
+# @rationale .mcp-rate-state is a session-scoped rate limiter (count|timestamp).
+#   Flat-file has no session-end cleanup — it lingers across sessions.
+#   KV keys mcp_rate_count and mcp_rate_start are deleted by session-end.sh.
+#   Dual-write: KV primary (state_update) + flat-file for backward compat.
+#   Read: KV first, flat-file fallback. require_state already called above.
 _RATE_STATE="${CLAUDE_DIR:-$HOME/.claude}/.mcp-rate-state"
 _RATE_LIMIT=100; _RATE_WINDOW=60; _NOW=$(date +%s)
 _RATE_COUNT=0; _RATE_START=0
-if [[ -f "$_RATE_STATE" ]]; then
+# KV primary read (DEC-V4-KV-001)
+_RATE_KV_COUNT=$(state_read "mcp_rate_count" 2>/dev/null || echo "")
+_RATE_KV_START=$(state_read "mcp_rate_start" 2>/dev/null || echo "")
+if [[ "$_RATE_KV_COUNT" =~ ^[0-9]+$ && "$_RATE_KV_START" =~ ^[0-9]+$ ]]; then
+    _RATE_COUNT="$_RATE_KV_COUNT"; _RATE_START="$_RATE_KV_START"
+elif [[ -f "$_RATE_STATE" ]]; then
+    # Flat-file fallback
     _RATE_DATA=$(cat "$_RATE_STATE" 2>/dev/null || echo '0|0')
     _RATE_COUNT="${_RATE_DATA%%|*}"; _RATE_START="${_RATE_DATA##*|}"
 fi
@@ -213,6 +238,9 @@ if [[ $(( _NOW - _RATE_START )) -ge $_RATE_WINDOW ]]; then
     _RATE_COUNT=0; _RATE_START=$_NOW
 fi
 _RATE_COUNT=$(( _RATE_COUNT + 1 ))
+# Dual-write: KV primary + flat-file fallback
+state_update "mcp_rate_count" "$_RATE_COUNT" "pre-mcp" 2>/dev/null || true
+state_update "mcp_rate_start" "$_RATE_START" "pre-mcp" 2>/dev/null || true
 printf '%s|%s\n' "$_RATE_COUNT" "$_RATE_START" > "$_RATE_STATE" 2>/dev/null || true
 if [[ "$_RATE_COUNT" -gt "$_RATE_LIMIT" ]]; then
     emit_advisory "MCP rate limit: ${_RATE_COUNT} DB calls in ${_RATE_WINDOW}s (limit: ${_RATE_LIMIT}). Tool: ${TOOL_NAME}"
