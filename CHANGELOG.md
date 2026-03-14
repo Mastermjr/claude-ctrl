@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `worktree-agent-a5e17e58`: Statusline Line 3 duplicate fix and Line 2 model reorder — Line 3 now shows MASTER_PLAN initiative (dim) instead of duplicating session label, Line 2 reordered to `[ctx bar] | tokens | lifetime | cache hit | model` placing model at end (DEC-STATUSLINE-L2-MODEL-END-001)
 - `fix/test-failures`: Resolve all 4 test failures + T05 pre-existing — db-guardian-lib.sh exempted from settings sync check (library, not hook), three shellcheck fixes in test files (SC2059, SC2004, SC2221/SC2222), T05 updated from removed dual-write contract to SQLite-only; test suite 372/372 pass
 
 ### Changed
