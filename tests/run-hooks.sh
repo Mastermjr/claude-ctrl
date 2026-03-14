@@ -1292,25 +1292,25 @@ SL_INPUT=$(jq -n --arg dir "$SL_TEST_DIR" \
       cost:{total_cost_usd:0.42,total_duration_ms:300000},
       context_window:{used_percentage:45}}')
 SL_OUTPUT=$(echo "$SL_INPUT" | CLAUDE_SESSION_ID="$SL_SESSION_ID" bash "$SCRIPT_DIR/../scripts/statusline.sh" 2>/dev/null) || true
-if echo "$SL_OUTPUT" | grep -q "dirty"; then
-    pass "statusline.sh — shows dirty count from cache"
+if echo "$SL_OUTPUT" | grep -q "uncommitted"; then
+    pass "statusline.sh — shows uncommitted count from cache"
 else
-    fail "statusline.sh — dirty count" "expected 'dirty' in output: $SL_OUTPUT"
+    fail "statusline.sh — uncommitted count" "expected 'uncommitted' in output: $SL_OUTPUT"
 fi
-if echo "$SL_OUTPUT" | grep -q "wt:"; then
+if echo "$SL_OUTPUT" | grep -q "worktrees"; then
     pass "statusline.sh — shows worktree count from cache"
 else
-    fail "statusline.sh — worktree count" "expected 'wt:' in output: $SL_OUTPUT"
+    fail "statusline.sh — worktree count" "expected 'worktrees' in output: $SL_OUTPUT"
 fi
 if echo "$SL_OUTPUT" | grep -q "45%"; then
     pass "statusline.sh — shows context window percentage on line 2"
 else
     fail "statusline.sh — context bar" "expected '45%' in output: $SL_OUTPUT"
 fi
-if echo "$SL_OUTPUT" | grep -qF '~$0.42'; then
-    pass "statusline.sh — shows cost on line 2"
+if echo "$SL_OUTPUT" | grep -q "tks"; then
+    pass "statusline.sh — shows token count on line 2"
 else
-    fail "statusline.sh — cost display" "expected '~\$0.42' in output: $SL_OUTPUT"
+    fail "statusline.sh — token display" "expected 'tks' in output: $SL_OUTPUT"
 fi
 safe_cleanup "$SL_TEST_DIR" "$SCRIPT_DIR"
 echo ""
