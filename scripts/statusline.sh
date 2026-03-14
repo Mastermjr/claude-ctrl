@@ -930,12 +930,22 @@ fi
 duration_display=$(printf '\033[2msession %s\033[0m' "$(format_duration "$duration_ms")")
 
 # ---------------------------------------------------------------------------
-# Build LINE 2 segments: model+ctx bar + tokens + lifetime tokens + cache hit
+# Build LINE 2 segments: ctx bar + tokens + lifetime tokens + cache hit + model
+#
+# @decision DEC-STATUSLINE-L2-MODEL-END-001
+# @title Move model name to end of Line 2
+# @status accepted
+# @rationale The context bar is the primary resource metric users scan first; the model
+# name is secondary context. Placing the ctx bar at position 0 and model at position 4
+# (last) follows a "primary data → label" pattern: you see the resource usage before
+# the model causing it. This also lets the model name drop cleanly at narrow widths if
+# needed in the future, and matches how the model appears in Line 4 (session context).
+# Visual order: [ctx bar] N% │ NK tks │ ∑NK tks │ cache hit N% │ model
 # ---------------------------------------------------------------------------
 
-# L2.0: model [ctx bar] N% (priority 1 — model dim, ctx bar normal, combined)
+# L2.0: [ctx bar] N% (priority 1 — always kept, first position)
 _ctx_bar=$(build_context_bar "$ctx_pct" "$baseline_pct")
-_l2_0=$(printf '\033[2m%s\033[0m %s' "$model" "$_ctx_bar")
+_l2_0="$_ctx_bar"
 ansi_visible_width "$_l2_0"; _l2w0=$_AVW
 
 # L2.1: NK tks(+subs SK tks) (priority 2)
@@ -950,6 +960,10 @@ ansi_visible_width "$_l2_2"; _l2w2=$_AVW
 _l2_3="$cache_display"
 ansi_visible_width "$_l2_3"; _l2w3=$_AVW
 
+# L2.4: model name dim (priority 1 — always kept, last position)
+_l2_4=$(printf '\033[2m%s\033[0m' "$model")
+ansi_visible_width "$_l2_4"; _l2w4=$_AVW
+
 # Responsive drop loop for Line 2
 _l2d0=0; _l2d1=0; _l2d2=0; _l2d3=0
 
@@ -959,6 +973,8 @@ _compute_l2_width() {
   [[ $_l2d1 -eq 0 && -n "$_l2_1" ]] && total=$(( total + _l2w1 )) && (( seg_count++ )) || true
   [[ $_l2d2 -eq 0 && -n "$_l2_2" ]] && total=$(( total + _l2w2 )) && (( seg_count++ )) || true
   [[ $_l2d3 -eq 0 && -n "$_l2_3" ]] && total=$(( total + _l2w3 )) && (( seg_count++ )) || true
+  # _l2_4 (model) always shown; include in width calculation
+  [[ -n "$_l2_4" ]] && total=$(( total + _l2w4 )) && (( seg_count++ )) || true
   (( seg_count > 1 )) && total=$(( total + (seg_count - 1) * 3 )) || true
   _L2_TOTAL=$total
 }
@@ -966,12 +982,12 @@ _compute_l2_width() {
 _L2_TOTAL=0
 _compute_l2_width
 # Drop cache hit first (priority 4), then grand total (3), then tokens (2)
-# model+ctx bar (priority 1) never drops
+# ctx bar (priority 1) and model name (priority 1) never drop
 if (( _L2_TOTAL > term_w && _l2w3 > 0 )); then _l2d3=1; _compute_l2_width; fi
 if (( _L2_TOTAL > term_w && _l2w2 > 0 )); then _l2d2=1; _compute_l2_width; fi
 if (( _L2_TOTAL > term_w && _l2w1 > 0 )); then _l2d1=1; _compute_l2_width; fi
 
-# Assemble Line 2: model [ctx bar] │ tokens │ ∑lifetime │ cache hit
+# Assemble Line 2: [ctx bar] │ tokens │ ∑lifetime │ cache hit │ model
 line2=""
 _l2_first=1
 _append_l2_seg() {
@@ -988,23 +1004,25 @@ _append_l2_seg() {
 [[ $_l2d1 -eq 0 ]] && _append_l2_seg "$_l2_1"
 [[ $_l2d2 -eq 0 ]] && _append_l2_seg "$_l2_2"
 [[ $_l2d3 -eq 0 ]] && _append_l2_seg "$_l2_3"
+_append_l2_seg "$_l2_4"  # model name — always shown, last position
 
 # ---------------------------------------------------------------------------
 # Build LINE 3 segments: session meta (initiative + todos + duration)
 # 3 segments only — lifetime cost moved to Line 2 as dim parenthetical on ∑ segment.
 # Priority table (lower = higher priority):
-#   1 = initiative (from cache_session_label field, dim)  (always kept — last to drop)
-#   2 = todos: Np Ng                                       (split project/global)
-#   3 = session Nh Nm                                      (relabeled from "duration")
+#   1 = initiative (from cache_initiative field, dim)  (always kept — last to drop)
+#   2 = todos: Np Ng                                    (split project/global)
+#   3 = session Nh Nm                                   (relabeled from "duration")
 # ---------------------------------------------------------------------------
 
-# L3.0: initiative (priority 1 — from cache_session_label, dim rendering)
-# Use the session_label field (what Line 4 shows as bold cyan), but here dim.
-# If session_label is empty, skip this segment (initiative is shown on Line 4).
+# L3.0: initiative (priority 1 — from cache_initiative, dim rendering)
+# Use the initiative name (what Line 4 shows as the bold cyan banner), but here dim.
+# Distinct from cache_session_label (which Line 4 uses for agent/worktree labels).
+# If initiative is empty, skip this segment.
 _l3_0=""
 _l3w0=0
-if [[ -n "$cache_session_label" ]]; then
-  _l3_0=$(printf '\033[2m%s\033[0m' "$cache_session_label")
+if [[ -n "$cache_initiative" ]]; then
+  _l3_0=$(printf '\033[2m%s\033[0m' "$cache_initiative")
   ansi_visible_width "$_l3_0"; _l3w0=$_AVW
 fi
 
@@ -1081,7 +1099,7 @@ _append_l3_seg() {
 # ---------------------------------------------------------------------------
 # Output: 4-line layout — each line independently truncated to terminal width.
 #   Line 1 (top):     repo      — workspace, N uncommitted +N/-N lines, N worktrees, agents
-#   Line 2:           model     — model [ctx bar], tokens, ∑lifetime (API equiv: ~$N), cache hit
+#   Line 2:           model     — [ctx bar], tokens, ∑lifetime (API equiv: ~$N), cache hit, model
 #   Line 3:           session   — initiative (dim), todos, session duration
 #   Line 4 (bottom):  highlight — session_label or initiative banner (conditional, bold cyan)
 #
@@ -1100,7 +1118,7 @@ _append_l3_seg() {
 truncate_ansi "$line1" "$term_w"
 printf '\n'
 
-# Line 2: model & resources (model+ctx bar + tokens + ∑lifetime + cache hit)
+# Line 2: model & resources (ctx bar + tokens + ∑lifetime + cache hit + model)
 truncate_ansi "$line2" "$term_w"
 printf '\n'
 

@@ -781,8 +781,8 @@ test_tokens_high_shows_yellow() {
 
 test_tokens_segment_position() {
     run_test
-    # New Line 2 order: model [ctx bar] | tokens | ∑lifetime | cache hit
-    # Tokens should appear AFTER the context bar (which is after the model name).
+    # New Line 2 order: [ctx bar] | tokens | ∑lifetime | cache hit | model
+    # Tokens should appear AFTER the context bar (position 0).
     # Cost is removed from Line 2 in the reorg layout.
     local tmpdir
     tmpdir=$(mktemp -d)
@@ -806,6 +806,59 @@ test_tokens_segment_position() {
     else
         fail_test "Line 2 segment order wrong (reorg: expected bar < tks < ∑lifetime)" \
             "line2=$line2 | positions: bar=$pos_bar tks=$pos_tokens lifetime=$pos_lifetime"
+    fi
+}
+
+test_model_at_end_of_line2() {
+    # DEC-STATUSLINE-L2-MODEL-END-001: model name appears at end of Line 2 (after all metrics)
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    make_lifetime_token_cache "$tmpdir" 500000 0
+    local json='{"model":{"display_name":"Opus 4.6"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"used_percentage":40,"total_input_tokens":100000,"total_output_tokens":45000}}'
+    local line2
+    local output
+    output=$(run_sl_columns "$json" 250 "$tmpdir")
+    line2=$(extract_line "$output" 2 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    # Model should appear AFTER the context bar and after tokens
+    local pos_bar pos_tokens pos_model
+    pos_bar=$(printf '%s' "$line2" | { grep -bo '\[' || true; } | head -1 | cut -d: -f1)
+    pos_tokens=$(printf '%s' "$line2" | { grep -bo 'K tks' || true; } | head -1 | cut -d: -f1)
+    pos_model=$(printf '%s' "$line2" | { grep -bo 'Opus 4.6' || true; } | head -1 | cut -d: -f1)
+
+    if [[ -n "$pos_bar" && -n "$pos_tokens" && -n "$pos_model" ]] \
+        && (( pos_bar < pos_model )) \
+        && (( pos_tokens < pos_model )); then
+        pass_test "Line 2 layout: model appears at end (after ctx bar and tokens)"
+    else
+        fail_test "Line 2 model not at end (expected bar < tks < model)" \
+            "line2=$line2 | positions: bar=$pos_bar tks=$pos_tokens model=$pos_model"
+    fi
+}
+
+test_model_at_end_never_drops() {
+    # Model is priority 1 on Line 2 — it must appear even at narrow widths where
+    # cache hit and ∑lifetime are dropped.
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    make_lifetime_token_cache "$tmpdir" 500000 0
+    local long_cache_display_json
+    # Use a large token count and cache hit to force drops at narrow width
+    long_cache_display_json='{"model":{"display_name":"Opus 4.6"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{"used_percentage":40,"total_input_tokens":100000,"total_output_tokens":45000,"current_usage":{"input_tokens":1000,"cache_read_input_tokens":7400,"cache_creation_input_tokens":1600}}}'
+    local output
+    output=$(run_sl_columns "$long_cache_display_json" 80 "$tmpdir")
+    local line2
+    line2=$(extract_line "$output" 2 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    # Model should still appear even when other segments are dropped
+    if [[ "$line2" == *"Opus 4.6"* ]]; then
+        pass_test "Line 2 model name always present (priority 1, never drops)"
+    else
+        fail_test "Line 2 model name dropped at COLUMNS=80 (should never drop)" "line2=$line2"
     fi
 }
 
@@ -1160,6 +1213,62 @@ test_banner_is_last_line() {
         pass_test "Banner is last line (Line 4); project context present on Line 1"
     else
         fail_test "Banner is not last line or project context missing" "line0=$line0 | line1=$line1"
+    fi
+}
+
+test_line3_shows_initiative_not_session_label() {
+    # Bug fix: Line 3 (L3.0) must show cache_initiative (dim), NOT cache_session_label.
+    # cache_session_label is what Line 4 shows as bold cyan — duplicating it on Line 3
+    # produces identical text on two lines. Line 3 should show the initiative name (dim)
+    # regardless of whether a session_label is also set.
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # Set both initiative AND session_label — Line 3 must use initiative, not session_label
+    printf '{"dirty":0,"worktrees":0,"agents_active":0,"agents_types":"","todo_project":0,"todo_global":0,"lifetime_cost":0,"initiative":"My Initiative","phase":"","active_initiatives":1,"total_phases":0,"session_label":"feature/my-branch"}' \
+        > "$tmpdir/.claude/.statusline-cache-${CLAUDE_SESSION_ID}"
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    local line3
+    line3=$(extract_line "$output" 3 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    # Line 3 should contain "My Initiative" (dim) — NOT "feature/my-branch"
+    if [[ "$line3" == *"My Initiative"* ]] && [[ "$line3" != *"feature/my-branch"* ]]; then
+        pass_test "Line 3 shows initiative (dim) not session_label (fixes duplicate-with-Line-4 bug)"
+    else
+        fail_test "Line 3 showing wrong content (expected 'My Initiative', not 'feature/my-branch')" \
+            "line3=$line3"
+    fi
+}
+
+test_line3_initiative_absent_when_no_initiative() {
+    # When initiative is empty (no plan), Line 3 L3.0 segment is skipped entirely.
+    # session_label being set should NOT cause Line 3 to show a dim label.
+    run_test
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    mkdir -p "$tmpdir/.claude"
+    # Only session_label set, no initiative
+    printf '{"dirty":0,"worktrees":0,"agents_active":0,"agents_types":"","todo_project":0,"todo_global":0,"lifetime_cost":0,"initiative":"","session_label":"feature/my-branch"}' \
+        > "$tmpdir/.claude/.statusline-cache-${CLAUDE_SESSION_ID}"
+
+    local json='{"model":{"display_name":"Claude"},"workspace":{"current_dir":"'"$tmpdir"'"},"cost":{},"context_window":{}}'
+    local output
+    output=$(run_statusline "$json" "$tmpdir")
+    local line3
+    line3=$(extract_line "$output" 3 | strip_ansi)
+    rm -rf "$tmpdir"
+
+    # Line 3 must NOT contain the session_label text — only initiative goes on Line 3
+    if [[ "$line3" != *"feature/my-branch"* ]]; then
+        pass_test "Line 3 initiative segment absent when no initiative (session_label does not bleed to Line 3)"
+    else
+        fail_test "Line 3 showing session_label text when no initiative (should be absent)" \
+            "line3=$line3"
     fi
 }
 
@@ -1888,6 +1997,8 @@ test_tokens_m_notation
 test_tokens_zero_shows_dim
 test_tokens_high_shows_yellow
 test_tokens_segment_position
+test_model_at_end_of_line2
+test_model_at_end_never_drops
 
 echo ""
 echo "--- Todo split display ---"
@@ -1912,6 +2023,8 @@ test_banner_shows_initiative_without_phase
 test_banner_shows_phase_count
 test_banner_shows_multi_initiative_suffix
 test_banner_is_last_line
+test_line3_shows_initiative_not_session_label
+test_line3_initiative_absent_when_no_initiative
 
 echo ""
 echo "--- Lifetime token display ---"
