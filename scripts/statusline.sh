@@ -831,10 +831,11 @@ _append_p1_seg() {
 #
 # LINE 2 (model & resources): model+ctx bar + tokens + lifetime + cache hit
 # Priority table (lower number = higher priority, dropped last):
-#   1 = model [ctx bar] N%                    (always kept — model name dim, bar normal)
+#   1 = [ctx bar] N%                          (always kept — never drops)
 #   2 = NK tks(+subs S tks)                   (token consumption)
-#   3 = ∑NK tks                               (lifetime tokens, adjacent to session)
-#   4 = cache hit N%                          (drops first on this line)
+#   3 = ∑NK tks (API equiv: ~$N)              (lifetime tokens + cost)
+#   4 = cache hit N%                          (drops second)
+#   5 = model name                            (drops FIRST — user knows their model)
 #
 # LINE 3 (session meta): initiative + todos + duration (3 segments)
 # Priority table:
@@ -960,12 +961,19 @@ ansi_visible_width "$_l2_2"; _l2w2=$_AVW
 _l2_3="$cache_display"
 ansi_visible_width "$_l2_3"; _l2w3=$_AVW
 
-# L2.4: model name dim (priority 1 — always kept, last position)
+# L2.4: model name dim (priority 5 — drops FIRST, last visual position)
+# @decision DEC-STATUSLINE-MODEL-PRIORITY-001
+# @title Model name is lowest priority on Line 2 — drops first at narrow widths
+# @status accepted
+# @rationale The user knows what model they're using. Lifetime tokens, cache hit, and
+# session tokens are higher-value information that should survive width pressure.
+# Model name is pure context — useful when space allows, expendable when tight.
+# Drop order: model (5) → cache hit (4) → ∑lifetime (3) → tokens (2). Ctx bar never drops.
 _l2_4=$(printf '\033[2m%s\033[0m' "$model")
 ansi_visible_width "$_l2_4"; _l2w4=$_AVW
 
 # Responsive drop loop for Line 2
-_l2d0=0; _l2d1=0; _l2d2=0; _l2d3=0
+_l2d0=0; _l2d1=0; _l2d2=0; _l2d3=0; _l2d4=0
 
 _compute_l2_width() {
   local total=0 seg_count=0
@@ -973,16 +981,16 @@ _compute_l2_width() {
   [[ $_l2d1 -eq 0 && -n "$_l2_1" ]] && total=$(( total + _l2w1 )) && (( seg_count++ )) || true
   [[ $_l2d2 -eq 0 && -n "$_l2_2" ]] && total=$(( total + _l2w2 )) && (( seg_count++ )) || true
   [[ $_l2d3 -eq 0 && -n "$_l2_3" ]] && total=$(( total + _l2w3 )) && (( seg_count++ )) || true
-  # _l2_4 (model) always shown; include in width calculation
-  [[ -n "$_l2_4" ]] && total=$(( total + _l2w4 )) && (( seg_count++ )) || true
+  [[ $_l2d4 -eq 0 && -n "$_l2_4" ]] && total=$(( total + _l2w4 )) && (( seg_count++ )) || true
   (( seg_count > 1 )) && total=$(( total + (seg_count - 1) * 3 )) || true
   _L2_TOTAL=$total
 }
 
 _L2_TOTAL=0
 _compute_l2_width
-# Drop cache hit first (priority 4), then grand total (3), then tokens (2)
-# ctx bar (priority 1) and model name (priority 1) never drop
+# Drop order: model (5) → cache hit (4) → ∑lifetime (3) → tokens (2)
+# ctx bar (priority 1) never drops
+if (( _L2_TOTAL > term_w && _l2w4 > 0 )); then _l2d4=1; _compute_l2_width; fi
 if (( _L2_TOTAL > term_w && _l2w3 > 0 )); then _l2d3=1; _compute_l2_width; fi
 if (( _L2_TOTAL > term_w && _l2w2 > 0 )); then _l2d2=1; _compute_l2_width; fi
 if (( _L2_TOTAL > term_w && _l2w1 > 0 )); then _l2d1=1; _compute_l2_width; fi
@@ -1004,7 +1012,7 @@ _append_l2_seg() {
 [[ $_l2d1 -eq 0 ]] && _append_l2_seg "$_l2_1"
 [[ $_l2d2 -eq 0 ]] && _append_l2_seg "$_l2_2"
 [[ $_l2d3 -eq 0 ]] && _append_l2_seg "$_l2_3"
-_append_l2_seg "$_l2_4"  # model name — always shown, last position
+[[ $_l2d4 -eq 0 ]] && _append_l2_seg "$_l2_4"
 
 # ---------------------------------------------------------------------------
 # Build LINE 3 segments: session meta (initiative + todos + duration)
