@@ -87,12 +87,11 @@ State bridges the gap — hooks communicate with each other through SQLite and s
 │   ├── ci-lib.sh             # Shared library — CI detection, workflow helpers
 │   ├── log.sh                # Shared library — JSON I/O, stdin caching, path utilities
 │   └── source-lib.sh         # Shared library — bootstrapper (log.sh + core-lib.sh) + require_*() lazy loaders
-├── agents/                   # 5 agent prompt definitions + shared-protocols.md library
+├── agents/                   # 4 agent prompt definitions + shared-protocols.md library
 │   ├── planner.md            # Planner agent — MASTER_PLAN.md creation
 │   ├── implementer.md        # Implementer agent — test-first development
 │   ├── tester.md             # Tester agent — e2e verification
 │   ├── guardian.md           # Guardian agent — git operations
-│   ├── governor.md           # Governor agent — initiative health evaluation
 │   └── shared-protocols.md  # Shared library — injected into all agents at dispatch time
 ├── skills/                   # 11 skill directories
 │   ├── bazaar/               # Community discussion aggregator
@@ -183,8 +182,7 @@ State bridges the gap — hooks communicate with each other through SQLite and s
 │ SubagentStart: subagent-start.sh                                    │
 │ SubagentStop: check-planner.sh, check-implementer.sh,              │
 │              check-tester.sh, check-guardian.sh,                    │
-│              check-governor.sh, check-explore.sh,                   │
-│              check-general-purpose.sh                               │
+│              check-explore.sh, check-general-purpose.sh             │
 │ Stop: stop.sh (decision audit + session summary + next steps)       │
 │ SessionEnd: session-end.sh                                          │
 │ Notification: notify.sh                                             │
@@ -356,7 +354,6 @@ with the `additionalContext` injected. `lint.sh` uses this for auto-fix loops.
 | **SubagentStop** | `implementer` | When implementer completes | check-implementer.sh |
 | **SubagentStop** | `tester` | When tester completes | check-tester.sh |
 | **SubagentStop** | `guardian` | When guardian completes | check-guardian.sh |
-| **SubagentStop** | `governor` | When governor completes | check-governor.sh (advisory only) |
 | **SubagentStop** | `Explore\|explore` | When Explore agent completes | check-explore.sh |
 | **SubagentStop** | `general-purpose` | When general-purpose agent completes | check-general-purpose.sh |
 | **Stop** | (all) | After Claude finishes responding | stop.sh (consolidates surface, session-summary, forward-motion) |
@@ -779,7 +776,6 @@ add ongoing health evaluation and database safety as independent enforcement lay
 | Implementer | claude-sonnet-4-6 | 85 | Tests + source code in worktree | check-implementer.sh |
 | Tester | claude-sonnet-4-6 | 40 | proof state = verified + verification report | check-tester.sh |
 | Guardian | claude-opus-4-6 | 30 | git commit + merge + cleanup | check-guardian.sh |
-| Governor | claude-opus-4-6 | 25 | Initiative health pulse / full evaluation | check-governor.sh (advisory) |
 | DB Guardian | claude-opus-4-6 | 30 | Database operation safety approval | (dispatched on demand) |
 
 ### Planner Agent (agents/planner.md)
