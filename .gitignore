@@ -92,6 +92,7 @@ state/
 .plan-state-cache
 hooks/.claude/
 .lint-cooldown-*
+.lint-advisories/
 
 # Session lifecycle (regenerated per session, never commit)
 .prompt-count-*
@@ -104,6 +105,7 @@ hooks/.claude/
 .active-worktree-path*
 .proof-status
 .proof-status-*
+.proof-epoch
 .cwd-recovery-needed
 .session-cost-history
 .test-status
@@ -186,6 +188,7 @@ research_output/
 
 CLAUDE.local.md
 settings.local.json
+.credentials.json
 
 # ═══════════════════════════════════════════════════════════
 # OS / EDITOR (noise)
